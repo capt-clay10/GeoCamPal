@@ -1,0 +1,12 @@
+customtkinter
+Pillow
+opencv-python
+numpy
+pandas
+rasterio
+geopandas
+shapely
+GDAL
+utm
+matplotlib
+tifffile
