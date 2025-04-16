@@ -7,8 +7,9 @@ import os
 import tkinter as tk
 import customtkinter as ctk
 from PIL import Image
+import subprocess
 
-# 1) Resource helper for pyInstaller or direct script
+# 1) Resource helper for PyInstaller or direct script
 def resource_path(relative_path: str) -> str:
     try:
         base_path = sys._MEIPASS  # If running in a PyInstaller .exe
@@ -50,56 +51,57 @@ def show_splash(duration_ms=1000):
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("green")
 
-# 4) The main launcher window function, one-shot
+# 4) The main launcher window function
 def launcher_window():
     """
-    Creates the main launcher window for GeoCamPal. 
-    It destroys itself after a user picks a tool, so we return the selection.
-    Returns: selection dict, e.g. {"tool": "hsv", "mode": "ml"}
+    Creates the main launcher window. Instead of embedding the submodule windows
+    into the launcher (which causes conflicts since the submodules expect to be the CTk root),
+    we launch them as separate processes. This lets the launcher remain open.
     """
+    # (Optional) record selection if needed.
     selection = {"tool": None, "mode": None}
 
     def pick_pixel_to_gcp():
         selection["tool"] = "pixel_to_gcp"
-        dialog.destroy()  # destroy (one-shot), not .quit()
-
+        subprocess.Popen([sys.executable, resource_path("pixel_to_gcp.py")])
+    
     def pick_hsv_individual():
         selection["tool"] = "hsv"
         selection["mode"] = "individual"
-        dialog.destroy()
-
+        subprocess.Popen([sys.executable, resource_path("hsv_mask.py"), "individual"])
+    
     def pick_hsv_ml():
         selection["tool"] = "hsv"
         selection["mode"] = "ml"
-        dialog.destroy()
-
+        subprocess.Popen([sys.executable, resource_path("hsv_mask.py"), "ml"])
+    
     def pick_hsv_batch():
         selection["tool"] = "hsv"
         selection["mode"] = "batch"
-        dialog.destroy()
-
+        subprocess.Popen([sys.executable, resource_path("hsv_mask.py"), "batch"])
+    
     def pick_dem():
         selection["tool"] = "dem"
-        dialog.destroy()
-
+        subprocess.Popen([sys.executable, resource_path("dem_generator.py")])
+    
     def pick_georef():
         selection["tool"] = "georef"
-        dialog.destroy()
-
+        subprocess.Popen([sys.executable, resource_path("georef.py")])
+    
     def pick_homography():
         selection["tool"] = "homography"
-        dialog.destroy()
-
+        subprocess.Popen([sys.executable, resource_path("homography.py")])
+    
     def pick_timestack():
         selection["tool"] = "timestack"
         selection["mode"] = "raw"
-        dialog.destroy()
-
+        subprocess.Popen([sys.executable, resource_path("raw_timestacker.py"), "raw"])
+    
     def pick_wave_run():
         selection["tool"] = "timestack"
         selection["mode"] = "wave"
-        dialog.destroy()
-
+        subprocess.Popen([sys.executable, resource_path("wave_runup.py"), "wave"])
+    
     def on_close():
         """Close everything and exit immediately."""
         dialog.destroy()
@@ -107,7 +109,7 @@ def launcher_window():
 
     # Build the launcher GUI
     dialog = ctk.CTk()
-    dialog.title("GeoCamPal Launcher")
+    dialog.title("GeoCamPal")
     dialog.geometry("600x600")
     dialog.resizable(False, False)
     dialog.protocol("WM_DELETE_WINDOW", on_close)
@@ -115,7 +117,6 @@ def launcher_window():
     main_frame = ctk.CTkFrame(dialog)
     main_frame.pack(padx=20, pady=20, fill="both", expand=True)
     dialog.iconbitmap(resource_path("launch_logo.ico"))
-
 
     # (A) Logo
     try:
@@ -144,7 +145,7 @@ def launcher_window():
     ctk.CTkButton(geo_frame, text="Homography", command=pick_homography).pack(side="left", padx=5)
     ctk.CTkButton(geo_frame, text="Georef Images", command=pick_georef).pack(side="left", padx=5)
 
-    # (D) HSV Tool
+    # (D) Feature Identifier tool (HSV)
     hsv_label = ctk.CTkLabel(main_frame, text="Feature Identifier tool", font=("Arial", 14, "bold"))
     hsv_label.pack(anchor="w", pady=(10, 0))
 
@@ -177,8 +178,8 @@ def launcher_window():
         font=("Arial", 10)
     )
     footer_label.pack(side="left", anchor="sw")
+    
     dialog.mainloop()
-
     return selection
 
 # --------------------------------------------------------------------
@@ -188,47 +189,5 @@ if __name__ == "__main__":
     # 1) Show the splash screen (optional)
     show_splash(duration_ms=1000)
 
-    # 2) Launch the one-shot launcher
-    selection = launcher_window()  # returns after user picks a tool or closes
-
-    # 3) Only after the launcher is fully destroyed do we import and run submodules
-    from georef import GeoReferenceModule
-    from homography import CreateHomographyMatrixWindow
-    from pixel_to_gcp import PixelToGCPWindow
-    from hsv_mask import HSVMaskTool
-    from dem_generator import CreateDemWindow
-    from raw_timestacker import TimestackTool
-    from wave_runup import WaveRunUpCalculator
-
-
-    if selection["tool"] is not None:
-        chosen_tool = selection["tool"]
-        mode = selection["mode"]  # might be None
-
-        app = None
-        if chosen_tool == "pixel_to_gcp":
-            app = PixelToGCPWindow()
-        elif chosen_tool == "homography":
-            app = CreateHomographyMatrixWindow()
-        elif chosen_tool == "georef":
-            app = GeoReferenceModule()
-        elif chosen_tool == "hsv":
-
-            app = HSVMaskTool(mode=mode)
-        elif chosen_tool == "dem":
-            app = CreateDemWindow()
-        elif chosen_tool == "timestack":
-            if mode == "raw":
-                app = TimestackTool()
-            elif mode == "wave":
-                app = WaveRunUpCalculator()
-            else:
-                app = TimestackTool()
-
-
-        if app is not None:
-            app.mainloop()
-        else:
-            print("No matching tool was found. Exiting.")
-    else:
-        print("No tool selected. Exiting.")
+    # 2) Launch the launcher window.
+    launcher_window()

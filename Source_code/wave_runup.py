@@ -10,6 +10,8 @@ import datetime
 import csv
 import re
 import sys
+ctk.set_appearance_mode("Dark")
+ctk.set_default_color_theme("green")
 
 def resource_path(relative_path: str) -> str:
     try:
@@ -553,3 +555,6 @@ class WaveRunUpCalculator(ctk.CTk):
         self.canvas_plot.draw()
         messagebox.showinfo("Batch Process", "Batch processing completed.")
 
+if __name__ == "__main__":
+    app = WaveRunUpCalculator()
+    app.mainloop()

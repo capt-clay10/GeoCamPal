@@ -9,6 +9,8 @@ import random
 import sys
 import time
 import threading
+ctk.set_appearance_mode("Dark")
+ctk.set_default_color_theme("green")
 
 
 # --- StdoutRedirector class for redirecting console output into the GUI ---
@@ -36,7 +38,7 @@ class CreateHomographyMatrixWindow(ctk.CTk):
     def __init__(self, master=None):
         super().__init__(master)
         self.title("Create Homography Matrix")
-        self.geometry("850x700")
+        self.geometry("850x800")
         
         try:
             self.iconbitmap(resource_path("launch_logo.ico"))
@@ -515,3 +517,6 @@ class CreateHomographyMatrixWindow(ctk.CTk):
         messagebox.showinfo("Success", "Best homography matrix accepted and exported successfully.")
 
 
+if __name__ == "__main__":
+    app = CreateHomographyMatrixWindow()
+    app.mainloop()

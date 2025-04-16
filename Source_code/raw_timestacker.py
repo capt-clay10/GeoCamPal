@@ -12,7 +12,9 @@ import sys
 import tifffile
 import customtkinter as ctk
 import rasterio
-
+import customtkinter as ctk
+ctk.set_appearance_mode("Dark")
+ctk.set_default_color_theme("green")
 
 # --- StdoutRedirector class for redirecting console output into the GUI ---
 class StdoutRedirector:
@@ -24,9 +26,7 @@ class StdoutRedirector:
         self.text_widget.see(tk.END)  # auto-scroll
 
     def flush(self):
-        pass  # For compatibility with Python's IO system.
-
-
+        pass  # For compatibility.
 
 # =================== ROI Selector (ScrollZoomBBoxSelector) ===================
 class ScrollZoomBBoxSelector(tk.Frame):
@@ -38,7 +38,6 @@ class ScrollZoomBBoxSelector(tk.Frame):
         top_frame = tk.Frame(self)
         top_frame.pack(fill="both", expand=True)
 
-        # Create Canvas with scrollbars
         self.canvas = tk.Canvas(top_frame, cursor="cross", highlightthickness=0)
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
@@ -71,7 +70,6 @@ class ScrollZoomBBoxSelector(tk.Frame):
         button_frame = tk.Frame(self)
         button_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=5, pady=5)
 
-        # Add buttons to the bottom frame
         self.load_button = tk.Button(button_frame, text="Load Image", command=self.load_image)
         self.load_button.pack(side=tk.LEFT, padx=5)
 
@@ -168,7 +166,6 @@ class ScrollZoomBBoxSelector(tk.Frame):
         self.master.focus_set()
         self.master.destroy()
 
-
 # =================== Timestack Generation Function ===================
 def generate_calibrated_timestack(image_files, bbox, resolution_x_m, output_path, progress_callback=None):
     """
@@ -208,15 +205,14 @@ def generate_calibrated_timestack(image_files, bbox, resolution_x_m, output_path
         timestack_lines.append(line_avg)
 
         if progress_callback:
-            progress_callback((i+1)/total)
+            progress_callback(i+1, total)
 
     pseudo_timestack = np.stack(timestack_lines, axis=0)
     # Output image width equals ROI width
     desired_width = w
-    original_width = pseudo_timestack.shape[1]
     pil_image = Image.fromarray(pseudo_timestack)
     
-    if original_width != desired_width:
+    if pil_image.width != desired_width:
         resized_image = pil_image.resize((desired_width, pseudo_timestack.shape[0]), resample=Image.NEAREST)
     else:
         resized_image = pil_image
@@ -228,7 +224,7 @@ def generate_calibrated_timestack(image_files, bbox, resolution_x_m, output_path
     resized_image.save(
         output_path,
         format="PNG",
-        pnginfo=pnginfo,  # Directly pass the dictionary
+        pnginfo=pnginfo,
     )
 
     return output_path
@@ -237,7 +233,7 @@ def resource_path(relative_path: str) -> str:
     try:
         base_path = sys._MEIPASS  # If running in a PyInstaller .exe
     except Exception:
-        base_path = os.path.dirname(__file__)  # Running directly from source
+        base_path = os.path.dirname(__file__)  # Running from source
     return os.path.join(base_path, relative_path)
 
 # =================== TimestackTool GUI ===================
@@ -260,7 +256,7 @@ class TimestackTool(ctk.CTk):
         self.bbox_text = tk.StringVar()
         self.default_resolution = 0.25  # fallback resolution in m/pixel
         
-        # New resolution row variables
+        # Resolution row variables
         self.identified_res_var = tk.StringVar(value="Not identified")
         self.add_resolution_manual = tk.BooleanVar(value=False)
         
@@ -270,59 +266,68 @@ class TimestackTool(ctk.CTk):
         # ------------------ Top Panel: Image Display ------------------
         self.top_frame = ctk.CTkFrame(self, height=400)
         self.top_frame.pack(fill="both", expand=True, padx=10, pady=10)
-        self.image_label = ctk.CTkLabel(self.top_frame, text="Time-stack image will appear here")
+        self.image_label = ctk.CTkLabel(self.top_frame, text="")
         self.image_label.pack(padx=10, pady=10)
         
         # ------------------ Bottom Panel: Controls ------------------
         self.bottom_frame = ctk.CTkFrame(self, height=250)
         self.bottom_frame.pack(fill="x", padx=10, pady=10)
         
-        # Row 0: Input folder and ROI (bbox) selection
-        self.browse_input_button = ctk.CTkButton(self.bottom_frame, text="Browse Input Folder", command=self.browse_input_folder)
+        # --- Create Separate Panels for Each Configuration Group ---
+        # Input & ROI Panel
+        self.input_panel = ctk.CTkFrame(self.bottom_frame)
+        self.input_panel.pack(fill="x", padx=5, pady=5)
+        self.browse_input_button = ctk.CTkButton(self.input_panel, text="Browse Input Folder", command=self.browse_input_folder)
         self.browse_input_button.grid(row=0, column=0, padx=5, pady=5, sticky="w")
-        self.input_folder_label = ctk.CTkLabel(self.bottom_frame, textvariable=self.input_folder)
+        self.input_folder_label = ctk.CTkLabel(self.input_panel, textvariable=self.input_folder)
         self.input_folder_label.grid(row=0, column=1, padx=5, pady=5, sticky="w")
-        self.bbox_button = ctk.CTkButton(self.bottom_frame, text="Select BBox", command=self.select_bbox)
+        self.bbox_button = ctk.CTkButton(self.input_panel, text="Select BBox", command=self.select_bbox)
         self.bbox_button.grid(row=0, column=2, padx=5, pady=5)
-        self.bbox_checkbox = ctk.CTkCheckBox(self.bottom_frame, text="Add bbox as text", variable=self.add_bbox_text, command=self.toggle_bbox_entry)
+        self.bbox_checkbox = ctk.CTkCheckBox(self.input_panel, text="Add bbox as text", variable=self.add_bbox_text, command=self.toggle_bbox_entry)
         self.bbox_checkbox.grid(row=0, column=3, padx=5, pady=5)
-        self.bbox_entry = ctk.CTkEntry(self.bottom_frame, textvariable=self.bbox_text)
+        self.bbox_entry = ctk.CTkEntry(self.input_panel, textvariable=self.bbox_text)
         self.bbox_entry.grid(row=0, column=4, padx=5, pady=5)
         self.bbox_entry.configure(state="disabled")
         
-        # Row 1:Resolution Row
-        self.identified_res_label = ctk.CTkLabel(self.bottom_frame, text="Identified resolution:")
-        self.identified_res_label.grid(row=1, column=0, padx=5, pady=5, sticky="w")
-        self.identified_res_value = ctk.CTkLabel(self.bottom_frame, textvariable=self.identified_res_var)
-        self.identified_res_value.grid(row=1, column=1, padx=5, pady=5, sticky="w")
-        self.add_res_cb = ctk.CTkCheckBox(self.bottom_frame, text="Add pixel resolution manually", variable=self.add_resolution_manual, command=self.toggle_resolution_entry)
-        self.add_res_cb.grid(row=1, column=2, padx=5, pady=5)
-        self.resolution_entry = ctk.CTkEntry(self.bottom_frame)
-        self.resolution_entry.grid(row=1, column=3, padx=5, pady=5)
+        # Resolution Panel
+        self.res_panel = ctk.CTkFrame(self.bottom_frame)
+        self.res_panel.pack(fill="x", padx=5, pady=5)
+        self.identified_res_label = ctk.CTkLabel(self.res_panel, text="Identified resolution:")
+        self.identified_res_label.grid(row=0, column=0, padx=5, pady=5, sticky="w")
+        self.identified_res_value = ctk.CTkLabel(self.res_panel, textvariable=self.identified_res_var)
+        self.identified_res_value.grid(row=0, column=1, padx=5, pady=5, sticky="w")
+        self.add_res_cb = ctk.CTkCheckBox(self.res_panel, text="Add pixel resolution manually", variable=self.add_resolution_manual, command=self.toggle_resolution_entry)
+        self.add_res_cb.grid(row=0, column=2, padx=5, pady=5)
+        self.resolution_entry = ctk.CTkEntry(self.res_panel)
+        self.resolution_entry.grid(row=0, column=3, padx=5, pady=5)
         self.resolution_entry.configure(state="disabled")
-        self.res_unit_label = ctk.CTkLabel(self.bottom_frame, text="m")
-        self.res_unit_label.grid(row=1, column=4, padx=5, pady=5, sticky="w")
+        self.res_unit_label = ctk.CTkLabel(self.res_panel, text="m")
+        self.res_unit_label.grid(row=0, column=4, padx=5, pady=5, sticky="w")
         
-        # Row 2: Output folder and timestack creation with progress bar
-        self.select_output_button = ctk.CTkButton(self.bottom_frame, text="Select Output Folder", command=self.select_output_folder)
-        self.select_output_button.grid(row=2, column=0, padx=5, pady=5, sticky="w")
-        self.output_folder_label = ctk.CTkLabel(self.bottom_frame, textvariable=self.output_folder)
-        self.output_folder_label.grid(row=2, column=1, padx=5, pady=5, sticky="w")
-        self.create_timestack_button = ctk.CTkButton(self.bottom_frame, text="Create Raw Timestack", command=self.create_timestack)
-        self.create_timestack_button.grid(row=2, column=2, padx=5, pady=5)
-        self.progress_bar = ctk.CTkProgressBar(self.bottom_frame)
-        self.progress_bar.grid(row=2, column=3, padx=5, pady=5)
+        # Output Panel (Raw Timestack creation & progress)
+        self.output_panel = ctk.CTkFrame(self.bottom_frame)
+        self.output_panel.pack(fill="x", padx=5, pady=5)
+        self.select_output_button = ctk.CTkButton(self.output_panel, text="Select Output Folder", command=self.select_output_folder)
+        self.select_output_button.grid(row=0, column=0, padx=5, pady=5, sticky="w")
+        self.output_folder_label = ctk.CTkLabel(self.output_panel, textvariable=self.output_folder)
+        self.output_folder_label.grid(row=0, column=1, padx=5, pady=5, sticky="w")
+        self.create_timestack_button = ctk.CTkButton(self.output_panel, text="Create Raw Timestack", command=self.create_timestack)
+        self.create_timestack_button.grid(row=0, column=2, padx=5, pady=5)
+        self.progress_bar = ctk.CTkProgressBar(self.output_panel)
+        self.progress_bar.grid(row=0, column=3, padx=5, pady=5)
         self.progress_bar.set(0)
-        self.progress_text_label = ctk.CTkLabel(self.bottom_frame, text="")
-        self.progress_text_label.grid(row=2, column=4, padx=5, pady=5, sticky="w")
+        self.progress_text_label = ctk.CTkLabel(self.output_panel, text="")
+        self.progress_text_label.grid(row=0, column=4, padx=5, pady=5, sticky="w")
         
-        # Row 3: Batch Process controls
-        self.select_batch_folder_button = ctk.CTkButton(self.bottom_frame, text="Select Batch Folder", command=self.browse_batch_folder)
-        self.select_batch_folder_button.grid(row=3, column=0, padx=5, pady=5, sticky="w")
-        self.batch_folder_label = ctk.CTkLabel(self.bottom_frame, textvariable=self.batch_folder)
-        self.batch_folder_label.grid(row=3, column=1, padx=5, pady=5, sticky="w")
-        self.batch_process_button = ctk.CTkButton(self.bottom_frame, text="Batch Process", command=self.batch_process)
-        self.batch_process_button.grid(row=3, column=2, padx=5, pady=5)
+        # Batch Process Panel
+        self.batch_panel = ctk.CTkFrame(self.bottom_frame)
+        self.batch_panel.pack(fill="x", padx=5, pady=5)
+        self.select_batch_folder_button = ctk.CTkButton(self.batch_panel, text="Select Batch Folder", command=self.browse_batch_folder)
+        self.select_batch_folder_button.grid(row=0, column=0, padx=5, pady=5, sticky="w")
+        self.batch_folder_label = ctk.CTkLabel(self.batch_panel, textvariable=self.batch_folder)
+        self.batch_folder_label.grid(row=0, column=1, padx=5, pady=5, sticky="w")
+        self.batch_process_button = ctk.CTkButton(self.batch_panel, text="Batch Process", command=self.batch_process)
+        self.batch_process_button.grid(row=0, column=2, padx=5, pady=5)
         
         # --- Console Panel at the bottom ---
         self.console_frame = ctk.CTkFrame(self)
@@ -456,8 +461,11 @@ class TimestackTool(ctk.CTk):
         
         def run_timestack():
             try:
-                def update_progress(val):
-                    self.progress_bar.set(val)
+                # Update progress with both current count and total number of images
+                def update_progress(current, total):
+                    fraction = current / total
+                    self.progress_bar.set(fraction)
+                    self.progress_text_label.configure(text=f"{current} / {total}")
                 generated_path = generate_calibrated_timestack(image_files, self.bbox, resolution_x_m, output_path, progress_callback=update_progress)
                 messagebox.showinfo("Success", f"Calibrated timestack image saved to: {generated_path}")
                 pil_img = Image.open(generated_path)
@@ -468,6 +476,7 @@ class TimestackTool(ctk.CTk):
                 messagebox.showerror("Error", str(e))
             finally:
                 self.progress_bar.set(0)
+                self.progress_text_label.configure(text="")
         threading.Thread(target=run_timestack).start()
         
     def browse_batch_folder(self):
@@ -548,3 +557,7 @@ class TimestackTool(ctk.CTk):
             self.progress_text_label.configure(text="")
         
         threading.Thread(target=process_batch).start()
+
+if __name__ == "__main__":
+    app = TimestackTool()
+    app.mainloop()

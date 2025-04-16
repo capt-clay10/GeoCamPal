@@ -10,6 +10,8 @@ import glob
 from osgeo import gdal, osr
 import sys
 from tkinter import ttk
+ctk.set_appearance_mode("Dark")
+ctk.set_default_color_theme("green")
 
 def resource_path(relative_path: str) -> str:
     try:
@@ -550,3 +552,6 @@ class GeoReferenceModule(ctk.CTk):
         dst_ds = None
         return True
     
+if __name__ == "__main__":
+    app = GeoReferenceModule()
+    app.mainloop()

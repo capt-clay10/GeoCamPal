@@ -31,6 +31,8 @@ import threading
 from pathlib import Path
 from osgeo import gdal, osr
 matplotlib.use("Agg")  # Use headless mode for non-interactive environments
+ctk.set_appearance_mode("Dark")
+ctk.set_default_color_theme("green")
 
 def resource_path(relative_path: str) -> str:
     try:
@@ -205,6 +207,11 @@ class CreateDemWindow(ctk.CTk):
         path = filedialog.askdirectory()
         if path:
             self.geojson_dir_var.set(path)
+            # Reset cached data so a new folder is processed
+            self.shorelines_gdf = None
+            self.daily_dates = []
+            self.current_day_index = 0
+
 
     def browse_out_dir(self):
         """
@@ -389,7 +396,7 @@ class CreateDemWindow(ctk.CTk):
         except:
             return
         # Hide certain frames during batch processing (if desired)
-        self.top_center_frame.pack_forget()
+        self.top_left_container.pack_forget()
         self.top_right_frame.pack_forget()
         self.show_progress_bar()
         out_dir = self.out_dir_var.get().strip()
@@ -412,9 +419,9 @@ class CreateDemWindow(ctk.CTk):
         Display a progress bar during batch processing.
         """
         if self.progress_bar is None:
-            self.progress_label = ctk.CTkLabel(self.top_left_frame, text="Starting batch...")
+            self.progress_label = ctk.CTkLabel(self.top_left_container, text="Starting batch...")
             self.progress_label.pack(pady=10)
-            self.progress_bar = ctk.CTkProgressBar(self.top_left_frame, width=400)
+            self.progress_bar = ctk.CTkProgressBar(self.top_left_container, width=400)
             self.progress_bar.pack()
             self.progress_bar.set(0.0)
 
@@ -427,7 +434,7 @@ class CreateDemWindow(ctk.CTk):
             self.progress_label.destroy()
             self.progress_bar = None
             self.progress_label = None
-        self.top_center_frame.pack(side="left", fill="both", expand=True, padx=5, pady=5)
+        self.top_left_container.pack(side="left", fill="both", expand=True, padx=5, pady=5)
         self.top_right_frame.pack(side="left", fill="both", expand=True, padx=5, pady=5)
 
     def create_dem_for_day(self, date_val):
@@ -548,3 +555,8 @@ class CreateDemWindow(ctk.CTk):
                 xyz_df.to_csv(out_xyz, index=False)
                 print(f"Exported XYZ => {out_xyz}")
         return dem_masked
+
+
+if __name__ == "__main__":
+    app = CreateDemWindow()
+    app.mainloop()

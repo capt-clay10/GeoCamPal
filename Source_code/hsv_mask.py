@@ -11,6 +11,8 @@ import numpy as np
 import geopandas as gpd
 from shapely.geometry import LineString, Polygon
 import rasterio
+ctk.set_appearance_mode("Dark")
+ctk.set_default_color_theme("green")
 
 
 class BBoxSelectorWindow(tk.Toplevel):
@@ -1960,3 +1962,8 @@ class HSVMaskTool(ctk.CTk):
         self.toggle_advanced_settings()
 
         messagebox.showinfo("Load Settings", f"Settings loaded from {file_path}")
+
+
+if __name__ == "__main__":
+    app = HSVMaskTool()
+    app.mainloop()
