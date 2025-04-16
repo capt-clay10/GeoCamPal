@@ -451,8 +451,11 @@ class PixelToGCPWindow(ctk.CTk):
         except Exception as e:
             messagebox.showerror("Error", f"Failed to save CSV: {e}")
 
+
+def main():
+    app = PixelToGCPWindow()
+    app.mainloop()
     
     
 if __name__ == "__main__":
-    app = PixelToGCPWindow()
-    app.mainloop()
+    main()

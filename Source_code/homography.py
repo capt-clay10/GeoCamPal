@@ -517,6 +517,10 @@ class CreateHomographyMatrixWindow(ctk.CTk):
         messagebox.showinfo("Success", "Best homography matrix accepted and exported successfully.")
 
 
-if __name__ == "__main__":
+def main():
     app = CreateHomographyMatrixWindow()
     app.mainloop()
+    
+
+if __name__ == "__main__":
+    main()

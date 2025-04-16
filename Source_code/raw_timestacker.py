@@ -558,6 +558,10 @@ class TimestackTool(ctk.CTk):
         
         threading.Thread(target=process_batch).start()
 
-if __name__ == "__main__":
+def main():
     app = TimestackTool()
     app.mainloop()
+
+if __name__ == "__main__":
+    main()
+

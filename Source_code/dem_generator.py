@@ -556,7 +556,10 @@ class CreateDemWindow(ctk.CTk):
                 print(f"Exported XYZ => {out_xyz}")
         return dem_masked
 
-
-if __name__ == "__main__":
+def main():
     app = CreateDemWindow()
     app.mainloop()
+    
+
+if __name__ == "__main__":
+    main()

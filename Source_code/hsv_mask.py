@@ -1964,6 +1964,9 @@ class HSVMaskTool(ctk.CTk):
         messagebox.showinfo("Load Settings", f"Settings loaded from {file_path}")
 
 
-if __name__ == "__main__":
+def main():
     app = HSVMaskTool()
     app.mainloop()
+    
+if __name__ == "__main__":
+    main()

@@ -551,7 +551,10 @@ class GeoReferenceModule(ctk.CTk):
         dst_ds.FlushCache()
         dst_ds = None
         return True
-    
+ 
+def main():
+   app = GeoReferenceModule()
+   app.mainloop()   
+ 
 if __name__ == "__main__":
-    app = GeoReferenceModule()
-    app.mainloop()
+    main()

@@ -555,6 +555,10 @@ class WaveRunUpCalculator(ctk.CTk):
         self.canvas_plot.draw()
         messagebox.showinfo("Batch Process", "Batch processing completed.")
 
-if __name__ == "__main__":
+
+def main():
     app = WaveRunUpCalculator()
     app.mainloop()
+    
+if __name__ == "__main__":
+    main()
