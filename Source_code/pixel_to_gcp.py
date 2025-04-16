@@ -4,7 +4,28 @@ from tkinter import filedialog, messagebox
 import customtkinter as ctk
 import pandas as pd
 from PIL import Image, ImageTk
+import sys
 import utm
+
+def resource_path(relative_path: str) -> str:
+    try:
+        base_path = sys._MEIPASS  # If running in a PyInstaller .exe
+    except Exception:
+        base_path = os.path.dirname(__file__)  # Running directly from source
+    return os.path.join(base_path, relative_path)
+
+
+class StdoutRedirector:
+    def __init__(self, text_widget):
+        self.text_widget = text_widget
+
+    def write(self, message):
+        # Insert the message into the text widget and scroll to the end.
+        self.text_widget.insert(tk.END, message)
+        self.text_widget.see(tk.END)
+
+    def flush(self):
+        pass  # This is needed for Python's IO requirements.
 
 
 class PixelToGCPWindow(ctk.CTk):
@@ -12,6 +33,11 @@ class PixelToGCPWindow(ctk.CTk):
         super().__init__(master)
         self.title("Pixel to GCP Tool")
         self.geometry("1200x800")
+        
+        try:
+            self.iconbitmap(resource_path("launch_logo.ico"))
+        except Exception as e:
+            print("Warning: Could not load window icon:", e)
 
         # -----------------------
         # Data / State Variables
@@ -75,6 +101,12 @@ class PixelToGCPWindow(ctk.CTk):
 
         self.console_text = tk.Text(console_frame, wrap="word", width=40)
         self.console_text.pack(fill="both", expand=True, padx=5, pady=5)
+        
+        # Redirect stdout and stderr to the console text widget.
+        self.stdout_redirector = StdoutRedirector(self.console_text)
+        sys.stdout = self.stdout_redirector
+        sys.stderr = self.stdout_redirector
+        print("Here you may see console outputs\n")
 
         # =============================
         # MIDDLE SECTION: INSTRUCTIONS

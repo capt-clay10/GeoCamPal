@@ -9,6 +9,27 @@ import os
 import datetime
 import csv
 import re
+import sys
+
+def resource_path(relative_path: str) -> str:
+    try:
+        base_path = sys._MEIPASS  # If running in a PyInstaller .exe
+    except Exception:
+        base_path = os.path.dirname(__file__)  # Running directly from source
+    return os.path.join(base_path, relative_path)
+
+
+class StdoutRedirector:
+    def __init__(self, text_widget):
+        self.text_widget = text_widget
+
+    def write(self, message):
+        self.text_widget.insert(tk.END, message)
+        self.text_widget.see(tk.END)
+
+    def flush(self):
+        pass
+
 
 def extract_runup_from_mask(mask_path, resolution_x_m, time_interval_sec, flip_horizontal=False):
     """
@@ -59,6 +80,12 @@ class WaveRunUpCalculator(ctk.CTk):
         super().__init__(master)
         self.title("Wave Run-Up Calculation")
         self.geometry("1200x800")
+        
+        try:
+            self.iconbitmap(resource_path("launch_logo.ico"))
+        except Exception as e:
+            print(f"Icon load failed: {e}")
+
         
         # Variables to store file paths and processed data.
         self.raw_image = None
@@ -191,6 +218,16 @@ class WaveRunUpCalculator(ctk.CTk):
         self.batch_progress_bar.set(0)
         self.batch_progress_label = ctk.CTkLabel(self.batch_panel, text="0 / 0 pairs processed")
         self.batch_progress_label.grid(row=1, column=2, padx=5, pady=5, sticky="w")
+        
+        # --- Console Panel at the bottom ---
+        self.console_frame = ctk.CTkFrame(self)
+        self.console_frame.pack(side="bottom", fill="both", expand=False, padx=10, pady=10)
+        self.console_text = tk.Text(self.console_frame, wrap="word", height=10)
+        self.console_text.pack(fill="both", expand=True, padx=5, pady=5)
+        self.stdout_redirector = StdoutRedirector(self.console_text)
+        sys.stdout = self.stdout_redirector
+        sys.stderr = self.stdout_redirector
+        print("Here you may see console outputs\n")
         
     def load_raw_image(self):
         file_path = filedialog.askopenfilename(
@@ -516,7 +553,3 @@ class WaveRunUpCalculator(ctk.CTk):
         self.canvas_plot.draw()
         messagebox.showinfo("Batch Process", "Batch processing completed.")
 
-# Uncomment the following lines to run the application standalone.
-# if __name__ == "__main__":
-#     app = WaveRunUpCalculator()
-#     app.mainloop()

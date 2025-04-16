@@ -6,14 +6,42 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 import customtkinter as ctk
 import random
+import sys
 import time
 import threading
+
+
+# --- StdoutRedirector class for redirecting console output into the GUI ---
+class StdoutRedirector:
+    def __init__(self, text_widget):
+        self.text_widget = text_widget
+
+    def write(self, message):
+        # Insert the message into the text widget and scroll to the end.
+        self.text_widget.insert(tk.END, message)
+        self.text_widget.see(tk.END)
+
+    def flush(self):
+        pass  # For compatibility with Python's IO system.
+
+def resource_path(relative_path: str) -> str:
+    try:
+        base_path = sys._MEIPASS  # If running in a PyInstaller .exe
+    except Exception:
+        base_path = os.path.dirname(__file__)  # Running directly from source
+    return os.path.join(base_path, relative_path)
+
 
 class CreateHomographyMatrixWindow(ctk.CTk):
     def __init__(self, master=None):
         super().__init__(master)
         self.title("Create Homography Matrix")
         self.geometry("850x700")
+        
+        try:
+            self.iconbitmap(resource_path("launch_logo.ico"))
+        except Exception as e:
+            print("Warning: Could not load window icon:", e)
 
         # Variables to store file and folder selections
         self.input_file = None
@@ -150,6 +178,12 @@ class CreateHomographyMatrixWindow(ctk.CTk):
         self.text_console = tk.Text(self.panel5, wrap="word", height=10)
         self.text_console.pack(padx=5, pady=5, fill="both", expand=True)
 
+        # Redirect stdout and stderr to the console text widget.
+        self.stdout_redirector = StdoutRedirector(self.text_console)
+        sys.stdout = self.stdout_redirector
+        sys.stderr = self.stdout_redirector
+        print("Here you may see console outputs\n")
+        
     def log(self, message):
         """Append a message to the console output."""
         self.text_console.insert(tk.END, message + "\n")

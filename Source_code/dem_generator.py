@@ -7,7 +7,13 @@ import json
 from pathlib import Path
 from scipy.interpolate import griddata
 import shutil
+from rasterio.transform import from_origin
+import rasterio
+from rasterio import features
+from shapely.geometry import LineString, Polygon
+from shapely.ops import unary_union
 import re
+import sys
 import pandas as pd
 import geopandas as gpd
 import numpy as np
@@ -17,18 +23,34 @@ import os
 import cv2
 import customtkinter as ctk
 import tkinter as tk
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, scrolledtext
 import matplotlib.dates as mdates
 import matplotlib
-from scipy.signal import savgol_filter
-from scipy.interpolate import interp1d
-from tkinter import Canvas, NW
+from scipy.interpolate import griddata
 import threading
-import glob
+from pathlib import Path
 from osgeo import gdal, osr
-from tkinter import ttk
-matplotlib.use("Agg")  # Headless mode for non-interactive environments
+matplotlib.use("Agg")  # Use headless mode for non-interactive environments
 
+def resource_path(relative_path: str) -> str:
+    try:
+        base_path = sys._MEIPASS  # If running in a PyInstaller .exe
+    except Exception:
+        base_path = os.path.dirname(__file__)  # Running directly from source
+    return os.path.join(base_path, relative_path)
+
+
+# --- StdoutRedirector class for redirecting console output into the GUI ---
+class StdoutRedirector:
+    def __init__(self, text_widget):
+        self.text_widget = text_widget
+
+    def write(self, message):
+        self.text_widget.insert(tk.END, message)
+        self.text_widget.see(tk.END)  # auto-scroll
+
+    def flush(self):
+        pass  # no-op for Python's IO requirements
 
 class CreateDemWindow(ctk.CTk):
     """
@@ -41,11 +63,16 @@ class CreateDemWindow(ctk.CTk):
         """
         super().__init__(*args, **kwargs)
         self.title("Create DEM")
-        self.geometry("1400x900")
+        self.geometry("1200x700")
         ctk.set_widget_scaling(0.9)
         self.resizable(True, True)
-        ctk.set_appearance_mode("System")
-        ctk.set_default_color_theme("blue")
+        # ctk.set_appearance_mode("System")
+        # ctk.set_default_color_theme("blue")
+        
+        try:
+            self.iconbitmap(resource_path("launch_logo.ico"))
+        except Exception as e:
+            print("Warning: Could not load window icon:", e)
 
         # Data references
         self.df_wl_1min = None      # 1-min interpolated water-level DataFrame
@@ -62,6 +89,16 @@ class CreateDemWindow(ctk.CTk):
 
         self._create_top_panel()
         self._create_bottom_panel()
+        
+        # --- Console Panel at the bottom ---
+        self.console_frame = ctk.CTkFrame(self)
+        self.console_frame.pack(side="bottom", fill="both", expand=False, padx=5, pady=5)
+        self.console_text = tk.Text(self.console_frame, wrap="word", height=10)
+        self.console_text.pack(fill="both", expand=True, padx=5, pady=5)
+        self.stdout_redirector = StdoutRedirector(self.console_text)
+        sys.stdout = self.stdout_redirector
+        sys.stderr = self.stdout_redirector
+        print("Here you may see console outputs\n")
 
     def _create_top_panel(self):
         """

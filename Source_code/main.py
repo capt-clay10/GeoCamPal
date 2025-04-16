@@ -1,4 +1,8 @@
 import sys
+if sys.stdout is None:
+    sys.stdout = sys.__stdout__
+if sys.stderr is None:
+    sys.stderr = sys.__stderr__
 import os
 import tkinter as tk
 import customtkinter as ctk
@@ -24,15 +28,15 @@ def show_splash(duration_ms=1000):
     # Center on screen
     screen_w = splash.winfo_screenwidth()
     screen_h = splash.winfo_screenheight()
-    x_coord = int((screen_w - 400) / 2)
+    x_coord = int((screen_w - 450) / 2)
     y_coord = int((screen_h - 280) / 2)
     splash.geometry(f"400x280+{x_coord}+{y_coord}")
 
     # Try loading a splash image
     try:
         img_path = resource_path("splash_image.png")
-        pil_img = Image.open(img_path).resize((400, 280), Image.Resampling.LANCZOS)
-        ctk_img = ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=(400, 280))
+        pil_img = Image.open(img_path).resize((450, 280), Image.Resampling.LANCZOS)
+        ctk_img = ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=(450, 280))
         ctk.CTkLabel(splash, image=ctk_img, text="").pack()
     except Exception as e:
         print("Warning: Could not load splash_image.png:", e)
@@ -110,6 +114,8 @@ def launcher_window():
 
     main_frame = ctk.CTkFrame(dialog)
     main_frame.pack(padx=20, pady=20, fill="both", expand=True)
+    dialog.iconbitmap(resource_path("launch_logo.ico"))
+
 
     # (A) Logo
     try:

@@ -8,9 +8,25 @@ from PIL import Image, ImageTk
 from PIL.PngImagePlugin import PngInfo
 import cv2
 import numpy as np
+import sys
 import tifffile
 import customtkinter as ctk
 import rasterio
+
+
+# --- StdoutRedirector class for redirecting console output into the GUI ---
+class StdoutRedirector:
+    def __init__(self, text_widget):
+        self.text_widget = text_widget
+
+    def write(self, message):
+        self.text_widget.insert(tk.END, message)
+        self.text_widget.see(tk.END)  # auto-scroll
+
+    def flush(self):
+        pass  # For compatibility with Python's IO system.
+
+
 
 # =================== ROI Selector (ScrollZoomBBoxSelector) ===================
 class ScrollZoomBBoxSelector(tk.Frame):
@@ -217,6 +233,12 @@ def generate_calibrated_timestack(image_files, bbox, resolution_x_m, output_path
 
     return output_path
 
+def resource_path(relative_path: str) -> str:
+    try:
+        base_path = sys._MEIPASS  # If running in a PyInstaller .exe
+    except Exception:
+        base_path = os.path.dirname(__file__)  # Running directly from source
+    return os.path.join(base_path, relative_path)
 
 # =================== TimestackTool GUI ===================
 class TimestackTool(ctk.CTk):
@@ -225,6 +247,11 @@ class TimestackTool(ctk.CTk):
         self.title("Time-stacking Tool")
         self.geometry("1200x800")
         
+        try:
+            self.iconbitmap(resource_path("launch_logo.ico"))
+        except Exception as e:
+            print("Warning: Could not load window icon:", e)
+            
         # Variables for input, output, bbox and resolution
         self.input_folder = tk.StringVar()
         self.output_folder = tk.StringVar()
@@ -263,7 +290,7 @@ class TimestackTool(ctk.CTk):
         self.bbox_entry.grid(row=0, column=4, padx=5, pady=5)
         self.bbox_entry.configure(state="disabled")
         
-        # Row 1: New Resolution Row
+        # Row 1:Resolution Row
         self.identified_res_label = ctk.CTkLabel(self.bottom_frame, text="Identified resolution:")
         self.identified_res_label.grid(row=1, column=0, padx=5, pady=5, sticky="w")
         self.identified_res_value = ctk.CTkLabel(self.bottom_frame, textvariable=self.identified_res_var)
@@ -286,7 +313,6 @@ class TimestackTool(ctk.CTk):
         self.progress_bar = ctk.CTkProgressBar(self.bottom_frame)
         self.progress_bar.grid(row=2, column=3, padx=5, pady=5)
         self.progress_bar.set(0)
-        # NEW: Progress text label
         self.progress_text_label = ctk.CTkLabel(self.bottom_frame, text="")
         self.progress_text_label.grid(row=2, column=4, padx=5, pady=5, sticky="w")
         
@@ -297,6 +323,17 @@ class TimestackTool(ctk.CTk):
         self.batch_folder_label.grid(row=3, column=1, padx=5, pady=5, sticky="w")
         self.batch_process_button = ctk.CTkButton(self.bottom_frame, text="Batch Process", command=self.batch_process)
         self.batch_process_button.grid(row=3, column=2, padx=5, pady=5)
+        
+        # --- Console Panel at the bottom ---
+        self.console_frame = ctk.CTkFrame(self)
+        self.console_frame.pack(side="bottom", fill="both", expand=False, padx=10, pady=10)
+        self.console_text = tk.Text(self.console_frame, wrap="word", height=10)
+        self.console_text.pack(fill="both", expand=True, padx=5, pady=5)
+        # Redirect stdout and stderr to our console widget
+        self.stdout_redirector = StdoutRedirector(self.console_text)
+        sys.stdout = self.stdout_redirector
+        sys.stderr = self.stdout_redirector
+        print("Here you may see console outputs\n")
         
     def toggle_bbox_entry(self):
         if self.add_bbox_text.get():

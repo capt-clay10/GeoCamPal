@@ -144,6 +144,12 @@ class StdoutRedirector:
     def flush(self):
         pass  # no-op for Python's IO flush requirements
 
+def resource_path(relative_path: str) -> str:
+    try:
+        base_path = sys._MEIPASS  # If running in a PyInstaller .exe
+    except Exception:
+        base_path = os.path.dirname(__file__)  # Running directly from source
+    return os.path.join(base_path, relative_path)
 
 class HSVMaskTool(ctk.CTk):
     """
@@ -162,6 +168,11 @@ class HSVMaskTool(ctk.CTk):
             # Increase height to accommodate console
             self.geometry("1000x650")
             self.resizable(False, False)
+            
+            try:
+                self.iconbitmap(resource_path("launch_logo.ico"))
+            except Exception as e:
+                print("Warning: Could not load window icon:", e)
 
             # Initialize Tkinter variables
             self.do_invert_mask = tk.BooleanVar(master=self, value=False)
@@ -205,11 +216,18 @@ class HSVMaskTool(ctk.CTk):
             sys.stdout = self.stdout_redirector
             self.original_stderr = sys.stderr
             sys.stderr = self.stdout_redirector
+            print("Here you may see console outputs\n")
 
             # Create a separate window for image display
             self.image_display_window = ctk.CTkToplevel(self)
             self.image_display_window.title("Feature identifier - Image display")
             self.image_display_window.geometry("1200x800")
+            
+            try:
+                self.image_display_window.iconbitmap(resource_path("launch_logo.ico"))
+            except Exception as e:
+                print("Warning: Could not load window icon:", e)
+
 
             self.top_frame = ctk.CTkFrame(self.image_display_window)
             self.top_frame.pack(fill="both", expand=True)
@@ -248,6 +266,11 @@ class HSVMaskTool(ctk.CTk):
             self.title("HSV Mask Tool")
             self.geometry("1200x600")
             self.resizable(False, False)
+            
+            try:
+                self.iconbitmap(resource_path("launch_logo.ico"))
+            except Exception as e:
+                print("Warning: Could not load window icon:", e)
 
             self.do_invert_mask = tk.BooleanVar(master=self, value=False)
             self.use_bbox = tk.BooleanVar(master=self, value=False)

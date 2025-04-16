@@ -8,15 +8,40 @@ from tkinter import filedialog, messagebox
 import threading
 import glob
 from osgeo import gdal, osr
+import sys
 from tkinter import ttk
 
+def resource_path(relative_path: str) -> str:
+    try:
+        base_path = sys._MEIPASS  # If running in a PyInstaller .exe
+    except Exception:
+        base_path = os.path.dirname(__file__)  # Running directly from source
+    return os.path.join(base_path, relative_path)
 
+
+class StdoutRedirector:
+    def __init__(self, text_widget):
+        self.text_widget = text_widget
+
+    def write(self, message):
+        # Insert the message into the text widget and scroll to the end.
+        self.text_widget.insert(tk.END, message)
+        self.text_widget.see(tk.END)
+
+    def flush(self):
+        pass  # For compatibility with Python's IO system.
 
 class GeoReferenceModule(ctk.CTk):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.title("Advanced Georeferencing Tool")
         self.geometry("1200x800")
+        
+        try:
+            self.iconbitmap(resource_path("launch_logo.ico"))
+        except Exception as e:
+            print("Warning: Could not load window icon:", e)
+            
         self.H = None  # Homography matrix
         self.image_list = []
         self.current_index = 0
@@ -26,6 +51,19 @@ class GeoReferenceModule(ctk.CTk):
         self.current_zoom = 1.0
         self.initialize_components()
 
+        # ---- Add CONSOLE PANEL at the bottom (new row 5) ----
+        self.grid_rowconfigure(5, weight=0)
+        self.console_frame = ctk.CTkFrame(self)
+        self.console_frame.grid(row=5, column=0, sticky="nsew", padx=5, pady=5)
+        self.console_text = tk.Text(self.console_frame, wrap="word", height=10)
+        self.console_text.pack(fill="both", expand=True, padx=5, pady=5)
+
+        # Redirect stdout and stderr to the console text widget.
+        self.stdout_redirector = StdoutRedirector(self.console_text)
+        sys.stdout = self.stdout_redirector
+        sys.stderr = self.stdout_redirector
+        print("Here you may see console outputs")
+        
     def initialize_components(self):
         # Configure grid layout for five rows
         self.grid_columnconfigure(0, weight=1)
