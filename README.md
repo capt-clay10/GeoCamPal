@@ -1,6 +1,6 @@
 
 # GeoCamPal
-![Image](https://github.com/user-attachments/assets/7ead2d07-194d-4979-8191-195b9fd51d59)
+![Image](https://github.com/user-attachments/assets/e1b1a261-0c5f-451e-89e4-ecfa10bda76a)
 
 GeoCamPal is a modular image processing tools with an intuitive graphical user interface (GUI). This software enables users to:
 
