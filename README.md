@@ -83,8 +83,7 @@ Use HSV masking to idenify features additionally, manually edit features for bes
 ## License
 This project is licensed under the MIT License.
 
-# Snippets of GUI
-
-# Image Pixel to real world
+## Disclaimer
+Please validate your results
 
 
