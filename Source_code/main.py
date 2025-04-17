@@ -23,6 +23,7 @@ def resource_path(relative_path: str) -> str:
 # 2) Optional splash screen
 def show_splash(duration_ms=1000):
     splash = ctk.CTk()
+    splash.iconbitmap(resource_path("launch_logo.ico"))
     splash.title("Loading...")
     splash.geometry("400x280")
     splash.resizable(False, False)

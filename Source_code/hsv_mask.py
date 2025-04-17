@@ -11,10 +11,13 @@ import numpy as np
 import geopandas as gpd
 from shapely.geometry import LineString, Polygon
 import rasterio
+
+# Theme
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("green")
 
 
+# %% helper class
 class BBoxSelectorWindow(tk.Toplevel):
     def __init__(self, master, pil_image, callback, **kwargs):
         """
@@ -131,6 +134,7 @@ class BBoxSelectorWindow(tk.Toplevel):
         self.callback(final_bbox)
         self.destroy()
 
+# %% Helper functions
 
 class StdoutRedirector:
     """
@@ -146,12 +150,9 @@ class StdoutRedirector:
     def flush(self):
         pass  # no-op for Python's IO flush requirements
 
-def resource_path(relative_path: str) -> str:
-    try:
-        base_path = sys._MEIPASS  # If running in a PyInstaller .exe
-    except Exception:
-        base_path = os.path.dirname(__file__)  # Running directly from source
-    return os.path.join(base_path, relative_path)
+
+
+# %% Main class
 
 class HSVMaskTool(ctk.CTkToplevel):
     """
@@ -160,32 +161,43 @@ class HSVMaskTool(ctk.CTkToplevel):
       - ml
       - batch
     """
+    
+    @staticmethod
+    def resource_path(relative_path: str) -> str:
+        try:
+            base_path = sys._MEIPASS  # If running in a PyInstaller .exe
+        except Exception:
+            base_path = os.path.dirname(__file__)  # Running directly from source
+        return os.path.join(base_path, relative_path)
+    
+    
     def __init__(self, master=None, mode="individual", *args, **kwargs):
         
-        super().__init__(master=master, *args, **kwargs)
-        
+        super().__init__(master=master, *args, **kwargs)    
+            
         self.mode = mode
         ctk.set_widget_scaling(1)
+        try:
+            self.iconbitmap(self.resource_path("launch_logo.ico"))
+        except Exception:
+            pass
+
+        # --- State variables ---
+        self.do_invert_mask = tk.BooleanVar(master=self, value=False)
+        self.use_bbox        = tk.BooleanVar(master=self, value=False)
+        self.use_inner_mask  = tk.BooleanVar(master=self, value=False)
+        self.enable_enhancements = tk.BooleanVar(master=self, value=True)
+        self.advanced_check_var  = tk.BooleanVar(master=self, value=False)
+        self.use_dual_hsv        = tk.BooleanVar(master=self, value=False)
+
 
         if self.mode in ("individual", "ml"):
             # super().__init__(*args, **kwargs)
             self.title("Feature Identifier- Configuration")
             # Increase height to accommodate console
             self.geometry("1000x650")
-            self.resizable(False, False)
+            self.resizable(False, False)        
             
-            try:
-                self.iconbitmap(resource_path("launch_logo.ico"))
-            except Exception as e:
-                print("Warning: Could not load window icon:", e)
-
-            # Initialize Tkinter variables
-            self.do_invert_mask = tk.BooleanVar(master=self, value=False)
-            self.use_bbox = tk.BooleanVar(master=self, value=False)
-            self.use_inner_mask = tk.BooleanVar(master=self, value=False)
-            self.enable_enhancements = tk.BooleanVar(master=self, value=True)
-            self.advanced_check_var = tk.BooleanVar(master=self, value=False)
-            self.use_dual_hsv = tk.BooleanVar(master=self, value=False)
 
             self.filename_label = ctk.CTkLabel(self, text="No file loaded", font=("Arial", 14))
             self.filename_label.pack(side="top", fill="x", pady=5)
@@ -212,10 +224,8 @@ class HSVMaskTool(ctk.CTkToplevel):
             # --------------------------
             self.console_frame = ctk.CTkFrame(self)
             self.console_frame.pack(side="bottom", fill="both", expand=False, padx=5, pady=2)
-
             self.console_text = scrolledtext.ScrolledText(self.console_frame, wrap="word", height=10)
             self.console_text.pack(side="left", fill="both", expand=True)
-
             self.stdout_redirector = StdoutRedirector(self.console_text)
             self.original_stdout = sys.stdout
             sys.stdout = self.stdout_redirector
@@ -223,16 +233,15 @@ class HSVMaskTool(ctk.CTkToplevel):
             sys.stderr = self.stdout_redirector
             print("Here you may see console outputs\n")
 
-            # Create a separate window for image display
+            # image display window
             self.image_display_window = ctk.CTkToplevel(self)
             self.image_display_window.title("Feature identifier - Image display")
             self.image_display_window.geometry("1200x800")
             
             try:
-                self.image_display_window.iconbitmap(resource_path("launch_logo.ico"))
-            except Exception as e:
-                print("Warning: Could not load window icon:", e)
-
+                self.image_display_window.iconbitmap(self.resource_path("launch_logo.ico"))
+            except:
+                pass
 
             self.top_frame = ctk.CTkFrame(self.image_display_window)
             self.top_frame.pack(fill="both", expand=True)
@@ -264,6 +273,9 @@ class HSVMaskTool(ctk.CTkToplevel):
 
             self.image_display_window.protocol("WM_DELETE_WINDOW", self.on_all_close)
             self.protocol("WM_DELETE_WINDOW", self.on_all_close)
+            
+            self._blank_img = ctk.CTkImage(Image.new("RGBA", (1, 1), (0, 0, 0, 0)),
+                               size=(1, 1))
 
         else:
             # BATCH MODE:
@@ -272,10 +284,10 @@ class HSVMaskTool(ctk.CTkToplevel):
             self.geometry("1200x600")
             self.resizable(False, False)
             
-            try:
-                self.iconbitmap(resource_path("launch_logo.ico"))
-            except Exception as e:
-                print("Warning: Could not load window icon:", e)
+            # try:
+            #     self.iconbitmap(resource_path("launch_logo.ico"))
+            # except Exception as e:
+            #     print("Warning: Could not load window icon:", e)
 
             self.do_invert_mask = tk.BooleanVar(master=self, value=False)
             self.use_bbox = tk.BooleanVar(master=self, value=False)
@@ -354,6 +366,12 @@ class HSVMaskTool(ctk.CTkToplevel):
         self.pan_start_y = 0
         self.zoomed_image = None
 
+    def checkbox_invert_mask_toggle(self):
+        self.do_invert_mask.set(not self.do_invert_mask.get())
+        # if mask is showing, recalculate
+        if self.current_mask is not None and self.mode != 'batch':
+            self.calculate_mask()
+
     def on_all_close(self):
         # Restore stdout
         sys.stdout = self.original_stdout
@@ -369,48 +387,38 @@ class HSVMaskTool(ctk.CTkToplevel):
     def distance(self, x1, y1, x2, y2):
         return ((x2 - x1)**2 + (y2 - y1)**2) ** 0.5
 
+
+    def _clear_ctk_label(self, lbl):
+        """Attach a 1×1 transparent CTkImage so CTk never points to a dead id."""
+        if lbl and lbl.winfo_exists():
+            lbl.configure(image=self._blank_img)  # valid image id → no TclError
+            lbl.image = self._blank_img           # keep reference      
+
+
     # -------------- IMAGE DISPLAY METHODS --------------
 
     def update_image_display(self, event=None):
-        """Resize the left panel's image, draw the red bbox, and display it."""
         if self.cv_image is None:
             return
-    
-        # 1) figure out how big the left panel is right now
-        width = self.top_left_frame.winfo_width()
+        # panel size
+        width  = self.top_left_frame.winfo_width()
         height = self.top_left_frame.winfo_height()
-        if width < 1 or height < 1:
+        if width<1 or height<1:
             return
-    
-        # 2) make a copy so we don’t clobber the original
         disp = self.cv_image.copy()
-    
-        # 3) decide which bbox to draw (full‑image if none set)
+        # bbox
         if hasattr(self, 'bbox') and self.use_bbox.get():
-            x, y, w, h = self.bbox
+            x,y,w,h = self.bbox
         else:
-            h0, w0 = disp.shape[:2]
-            x, y, w, h = 0, 0, w0, h0
-    
-        # 4) scale the bbox coords to the displayed image size
-        sx = disp.shape[1] / self.cv_image.shape[1]
-        sy = disp.shape[0] / self.cv_image.shape[0]
-        x1, y1 = int(x * sx), int(y * sy)
-        x2, y2 = int((x + w) * sx), int((y + h) * sy)
-    
-        # 5) draw the red rectangle
-        cv2.rectangle(disp, (x1, y1), (x2, y2), (0, 0, 255), 2)
-    
-        # 6) resize to fit the panel and convert for CTk
+            h0,w0 = disp.shape[:2]
+            x,y,w,h = 0,0,w0,h0
+        cv2.rectangle(disp, (int(x),int(y)), (int(x+w),int(y+h)), (0,0,255),2)
+        # resize
         resized = cv2.resize(disp, (width, height), interpolation=cv2.INTER_AREA)
-        cv_rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
-        pil_img = Image.fromarray(cv_rgb)
-        ctk_img = ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=(width, height))
-    
-        # 7) update the label
-        self.image_label.configure(image=ctk_img)
-        self.image_label.image = ctk_img
-
+        rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+        pil = Image.fromarray(rgb)
+        ctk_img = ctk.CTkImage(light_image=pil, dark_image=pil, size=(width,height))
+        self.image_label.configure(image=ctk_img); self.image_label.image = ctk_img
 
     def update_mask_display(self, event=None):
         if not self.mask_label.winfo_exists():
@@ -792,6 +800,9 @@ class HSVMaskTool(ctk.CTkToplevel):
         self.features = []
         self.edge_points = []
         self.edited_edge_points = []
+
+        self._clear_ctk_label(self.edge_label)   # <‑‑ use helper
+        self._clear_ctk_label(self.mask_label)   # <‑‑ use helper
     
         # 2) Check that the label widget still exists
         if hasattr(self, 'edge_label') and self.edge_label.winfo_exists():
@@ -836,16 +847,12 @@ class HSVMaskTool(ctk.CTkToplevel):
             else:
                 messagebox.showinfo("Info", "Already at the last image.")
 
-
     def prev_image(self):
         if self.mode == "ml" and self.image_files:
             if self.current_index > 0:
                 self.current_index -= 1
-                # self.edge_points.clear()  # if you want a fresh start
-                self.mask_label.configure(image=None, text="")
-                self.mask_label.image = None
-                self.edge_label.configure(image=None, text="")
-                self.edge_label.image = None
+                self._clear_ctk_label(self.mask_label)   # <‑‑ changed
+                self._clear_ctk_label(self.edge_label)   # <‑‑ changed
                 self.load_current_image()
                 self.update_image_display()
                 self.update_mask_display()
@@ -2003,12 +2010,11 @@ class HSVMaskTool(ctk.CTkToplevel):
 
 
 def main():
-    import sys
     root = ctk.CTk()
-    root.withdraw()   # hide the dummy root
-    mode = sys.argv[1] if len(sys.argv) > 1 else "individual"
+    root.withdraw()
+    mode = sys.argv[1] if len(sys.argv)>1 else 'individual'
     win = HSVMaskTool(master=root, mode=mode)
-    win.mainloop()
+    root.mainloop()
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
