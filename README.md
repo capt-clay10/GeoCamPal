@@ -1,5 +1,5 @@
-![Image](https://github.com/user-attachments/assets/4f2adc3b-b55d-4b2c-93ce-3d331bbc66b9)
-# GeoCamPal 
+
+# GeoCamPal
 GeoCamPal is a modular image processing tools with an intuitive graphical user interface (GUI). This software enables users to:
 
 - Perform feature identification in images using HSV masking technique
