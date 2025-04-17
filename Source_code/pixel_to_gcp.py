@@ -39,7 +39,7 @@ class StdoutRedirector:
         pass  # This is needed for Python's IO requirements.
 
 
-class PixelToGCPWindow(ctk.CTk):
+class PixelToGCPWindow(ctk.CTkToplevel):
     def __init__(self, master=None):
         super().__init__(master)
         self.title("Pixel to GCP Tool")
@@ -156,8 +156,18 @@ class PixelToGCPWindow(ctk.CTk):
         ctk.CTkButton(pnl_gcp_file, text="Browse GCP File", command=self.browse_gcp_file).pack(side="left")
         self.label_gcp_file = ctk.CTkLabel(pnl_gcp_file, text="No file selected")
         self.label_gcp_file.pack(side="left", padx=5)
-        self.label_gcp_note = ctk.CTkLabel(pnl_gcp_file, text="Required columns: latitude, longitude, GCP_ID")
+        
+        self.label_gcp_note = ctk.CTkLabel(
+            pnl_gcp_file,
+            text="Required columns: latitude, longitude, GCP_ID",
+            fg_color="white",       # white background
+            text_color="black",     # black text
+            corner_radius=0         # optional: makes the background solid rectangle
+        )
         self.label_gcp_note.pack(side="left", padx=5)
+
+        
+        
         self.checkbox_utm = ctk.CTkCheckBox(pnl_gcp_file, text="Convert to UTM", variable=self.convert_to_utm_var)
         self.checkbox_utm.pack(side="left", padx=5)
     
@@ -453,9 +463,11 @@ class PixelToGCPWindow(ctk.CTk):
 
 
 def main():
-    app = PixelToGCPWindow()
-    app.mainloop()
-    
-    
+    root = ctk.CTk()
+    root.withdraw()
+    win = PixelToGCPWindow(master=root)
+    win.focus_force()
+    root.mainloop()
+
 if __name__ == "__main__":
     main()

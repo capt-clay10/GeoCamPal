@@ -153,19 +153,22 @@ def resource_path(relative_path: str) -> str:
         base_path = os.path.dirname(__file__)  # Running directly from source
     return os.path.join(base_path, relative_path)
 
-class HSVMaskTool(ctk.CTk):
+class HSVMaskTool(ctk.CTkToplevel):
     """
     A top-level window for the HSV Mask Tool. 3 modes:
       - individual
       - ml
       - batch
     """
-    def __init__(self, mode="individual", *args, **kwargs):
+    def __init__(self, master=None, mode="individual", *args, **kwargs):
+        
+        super().__init__(master=master, *args, **kwargs)
+        
         self.mode = mode
         ctk.set_widget_scaling(1)
 
         if self.mode in ("individual", "ml"):
-            super().__init__(*args, **kwargs)
+            # super().__init__(*args, **kwargs)
             self.title("Feature Identifier- Configuration")
             # Increase height to accommodate console
             self.geometry("1000x650")
@@ -264,8 +267,8 @@ class HSVMaskTool(ctk.CTk):
 
         else:
             # BATCH MODE:
-            super().__init__(*args, **kwargs)
-            self.title("HSV Mask Tool")
+            # super().__init__(*args, **kwargs)
+            self.title("Feature identifier- batch process")
             self.geometry("1200x600")
             self.resizable(False, False)
             
@@ -309,6 +312,7 @@ class HSVMaskTool(ctk.CTk):
             sys.stdout = self.stdout_redirector
             self.original_stderr = sys.stderr
             sys.stderr = self.stdout_redirector
+            print("Here you may see console outputs\n")
             
             self.bottom_frame = ctk.CTkFrame(main_frame)
             self.bottom_frame.pack(side="bottom", fill="x", expand=False)
@@ -368,17 +372,45 @@ class HSVMaskTool(ctk.CTk):
     # -------------- IMAGE DISPLAY METHODS --------------
 
     def update_image_display(self, event=None):
-        """Resize the left panel's image to fill container."""
-        if self.cv_image is not None:
-            width = self.top_left_frame.winfo_width()
-            height = self.top_left_frame.winfo_height()
-            if width > 0 and height > 0:
-                resized = cv2.resize(self.cv_image, (width, height), interpolation=cv2.INTER_AREA)
-                cv_rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
-                pil_img = Image.fromarray(cv_rgb)
-                ctk_img = ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=(width, height))
-                self.image_label.configure(image=ctk_img)
-                self.image_label.image = ctk_img
+        """Resize the left panel's image, draw the red bbox, and display it."""
+        if self.cv_image is None:
+            return
+    
+        # 1) figure out how big the left panel is right now
+        width = self.top_left_frame.winfo_width()
+        height = self.top_left_frame.winfo_height()
+        if width < 1 or height < 1:
+            return
+    
+        # 2) make a copy so we don’t clobber the original
+        disp = self.cv_image.copy()
+    
+        # 3) decide which bbox to draw (full‑image if none set)
+        if hasattr(self, 'bbox') and self.use_bbox.get():
+            x, y, w, h = self.bbox
+        else:
+            h0, w0 = disp.shape[:2]
+            x, y, w, h = 0, 0, w0, h0
+    
+        # 4) scale the bbox coords to the displayed image size
+        sx = disp.shape[1] / self.cv_image.shape[1]
+        sy = disp.shape[0] / self.cv_image.shape[0]
+        x1, y1 = int(x * sx), int(y * sy)
+        x2, y2 = int((x + w) * sx), int((y + h) * sy)
+    
+        # 5) draw the red rectangle
+        cv2.rectangle(disp, (x1, y1), (x2, y2), (0, 0, 255), 2)
+    
+        # 6) resize to fit the panel and convert for CTk
+        resized = cv2.resize(disp, (width, height), interpolation=cv2.INTER_AREA)
+        cv_rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+        pil_img = Image.fromarray(cv_rgb)
+        ctk_img = ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=(width, height))
+    
+        # 7) update the label
+        self.image_label.configure(image=ctk_img)
+        self.image_label.image = ctk_img
+
 
     def update_mask_display(self, event=None):
         if not self.mask_label.winfo_exists():
@@ -530,6 +562,10 @@ class HSVMaskTool(ctk.CTk):
 
         calc_frame = ctk.CTkFrame(edge_container)
         calc_frame.pack(side="top", fill="x", pady=2)
+        
+        if self.mode == "batch":
+            invert_chk = ctk.CTkCheckBox(calc_frame, text="Invert Mask?", variable=self.do_invert_mask)
+            invert_chk.pack(side="left", padx=10)
 
         if self.mode != "batch":
             btn_calc = ctk.CTkButton(calc_frame, text="Calculate Mask", command=self.calculate_mask)
@@ -552,7 +588,7 @@ class HSVMaskTool(ctk.CTk):
 
             thickness_frame = ctk.CTkFrame(calc_frame)
             thickness_frame.pack(side="left", padx=3)
-            ctk.CTkLabel(thickness_frame, text="Edge Thickness").pack(side="top")
+            ctk.CTkLabel(thickness_frame, text="Edge Thickness (pixels)").pack(side="top")
             self.thickness_value_label = ctk.CTkLabel(thickness_frame, text="2")
             self.thickness_value_label.pack(side="top")
             self.edge_thickness_slider = ctk.CTkSlider(
@@ -562,9 +598,6 @@ class HSVMaskTool(ctk.CTk):
             self.edge_thickness_slider.set(2)
             self.edge_thickness_slider.pack(side="top")
 
-        if self.mode == "batch":
-            invert_chk = ctk.CTkCheckBox(calc_frame, text="Invert Mask?", variable=self.do_invert_mask)
-            invert_chk.pack(side="left", padx=10)
 
         adv_frame = ctk.CTkFrame(edge_container)
         adv_frame.pack(side="top", fill="x", pady=2)
@@ -660,7 +693,7 @@ class HSVMaskTool(ctk.CTk):
         if self.use_bbox.get():
             self.bbox_entry.pack(side="left", padx=5)
             if not hasattr(self, 'select_bbox_button'):
-                self.select_bbox_button = ctk.CTkButton(self.bbox_frame, text="Select BBox", command=self.open_bbox_selector)
+                self.select_bbox_button = ctk.CTkButton(self.bbox_frame, text="Select BBox on image", command=self.open_bbox_selector)
             self.select_bbox_button.pack(side="left", padx=5)
             self.inner_mask_check.configure(state="normal")
         else:
@@ -680,9 +713,14 @@ class HSVMaskTool(ctk.CTk):
         BBoxSelectorWindow(self, pil_img, self.set_bbox_from_selector)
 
     def set_bbox_from_selector(self, bbox):
+        # 1) store the box
         self.bbox = bbox
+    
+        # 2) show it in the text entry
         self.bbox_entry.delete(0, tk.END)
         self.bbox_entry.insert(0, f"({bbox[0]}, {bbox[1]}, {bbox[2]}, {bbox[3]})")
+    
+
 
     # -------------- DUAL SLIDERS --------------
 
@@ -1965,8 +2003,12 @@ class HSVMaskTool(ctk.CTk):
 
 
 def main():
-    app = HSVMaskTool()
-    app.mainloop()
-    
+    import sys
+    root = ctk.CTk()
+    root.withdraw()   # hide the dummy root
+    mode = sys.argv[1] if len(sys.argv) > 1 else "individual"
+    win = HSVMaskTool(master=root, mode=mode)
+    win.mainloop()
+
 if __name__ == "__main__":
     main()

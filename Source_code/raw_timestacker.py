@@ -32,7 +32,7 @@ class StdoutRedirector:
 class ScrollZoomBBoxSelector(tk.Frame):
     def __init__(self, master, **kwargs):
         super().__init__(master, **kwargs)
-        self.master.title("Scrollable & Zoomable ROI Selector")
+        master.title("Scrollable & Zoomable ROI Selector")
 
         # ================ Top Frame: Canvas & Scrollbars ================
         top_frame = tk.Frame(self)
@@ -237,9 +237,9 @@ def resource_path(relative_path: str) -> str:
     return os.path.join(base_path, relative_path)
 
 # =================== TimestackTool GUI ===================
-class TimestackTool(ctk.CTk):
-    def __init__(self):
-        super().__init__()
+class TimestackTool(ctk.CTkToplevel):
+    def __init__(self,master=None):
+        super().__init__(master)
         self.title("Time-stacking Tool")
         self.geometry("1200x800")
         
@@ -559,9 +559,12 @@ class TimestackTool(ctk.CTk):
         threading.Thread(target=process_batch).start()
 
 def main():
-    app = TimestackTool()
-    app.mainloop()
+    # single hidden root for all CTkToplevels
+    root = ctk.CTk()
+    root.withdraw()
+    win = TimestackTool(master=root)
+    win.mainloop()
+
 
 if __name__ == "__main__":
     main()
-

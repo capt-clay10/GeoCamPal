@@ -77,9 +77,9 @@ def extract_runup_from_mask(mask_path, resolution_x_m, time_interval_sec, flip_h
     
     return np.array(time_array), np.array(distance_array), pixel_coords
 
-class WaveRunUpCalculator(ctk.CTk):
+class WaveRunUpCalculator(ctk.CTkToplevel):
     def __init__(self, master=None):
-        super().__init__(master)
+        super().__init__(master=master)
         self.title("Wave Run-Up Calculation")
         self.geometry("1200x800")
         
@@ -557,8 +557,12 @@ class WaveRunUpCalculator(ctk.CTk):
 
 
 def main():
-    app = WaveRunUpCalculator()
-    app.mainloop()
-    
+    # create a hidden root so CTkToplevel has something to attach to
+    root = ctk.CTk()
+    root.withdraw()
+    # now spawn your tool as a child window
+    win = WaveRunUpCalculator(master=root)
+    win.mainloop()
+
 if __name__ == "__main__":
     main()

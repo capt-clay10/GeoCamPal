@@ -54,16 +54,16 @@ class StdoutRedirector:
     def flush(self):
         pass  # no-op for Python's IO requirements
 
-class CreateDemWindow(ctk.CTk):
+class CreateDemWindow(ctk.CTkToplevel):
     """
     A top-level window for creating Digital Elevation Models (DEMs) from shoreline and water-level data.
     Provides options for single-day processing or batch processing.
     """
-    def __init__(self, *args, **kwargs):
+    def __init__(self, master=None, *args, **kwargs):
         """
         Initialize the Create DEM window.
         """
-        super().__init__(*args, **kwargs)
+        super().__init__(master=master,*args, **kwargs)
         self.title("Create DEM")
         self.geometry("1200x700")
         ctk.set_widget_scaling(0.9)
@@ -557,9 +557,11 @@ class CreateDemWindow(ctk.CTk):
         return dem_masked
 
 def main():
-    app = CreateDemWindow()
-    app.mainloop()
-    
+    # Hide a root, then spawn your CTkToplevel
+    root = ctk.CTk()
+    root.withdraw()
+    win = CreateDemWindow(master=root)
+    win.mainloop()
 
 if __name__ == "__main__":
     main()
