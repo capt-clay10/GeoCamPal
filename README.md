@@ -1,7 +1,5 @@
 
 # GeoCamPal
-![Image](https://github.com/user-attachments/assets/e1b1a261-0c5f-451e-89e4-ecfa10bda76a)
-
 GeoCamPal is a modular image processing tools with an intuitive graphical user interface (GUI). This software enables users to:
 
 - Perform feature identification in images using HSV masking technique
@@ -34,7 +32,7 @@ GeoCamPal is a modular image processing tools with an intuitive graphical user i
 - For running the GUI within your own python environemt just run the *main.py* file
 
 ### Prerequisites
-- **Python Version:** 3.8+
+- **Python Version:** 3.8+  (Not required for GUI)
 - **Dependencies:**  
   Install required packages using:
   ```bash
@@ -85,5 +83,7 @@ This project is licensed under the MIT License.
 
 ## Disclaimer
 Please validate your results
+
+![Image](https://github.com/user-attachments/assets/e1b1a261-0c5f-451e-89e4-ecfa10bda76a)
 
 
