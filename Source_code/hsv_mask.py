@@ -412,7 +412,16 @@ class HSVMaskTool(ctk.CTkToplevel):
         else:
             h0,w0 = disp.shape[:2]
             x,y,w,h = 0,0,w0,h0
-        cv2.rectangle(disp, (int(x),int(y)), (int(x+w),int(y+h)), (0,0,255),2)
+        # compute how the cv_image → panel resize scales it
+        sx = width  / self.cv_image.shape[1]
+        sy = height / self.cv_image.shape[0]
+        # then
+        x1 = int(x * sx)
+        y1 = int(y * sy)
+        x2 = int((x + w) * sx)
+        y2 = int((y + h) * sy)
+        
+        cv2.rectangle(disp, (x1,y1), (x2,y2), (0,0,255), 2)
         # resize
         resized = cv2.resize(disp, (width, height), interpolation=cv2.INTER_AREA)
         rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
@@ -481,7 +490,7 @@ class HSVMaskTool(ctk.CTkToplevel):
         bbox_control_frame = ctk.CTkFrame(import_frame)
         bbox_control_frame.pack(side="left", padx=5)
 
-        self.use_bbox = tk.BooleanVar(master=self, value=False)
+        # self.use_bbox = tk.BooleanVar(master=self, value=False)
         self.bbox_frame = ctk.CTkFrame(import_frame)
         self.bbox_frame.pack(side="left", padx=5)
 
