@@ -35,7 +35,7 @@ GeoCamPal is a modular image processing tools with an intuitive graphical user i
 ### Prerequisites
 - **Python Version:** 3.8+  (Not required for GUI)
 - **Dependencies:**  
-  Install required packages using:
+  Install required packages using: (Not required for GUI)
   ```bash
   pip install -r requirements.txt
   ```
