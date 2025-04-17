@@ -252,6 +252,9 @@ class HSVMaskTool(ctk.CTkToplevel):
             self.top_frame.grid_rowconfigure(0, weight=1)
 
             self.top_left_frame = ctk.CTkFrame(self.top_frame)
+            self.top_left_frame.pack_propagate(False)
+            self.top_left_frame.configure(width=400, height=400)
+
             self.top_center_frame = ctk.CTkFrame(self.top_frame, fg_color="white")
             self.top_right_frame = ctk.CTkFrame(self.top_frame, fg_color="white")
 
@@ -737,8 +740,6 @@ class HSVMaskTool(ctk.CTkToplevel):
         self.bbox_entry.delete(0, tk.END)
         self.bbox_entry.insert(0, f"({bbox[0]}, {bbox[1]}, {bbox[2]}, {bbox[3]})")
     
-
-
     # -------------- DUAL SLIDERS --------------
 
     def toggle_dual_sliders(self):
@@ -906,9 +907,9 @@ class HSVMaskTool(ctk.CTkToplevel):
 
         cv_rgb = cv2.cvtColor(self.cv_image, cv2.COLOR_BGR2RGB)
         pil_img = Image.fromarray(cv_rgb)
-        ctk_img = ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=(pil_img.width, pil_img.height))
-        self.image_label.configure(image=ctk_img)
-        self.image_label.image = ctk_img
+        # ctk_img = ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=(pil_img.width, pil_img.height))
+        # self.image_label.configure(image=ctk_img)
+        # self.image_label.image = ctk_img
 
         self.update_image_display()
 
