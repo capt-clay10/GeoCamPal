@@ -255,7 +255,7 @@ class PixelToGCPWindow(ctk.CTkToplevel):
         all_files = os.listdir(self.image_folder)
         good_images = []
         for f in all_files:
-            if f.lower().endswith((".bmp", ".jpg", ".jpeg", ".png")):
+            if f.lower().endswith((".bmp", ".jpg", ".jpeg", ".png", ".tif")):
                 try:
                     # e.g. "GCP_12_cam1.bmp"
                     parts = f.split("_")

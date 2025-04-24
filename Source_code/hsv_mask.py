@@ -195,7 +195,7 @@ class HSVMaskTool(ctk.CTkToplevel):
             # super().__init__(*args, **kwargs)
             self.title("Feature Identifier- Configuration")
             # Increase height to accommodate console
-            self.geometry("1000x650")
+            self.geometry("1100x650")
             self.resizable(False, False)        
             
 
