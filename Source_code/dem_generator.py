@@ -30,6 +30,7 @@ from scipy.interpolate import griddata
 import threading
 from pathlib import Path
 from osgeo import gdal, osr
+osr.DontUseExceptions()
 matplotlib.use("Agg")  # Use headless mode for non-interactive environments
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("green")

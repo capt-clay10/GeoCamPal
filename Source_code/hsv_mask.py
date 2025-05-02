@@ -1195,6 +1195,8 @@ class HSVMaskTool(ctk.CTkToplevel):
 
     def create_new_edge(self):
         self.edited_edge_points = []
+        self.edit_history = []
+        self._record_history()
         self.redraw_canvas()
         self.creation_mode = True
         self.is_polygon_mode = False
@@ -1203,6 +1205,8 @@ class HSVMaskTool(ctk.CTkToplevel):
 
     def create_new_polygon(self):
         self.edited_edge_points = []
+        self.edit_history = []
+        self._record_history()  
         self.redraw_canvas()
         self.creation_mode = True
         self.is_polygon_mode = True
@@ -1301,6 +1305,13 @@ class HSVMaskTool(ctk.CTkToplevel):
                                                      tags=("vertex", f"vertex_{idx}"))
             self.vertex_objects.append(vertex_id)
 
+    def _record_history(self):
+        # keep only the last, say, 50 steps so it doesn’t explode
+        self.edit_history.append(self.edited_edge_points.copy())
+        if len(self.edit_history) > 10:
+            self.edit_history.pop(0)
+
+
     def on_canvas_single_click(self, event):
         """
         For new shape creation. If is_polygon_mode is True,
@@ -1326,11 +1337,14 @@ class HSVMaskTool(ctk.CTkToplevel):
                 self.edited_edge_points = []
                 self.edit_history = []
                 self.selected_vertex = None
+                # self.edited_edge_points.append([x_img, y_img])
+                self._record_history()
                 self.redraw_canvas()
                 self.update_edge_display()
                 return
 
         self.edited_edge_points.append([x_img, y_img])
+        self._record_history()
         self.redraw_canvas()
 
     def on_canvas_press(self, event):
@@ -1360,7 +1374,7 @@ class HSVMaskTool(ctk.CTkToplevel):
 
     def on_canvas_release(self, event):
         if self.selected_vertex is not None:
-            self.edit_history.append(self.edited_edge_points.copy())
+            self._record_history()
         self.selected_vertex = None
 
     def on_canvas_double_click(self, event):
@@ -1375,6 +1389,7 @@ class HSVMaskTool(ctk.CTkToplevel):
                 dist = self.distance(x_img, y_img, vx, vy)
                 if dist < threshold:
                     del self.edited_edge_points[idx]
+                    self._record_history()
                     self.redraw_canvas()
                     return
         elif self.vertex_mode == "add":
@@ -1396,6 +1411,7 @@ class HSVMaskTool(ctk.CTkToplevel):
                     self.edited_edge_points.append([x_img, y_img])
                 else:
                     self.edited_edge_points.insert(best_index, [x_img, y_img])
+            self._record_history()
             self.redraw_canvas()
 
     def distance_to_segment(self, P, A, B):
@@ -1416,6 +1432,7 @@ class HSVMaskTool(ctk.CTkToplevel):
         if self.selected_vertex is not None:
             del self.edited_edge_points[self.selected_vertex]
             self.selected_vertex = None
+            self._record_history()
             self.redraw_canvas()
 
     def set_vertex_mode(self, mode):
@@ -1423,6 +1440,7 @@ class HSVMaskTool(ctk.CTkToplevel):
 
     def delete_all_vertices(self):
         self.edited_edge_points = []
+        self._record_history()
         self.redraw_canvas()
 
     def undo_last_action(self):

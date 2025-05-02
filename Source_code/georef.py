@@ -8,6 +8,7 @@ from tkinter import filedialog, messagebox
 import threading
 import glob
 from osgeo import gdal, osr
+osr.DontUseExceptions()
 import sys
 from tkinter import ttk
 ctk.set_appearance_mode("Dark")
