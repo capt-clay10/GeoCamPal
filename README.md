@@ -130,21 +130,16 @@ Automatic HSV masking **+** manual editing.
 
 ### DEM Generator
 
-Creates daily DEM rasters from shoreline GeoJSONs and minute‑scale water‑level data, with optional XYZ export and batch mode support.
+Creates DEM rasters from shoreline GeoJSONs (exported from feature identifier tool) and water‑level data, with optional XYZ export and batch mode support.
 
 ---
 
-### Raw Timestacker
-
-Generate distance‑time timestack PNGs from image bursts or video frames. Includes ROI selector, resolution tagging, and batch processing.
-
----
-
-### Wave Run-Up Calculator
+### Raw Timestacker and Wave Run-Up Calculator
 
 ![Run‑Up](https://github.com/user-attachments/assets/d2a0f3eb-0071-4e1f-bd4f-eda190cc72df)
 
-Overlay a binary mask, extract the run‑up contour, and export **(time, distance)** CSVs or plots.
+Generate distance‑time timestack PNGs from image bursts or video frames. Includes ROI selector, resolution tagging, and batch processing. Feed time stack in the Feature identifier tool to identify the wave runup line
+Overlay the binary mask (exported from feature identifier tool), extract the run‑up contour, and export **(time, distance)** CSVs.
 
 ---
 
