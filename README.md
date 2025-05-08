@@ -12,12 +12,12 @@
 
 | Module | What it does |
 |--------|--------------|
-| **Pixel → GCP Converter** | Pick Ground‑Control Points (GCPs) in imagery and export pixel‑to‑world mappings. |
-| **Homography Matrix Creator** | Derive robust homography matrices (RANSAC & optional simulated‑annealing subset selection). |
+| **Feature Identifier** | HSV masking **+** manual polygon editing for feature identification and export |
+| **Pixel → GCP Converter** | Pick Ground‑Control Points (GCPs) in imagery and export pixel‑to‑world mappings. |
+| **Homography Matrix Creator** | Derive homography matrices (RANSAC & optional simulated‑annealing subset selection). |
 | **Georeferencing Tool** | Batch‑warp oblique images into spatial reference systems with secondary AOI cropping. |
-| **Feature Identifier** | HSV masking **+** manual polygon editing to export COCO‑style training data. |
 | **DEM Generator** | Fuse shorelines and water‑level data into daily DEM rasters (with optional XYZ export). |
-| **Raw Timestacker** | Build calibrated timestack images from video/photo bursts. |
+| **Raw Timestacker** | Build calibrated timestack images from video/photo bursts. |
 | **Wave Run‑Up Calculator** | Extract run‑up contours and generate distance‑time plots or CSV outputs. |
 
 ---
@@ -25,16 +25,16 @@
 ## 📑 Table of Contents
 
 - [Installation](#installation)
-- [Quick Start](#quick-start)
+- [Quick Start](#quick-start)
 - [Modules](#modules)
   - [Launcher](#launcher)
-  - [Pixel → GCP Converter](#pixel--gcp-converter)
+  - [Pixel → GCP Converter](#pixel-gcp-converter)
   - [Homography Matrix Creator](#homography-matrix-creator)
   - [Georeferencing Tool](#georeferencing-tool)
   - [Feature Identifier](#feature-identifier)
   - [DEM Generator](#dem-generator)
-  - [Raw Timestacker](#raw-timestacker)
-  - [Wave Run‑Up Calculator](#wave-run-up-calculator)
+  - [Raw Timestacker](#raw-timestacker)
+  - [Wave Run-Up Calculator](#wave-run-up-calculator)
 - [Contributing](#contributing)
 - [License](#license)
 - [Disclaimer](#disclaimer)
@@ -43,11 +43,11 @@
 
 ## Installation
 
-### 1 · Download the Stand‑Alone GUI (Recommended)
+### 1 · Download the Stand‑Alone GUI (Recommended)
 
 Grab the latest release for Windows from the [**Releases**](https://github.com/capt-clay10/GeoCamPal/releases) page and run `GeoCamPal.exe`. No Python environment required but available through `main.py`.
 
-### 2 · Run from Source
+### 2 · Run from Source
 
 ```bash
 # clone the repo
@@ -65,7 +65,7 @@ $ python main.py
 
 ---
 
-## Quick Start
+## Quick Start
 
 ```text
 1. Launch the application → select the desired module from the launcher window.
@@ -85,13 +85,13 @@ The central hub: click any card to open the corresponding tool in a new window.
 
 ---
 
-### Pixel → GCP Converter
+### Pixel → GCP Converter
 
-![Pixel → GCP](https://github.com/user-attachments/assets/f2c5d443-49a9-429f-8850-b6efcb3afeca)
+![Pixel → GCP](https://github.com/user-attachments/assets/f2c5d443-49a9-429f-8850-b6efcb3afeca)
 
 *Input*: A folder of `GCP_XX_cam*.jpg` images and a CSV of GCP lat/longs.
 
-*Output*: CSV mapping `Pixel_X Pixel_Y ↔ Real_X Real_Y` (optionally converted to UTM).
+*Output*: CSV mapping `Pixel_X Pixel_Y ↔ Real_X Real_Y` (optionally converted to UTM).
 
 ---
 
@@ -99,8 +99,8 @@ The central hub: click any card to open the corresponding tool in a new window.
 
 ![Homography](https://github.com/user-attachments/assets/dbba3cd7-e109-4362-b03a-c4639818f71f)
 
-* Compute 3 × 3 homography matrices with RANSAC.
-* **Advanced mode**: simulated‑annealing search to select the optimal GCP subset.
+* Compute 3 × 3 homography matrices with RANSAC.
+* **Advanced mode**: simulated‑annealing search to select the optimal GCP subset.
 
 ---
 
@@ -120,7 +120,7 @@ Automatic HSV masking **+** manual editing.
 | Mode | Use Case |
 |------|----------|
 | **Individual** | Tweak HSV sliders on a single image. |
-| **Machine Learning** | Step through a folder, export masks/edges as COCO. |
+| **Machine Learning** | Step through a folder, export masks/edges as COCO. |
 | **Batch** | Fire‑and‑forget detection across a directory. |
 
 ![Auto](https://github.com/user-attachments/assets/3a3abb66-9938-4d82-93c0-c66147afa488)
@@ -130,36 +130,31 @@ Automatic HSV masking **+** manual editing.
 
 ### DEM Generator
 
-Creates daily DEM rasters from shoreline GeoJSONs and minute‑scale water‑level data, with optional XYZ export and batch mode support.
+Creates DEM rasters from shoreline GeoJSONs (exported from feature identifier tool) and water‑level data, with optional XYZ export and batch mode support.
 
 ---
 
-### Raw Timestacker
-
-Generate distance‑time timestack PNGs from image bursts or video frames. Includes ROI selector, resolution tagging, and batch processing.
-
----
-
-### Wave Run‑Up Calculator
+### Raw Timestacker and Wave Run-Up Calculator
 
 ![Run‑Up](https://github.com/user-attachments/assets/d2a0f3eb-0071-4e1f-bd4f-eda190cc72df)
 
-Overlay a binary mask, extract the run‑up contour, and export **(time, distance)** CSVs or plots.
+Generate distance‑time timestack PNGs from image bursts or video frames. Includes ROI selector, resolution tagging, and batch processing. Feed time stack in the Feature identifier tool to identify the wave runup line, currently limited to HSV based (in image only the effluent line not actual wave runup)
+Overlay the binary mask (exported from feature identifier tool), extract the run‑up contour, and export **(time, distance)** CSVs.
 
 ---
 
-## 🤝 Contributing
+## Contributing
 
-Contributions, bug reports, and feature requests are welcome! Please open an **issue** or **pull request**. If youʼre new to the project, start with the open [good first issues](https://github.com/<your‑user>/GeoCamPal/labels/good%20first%20issue).
+Contributions, bug reports, and feature requests are welcome! Please open an **issue** or **pull request**. If youʼre new to the project, start with the open [good first issues](https://github.com/capt-clay10/GeoCamPal/labels/good%20first%20issue).
 
 ---
 
-## 📜 License
+## License
 
 GeoCamPal is distributed under the **MIT License** — see the [LICENSE](LICENSE) file for details.
 
 ---
 
-## ⚠️ Disclaimer
+## Disclaimer
 
 This software is provided *as is*. Always validate results before using them in critical analyses.
