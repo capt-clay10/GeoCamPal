@@ -11,15 +11,16 @@ from osgeo import gdal, osr
 osr.DontUseExceptions()
 import sys
 from tkinter import ttk
+
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("green")
 
 
 def resource_path(relative_path: str) -> str:
     try:
-        base_path = sys._MEIPASS  # If running in a PyInstaller .exe
+        base_path = sys._MEIPASS           # PyInstaller
     except Exception:
-        base_path = os.path.dirname(__file__)  # Running directly from source
+        base_path = os.path.dirname(__file__)
     return os.path.join(base_path, relative_path)
 
 
@@ -28,18 +29,17 @@ class StdoutRedirector:
         self.text_widget = text_widget
 
     def write(self, message):
-        # Insert the message into the text widget and scroll to the end.
         self.text_widget.insert(tk.END, message)
         self.text_widget.see(tk.END)
 
     def flush(self):
-        pass  # For compatibility with Python's IO system.
+        pass
 
 
 class GeoReferenceModule(ctk.CTkToplevel):
     def __init__(self, master=None, *args, **kwargs):
         super().__init__(master=master, *args, **kwargs)
-        self.title("Advanced Georeferencing Tool")
+        self.title("Georeferencing Tool")
         self.geometry("1200x800")
 
         try:
@@ -47,69 +47,64 @@ class GeoReferenceModule(ctk.CTkToplevel):
         except Exception as e:
             print("Warning: Could not load window icon:", e)
 
-        self.H = None  # Homography matrix
+        # ---------- state ----------
+        self.H = None
         self.image_list = []
         self.current_index = 0
         self.input_folder = ""
         self.output_folder = ""
-        self.scale_factor = 4  # Default scale factor; user can override
+        self.batch_main_folder = ""              # NEW
+        self.scale_factor = 4
         self.current_zoom = 1.0
+
+        # ---------- UI ----------
         self.initialize_components()
 
-        # ---- Add CONSOLE PANEL at the bottom (new row 5) ----
-        self.grid_rowconfigure(5, weight=0)
+        # Console row now sits at grid‑row 6 (we added a new batch panel at 5)
+        self.grid_rowconfigure(6, weight=0)
         self.console_frame = ctk.CTkFrame(self)
-        self.console_frame.grid(row=5, column=0, sticky="nsew", padx=5, pady=5)
-        self.console_text = tk.Text(self.console_frame, wrap="word", height=10)
+        self.console_frame.grid(row=6, column=0, sticky="nsew", padx=5, pady=5)
+        self.console_text = tk.Text(self.console_frame, wrap="word", height=8)
         self.console_text.pack(fill="both", expand=True, padx=5, pady=5)
 
-        # Redirect stdout and stderr to the console text widget.
         self.stdout_redirector = StdoutRedirector(self.console_text)
         sys.stdout = self.stdout_redirector
         sys.stderr = self.stdout_redirector
         print("Here you may see console outputs")
 
+    # ------------------------------------------------------------------
+    #  ------------------------  UI LAYOUT  ----------------------------
+    # ------------------------------------------------------------------
     def initialize_components(self):
-        # Configure grid layout for five rows
+        # grid rows: 0‑top images | 1‑file | 2‑AOI | 3‑crop | 4‑final(single) |
+        #            5‑batch(main‑folder) | 6‑console
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(0, weight=2)  # Top panel (images)
-        self.grid_rowconfigure(1, weight=1)  # File controls row
-        self.grid_rowconfigure(2, weight=1)  # AOI selection row
-        self.grid_rowconfigure(3, weight=1)  # Cropping adjustment row
-        self.grid_rowconfigure(4, weight=1)  # Final processing row
+        for r in range(5):
+            self.grid_rowconfigure(r, weight=1)
 
-        # ---- TOP PANEL: Three Panels Side by Side ----
+        # ---- 0  TOP IMAGES -------------------------------------------
         self.top_panel = ctk.CTkFrame(self)
         self.top_panel.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
 
-        # Original Image Panel (Left)
         self.orig_frame = ctk.CTkFrame(self.top_panel, width=400, height=400)
         self.orig_frame.pack_propagate(False)
-        self.orig_frame.pack(side="left", fill="both",
-                             expand=True, padx=5, pady=5)
+        self.orig_frame.pack(side="left", fill="both", expand=True, padx=5, pady=5)
         self.orig_label = ctk.CTkLabel(self.orig_frame, text="Original Image")
         self.orig_label.pack(fill="both", expand=True)
 
-        # Initial Georeferenced Image Panel (Middle)
         self.geo_frame = ctk.CTkFrame(self.top_panel, width=400, height=400)
         self.geo_frame.pack_propagate(False)
-        self.geo_frame.pack(side="left", fill="both",
-                            expand=True, padx=5, pady=5)
-        self.geo_label = ctk.CTkLabel(
-            self.geo_frame, text="Initial Georeferenced Image")
+        self.geo_frame.pack(side="left", fill="both", expand=True, padx=5, pady=5)
+        self.geo_label = ctk.CTkLabel(self.geo_frame, text="Initial Georeferenced Image")
         self.geo_label.pack(fill="both", expand=True)
 
-        # Cropped Georeferenced Image Panel (Right)
-        self.cropped_frame = ctk.CTkFrame(
-            self.top_panel, width=400, height=400)
+        self.cropped_frame = ctk.CTkFrame(self.top_panel, width=400, height=400)
         self.cropped_frame.pack_propagate(False)
-        self.cropped_frame.pack(side="left", fill="both",
-                                expand=True, padx=5, pady=5)
-        self.cropped_label = ctk.CTkLabel(
-            self.cropped_frame, text="Cropped Georeferenced Image")
+        self.cropped_frame.pack(side="left", fill="both", expand=True, padx=5, pady=5)
+        self.cropped_label = ctk.CTkLabel(self.cropped_frame, text="Cropped Georeferenced Image")
         self.cropped_label.pack(fill="both", expand=True)
 
-        # ---- SECOND ROW: File Controls ----
+        # ---- 1  FILE CONTROLS ----------------------------------------
         self.control_panel = ctk.CTkFrame(self)
         self.control_panel.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
 
@@ -118,51 +113,36 @@ class GeoReferenceModule(ctk.CTkToplevel):
 
         self.image_entry = ctk.CTkEntry(self.file_frame, width=300)
         self.image_entry.pack(side="left", padx=5)
-        ctk.CTkButton(self.file_frame, text="Browse Image",
-                      command=self.load_image).pack(side="left", padx=5)
+        ctk.CTkButton(self.file_frame, text="Browse Image", command=self.load_image).pack(side="left", padx=5)
 
         self.homo_entry = ctk.CTkEntry(self.file_frame, width=300)
         self.homo_entry.pack(side="left", padx=5)
-        ctk.CTkButton(self.file_frame, text="Load Homography",
-                      command=self.load_homography).pack(side="left", padx=5)
+        ctk.CTkButton(self.file_frame, text="Load Homography", command=self.load_homography).pack(side="left", padx=5)
 
         ctk.CTkButton(self.control_panel, text="Initial Georeferencing",
                       command=self.perform_initial_georeferencing).pack(side="left", padx=10)
 
-        # ---- THIRD ROW: AOI Selection and Secondary Georeferencing ----
-        # All controls in one row: radio buttons, secondary georeferencing button, and manual AOI entry.
+        # ---- 2  AOI ---------------------------------------------------
         self.aoi_panel = ctk.CTkFrame(self)
         self.aoi_panel.grid(row=2, column=0, sticky="nsew", padx=5, pady=5)
 
         self.aoi_var = ctk.StringVar(value="bottom_left")
-        aoi_options = [
-            ("Bottom Left", "bottom_left"),
-            ("Bottom Right", "bottom_right"),
-            ("Top Left", "top_left"),
-            ("Top Right", "top_right"),
-            ("Manual", "manual")
-        ]
-        col = 0
-        for text, value in aoi_options:
-            rb = ctk.CTkRadioButton(
-                self.aoi_panel, text=text, variable=self.aoi_var, value=value)
-            rb.grid(row=0, column=col, padx=5, pady=5, sticky="w")
-            col += 1
+        for idx, (txt, val) in enumerate([
+            ("Bottom Left", "bottom_left"), ("Bottom Right", "bottom_right"),
+            ("Top Left", "top_left"), ("Top Right", "top_right"), ("Manual", "manual")]):
+            ctk.CTkRadioButton(self.aoi_panel, text=txt, variable=self.aoi_var,
+                               value=val).grid(row=0, column=idx, padx=5, pady=5, sticky="w")
 
-        # Secondary Georeferencing button (same row)
         ctk.CTkButton(self.aoi_panel, text="Secondary Georeferencing",
-                      command=self.perform_secondary_georeferencing).grid(row=0, column=col, padx=5, pady=5, sticky="w")
-        col += 1
+                      command=self.perform_secondary_georeferencing).grid(row=0, column=5, padx=5, pady=5, sticky="w")
 
-        # Manual AOI entry (visible only if "Manual" is selected) in the same row
         self.manual_entry = ctk.CTkEntry(self.aoi_panel, width=300,
                                          placeholder_text="x1,y1,x2,y2,x3,y3,x4,y4")
-        self.manual_entry.grid(row=0, column=col, padx=5, pady=5, sticky="w")
-        self.manual_entry.grid_remove()  # Hide by default
+        self.manual_entry.grid(row=0, column=6, padx=5, pady=5, sticky="w")
+        self.manual_entry.grid_remove()
         self.aoi_var.trace_add("write", self.toggle_manual_entry)
 
-        # ---- FOURTH ROW: Cropping Adjustment & Scale Factor & Show Crop Button ----
-        # Place cropping entries, a scale factor input, and the Show Crop button in one row.
+        # ---- 3  CROP --------------------------------------------------
         self.crop_panel = ctk.CTkFrame(self)
         self.crop_panel.grid(row=3, column=0, sticky="nsew", padx=5, pady=5)
 
@@ -170,55 +150,54 @@ class GeoReferenceModule(ctk.CTkToplevel):
                        "East Adjust (max_x)", "West Extend (min_x)"]
         self.crop_entries = []
         col = 0
-        for label in crop_labels:
-            ctk.CTkLabel(self.crop_panel, text=label).grid(
-                row=0, column=col, padx=5)
+        for lbl in crop_labels:
+            ctk.CTkLabel(self.crop_panel, text=lbl).grid(row=0, column=col, padx=5)
             col += 1
-            entry = ctk.CTkEntry(self.crop_panel, width=80)
-            entry.grid(row=0, column=col, padx=5)
-            self.crop_entries.append(entry)
+            ent = ctk.CTkEntry(self.crop_panel, width=80)
+            ent.grid(row=0, column=col, padx=5)
+            self.crop_entries.append(ent)
             col += 1
 
-        # New: Scale Factor entry (overrides default if provided)
-        ctk.CTkLabel(self.crop_panel, text="Scale Factor").grid(
-            row=0, column=col, padx=5)
+        ctk.CTkLabel(self.crop_panel, text="Scale Factor").grid(row=0, column=col, padx=5)
         col += 1
         self.scale_entry = ctk.CTkEntry(self.crop_panel, width=80)
         self.scale_entry.grid(row=0, column=col, padx=5)
         col += 1
+        ctk.CTkButton(self.crop_panel, text="Show Crop", command=self.show_crop).grid(row=0, column=col, padx=5)
 
-        # Show Crop button aligned in the same row
-        ctk.CTkButton(self.crop_panel, text="Show Crop",
-                      command=self.show_crop).grid(row=0, column=col, padx=5)
-
-        # ---- FIFTH ROW: Final Processing (Batch) ----
+        # ---- 4  SINGLE‑FOLDER FINAL ----------------------------------
         self.final_panel = ctk.CTkFrame(self)
         self.final_panel.grid(row=4, column=0, sticky="nsew", padx=5, pady=5)
 
-        # Browse Input Folder button and label
-        self.input_folder_label = ctk.CTkLabel(
-            self.final_panel, text="Input Folder: Not selected")
+        self.input_folder_label = ctk.CTkLabel(self.final_panel, text="Input Folder: Not selected")
         self.input_folder_label.pack(side="left", padx=5)
-        ctk.CTkButton(self.final_panel, text="Browse Input Folder",
-                      command=self.load_folder).pack(side="left", padx=5)
+        ctk.CTkButton(self.final_panel, text="Browse Input Folder", command=self.load_folder).pack(side="left", padx=5)
 
-        # Browse Output Folder button and label
-        self.output_folder_label = ctk.CTkLabel(
-            self.final_panel, text="Output Folder: Not selected")
+        self.output_folder_label = ctk.CTkLabel(self.final_panel, text="Output Folder: Not selected")
         self.output_folder_label.pack(side="left", padx=5)
-        ctk.CTkButton(self.final_panel, text="Browse Output Folder",
-                      command=self.select_output_folder).pack(side="left", padx=5)
+        ctk.CTkButton(self.final_panel, text="Browse Output Folder", command=self.select_output_folder).pack(side="left", padx=5)
 
-        # EPSG (CRS) entry for spatial reference
-        self.epsg_entry = ctk.CTkEntry(
-            self.final_panel, width=80, placeholder_text="EPSG Code")
+        self.epsg_entry = ctk.CTkEntry(self.final_panel, width=80, placeholder_text="EPSG Code")
         self.epsg_entry.pack(side="left", padx=5)
 
-        ctk.CTkButton(self.final_panel, text="Final Georeferencing",
-                      command=self.process_all_images).pack(side="left", padx=5)
-        self.progress = ttk.Progressbar(
-            self.final_panel, orient="horizontal", mode="determinate")
+        ctk.CTkButton(self.final_panel, text="Final Georeferencing", command=self.process_all_images).pack(side="left", padx=5)
+        self.progress = ttk.Progressbar(self.final_panel, orient="horizontal", mode="determinate")
         self.progress.pack(side="left", fill="x", expand=True, padx=5)
+
+        # ---- 5  NEW  BATCH‑MAIN‑FOLDER PANEL --------------------------
+        self.batch_panel = ctk.CTkFrame(self)
+        self.batch_panel.grid(row=5, column=0, sticky="nsew", padx=5, pady=5)
+
+        self.batch_main_label = ctk.CTkLabel(self.batch_panel, text="Main Folder: Not selected")
+        self.batch_main_label.pack(side="left", padx=5)
+        ctk.CTkButton(self.batch_panel, text="Browse Main Folder", command=self.select_batch_main_folder).pack(side="left", padx=5)
+        ctk.CTkButton(self.batch_panel, text="Start Batch Process", command=self.start_batch_process).pack(side="left", padx=5)
+
+        self.batch_progress = ttk.Progressbar(self.batch_panel, orient="horizontal", mode="determinate", length=180)
+        self.batch_progress.pack(side="left", fill="x", expand=True, padx=5)
+
+        self.batch_inner_progress = ttk.Progressbar(self.batch_panel, orient="horizontal", mode="determinate", length=150)
+        self.batch_inner_progress.pack(side="left", padx=5)
 
     def toggle_manual_entry(self, *args):
         if self.aoi_var.get() == "manual":
@@ -595,11 +574,76 @@ class GeoReferenceModule(ctk.CTkToplevel):
         return True
 
 
+
+    def select_batch_main_folder(self):
+        folder = filedialog.askdirectory()
+        if folder:
+            self.batch_main_folder = folder
+            self.batch_main_label.configure(text=f"Main Folder: {folder}")
+
+    def start_batch_process(self):
+        if not self.batch_main_folder:
+            messagebox.showerror("Error", "Please select a MAIN folder containing sub‑folders.")
+            return
+        if not self.output_folder:
+            messagebox.showerror("Error", "Please select an OUTPUT folder.")
+            return
+        if self.H is None:
+            messagebox.showerror("Error", "Please load a homography matrix first.")
+            return
+
+        def _batch_thread():
+            subfolders = [f.path for f in os.scandir(self.batch_main_folder) if f.is_dir()]
+            if not subfolders:
+                messagebox.showerror("Error", "No sub‑folders found in the main folder.")
+                return
+
+            total_subfolders = len(subfolders)
+            for s_idx, sub in enumerate(sorted(subfolders), start=1):
+                img_paths = sorted(glob.glob(os.path.join(sub, "*.bmp")) +
+                                   glob.glob(os.path.join(sub, "*.jpg")) +
+                                   glob.glob(os.path.join(sub, "*.jpeg")) +
+                                   glob.glob(os.path.join(sub, "*.png")) +
+                                   glob.glob(os.path.join(sub, "*.tif")))
+                if not img_paths:
+                    print(f"[Batch]  Skipping empty folder: {sub}")
+                    self.batch_progress["value"] = s_idx / total_subfolders * 100
+                    self.update_idletasks()
+                    continue
+
+                out_sub = os.path.join(self.output_folder, os.path.basename(sub))
+                os.makedirs(out_sub, exist_ok=True)
+
+                for i_idx, img_path in enumerate(img_paths, start=1):
+                    try:
+                        out_name = os.path.splitext(os.path.basename(img_path))[0] + ".tif"
+                        out_path = os.path.join(out_sub, out_name)
+                        self.georeference_and_save_image(img_path, out_path)
+                    except Exception as e:
+                        print(f"[Batch] Error in {img_path}: {e}")
+
+                    # inner (per‑image) progress
+                    self.batch_inner_progress["value"] = i_idx / len(img_paths) * 100
+                    self.update_idletasks()
+
+                # reset inner bar & update outer bar
+                self.batch_inner_progress["value"] = 0
+                self.batch_progress["value"] = s_idx / total_subfolders * 100
+                self.update_idletasks()
+
+            messagebox.showinfo("Batch Complete", "All sub‑folders processed.")
+            self.batch_progress["value"] = 0
+
+        threading.Thread(target=_batch_thread, daemon=True).start()
+
+
+# ----------------------------------------------------------------------
 def main():
     root = ctk.CTk()
-    root.withdraw()               # hide the dummy root
+    root.withdraw()
     win = GeoReferenceModule(master=root)
     win.mainloop()
+
 
 if __name__ == "__main__":
     main()
