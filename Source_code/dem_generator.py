@@ -174,7 +174,7 @@ class CreateDemWindow(ctk.CTkToplevel):
         ctk.CTkEntry(dem, textvariable=self.spacing_var, width=60).pack(side="left", padx=5)  # NEW
 
         ctk.CTkLabel(dem, text="Interpolation:").pack(side="left", padx=10)
-        self.interp_var = tk.StringVar(value="linear")
+        self.interp_var = tk.StringVar(value="nearest")
         ctk.CTkOptionMenu(dem, variable=self.interp_var, values=["linear", "cubic","nearest"]).pack(side="left", padx=5)
 
         ctk.CTkButton(dem, text="Generate next DEM", command=self.on_generate_next_dem).pack(side="left", padx=15)
