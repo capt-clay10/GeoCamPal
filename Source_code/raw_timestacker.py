@@ -507,7 +507,7 @@ class TimestackTool(ctk.CTkToplevel):
                 # Sort & output name --------------------------------------
                 img_files.sort(key=lambda f: os.path.basename(f))
                 first_ts = "_".join(os.path.basename(img_files[0]).split("_")[0:5])
-                out_name = f"{idx:03d}_{first_ts}_raw_timestack.png"
+                out_name = f"{first_ts}_raw_timestack.png"
                 out_path = os.path.join(out_folder, out_name)
                 try:
                     generate_calibrated_timestack(img_files, self.bbox, resolution_x_m, out_path)
