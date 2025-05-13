@@ -10,7 +10,8 @@ import glob
 from osgeo import gdal, osr
 osr.DontUseExceptions()
 import sys
-from tkinter import ttk
+from tkinter import ttk          # still used for other bits if needed
+import time                      # ← NEW
 
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("green")
@@ -18,7 +19,7 @@ ctk.set_default_color_theme("green")
 
 def resource_path(relative_path: str) -> str:
     try:
-        base_path = sys._MEIPASS           # PyInstaller
+        base_path = sys._MEIPASS
     except Exception:
         base_path = os.path.dirname(__file__)
     return os.path.join(base_path, relative_path)
@@ -37,6 +38,9 @@ class StdoutRedirector:
 
 
 class GeoReferenceModule(ctk.CTkToplevel):
+    # ---------------------------------------------------------------
+    # ----------------------  UI LAYOUT  ----------------------------
+    # ---------------------------------------------------------------
     def __init__(self, master=None, *args, **kwargs):
         super().__init__(master=master, *args, **kwargs)
         self.title("Georeferencing Tool")
@@ -53,14 +57,14 @@ class GeoReferenceModule(ctk.CTkToplevel):
         self.current_index = 0
         self.input_folder = ""
         self.output_folder = ""
-        self.batch_main_folder = ""              # NEW
+        self.batch_main_folder = ""
         self.scale_factor = 4
         self.current_zoom = 1.0
 
         # ---------- UI ----------
         self.initialize_components()
 
-        # Console row now sits at grid‑row 6 (we added a new batch panel at 5)
+        # console panel stays identical
         self.grid_rowconfigure(6, weight=0)
         self.console_frame = ctk.CTkFrame(self)
         self.console_frame.grid(row=6, column=0, sticky="nsew", padx=5, pady=5)
@@ -72,17 +76,30 @@ class GeoReferenceModule(ctk.CTkToplevel):
         sys.stderr = self.stdout_redirector
         print("Here you may see console outputs")
 
-    # ------------------------------------------------------------------
-    #  ------------------------  UI LAYOUT  ----------------------------
-    # ------------------------------------------------------------------
+    # ---------------------------------------------------------------
+    # ------------------  ETA helper (NEW)  -------------------------
+    # ---------------------------------------------------------------
+    def _eta_string(self, start_ts: float, frac_done: float) -> str:
+        """Return a human‑readable ETA string."""
+        if frac_done <= 0:
+            return "ETA: –"
+        elapsed = time.time() - start_ts
+        remaining = elapsed * (1 / frac_done - 1)
+        if remaining >= 3600:
+            return f"ETA: {remaining / 3600:.1f} h"
+        if remaining >= 60:
+            return f"ETA: {remaining / 60:.1f} min"
+        return f"ETA: {int(remaining)} s"
+
+    # ---------------------------------------------------------------
     def initialize_components(self):
-        # grid rows: 0‑top images | 1‑file | 2‑AOI | 3‑crop | 4‑final(single) |
+        # grid rows: 0‑top images | 1‑file | 2‑AOI | 3‑crop | 4‑final(single)
         #            5‑batch(main‑folder) | 6‑console
         self.grid_columnconfigure(0, weight=1)
         for r in range(5):
             self.grid_rowconfigure(r, weight=1)
 
-        # ---- 0  TOP IMAGES -------------------------------------------
+        # ---- 0  TOP IMAGES (unchanged) ----------------------------
         self.top_panel = ctk.CTkFrame(self)
         self.top_panel.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
 
@@ -104,7 +121,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
         self.cropped_label = ctk.CTkLabel(self.cropped_frame, text="Cropped Georeferenced Image")
         self.cropped_label.pack(fill="both", expand=True)
 
-        # ---- 1  FILE CONTROLS ----------------------------------------
+        # ---- 1  FILE CONTROLS (unchanged) -------------------------
         self.control_panel = ctk.CTkFrame(self)
         self.control_panel.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
 
@@ -122,7 +139,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
         ctk.CTkButton(self.control_panel, text="Initial Georeferencing",
                       command=self.perform_initial_georeferencing).pack(side="left", padx=10)
 
-        # ---- 2  AOI ---------------------------------------------------
+        # ---- 2  AOI (unchanged) ----------------------------------
         self.aoi_panel = ctk.CTkFrame(self)
         self.aoi_panel.grid(row=2, column=0, sticky="nsew", padx=5, pady=5)
 
@@ -142,7 +159,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
         self.manual_entry.grid_remove()
         self.aoi_var.trace_add("write", self.toggle_manual_entry)
 
-        # ---- 3  CROP --------------------------------------------------
+        # ---- 3  CROP (unchanged) ---------------------------------
         self.crop_panel = ctk.CTkFrame(self)
         self.crop_panel.grid(row=3, column=0, sticky="nsew", padx=5, pady=5)
 
@@ -165,7 +182,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
         col += 1
         ctk.CTkButton(self.crop_panel, text="Show Crop", command=self.show_crop).grid(row=0, column=col, padx=5)
 
-        # ---- 4  SINGLE‑FOLDER FINAL ----------------------------------
+        # ---- 4  SINGLE‑FOLDER FINAL (progress bar replaced) ------
         self.final_panel = ctk.CTkFrame(self)
         self.final_panel.grid(row=4, column=0, sticky="nsew", padx=5, pady=5)
 
@@ -180,24 +197,31 @@ class GeoReferenceModule(ctk.CTkToplevel):
         self.epsg_entry = ctk.CTkEntry(self.final_panel, width=80, placeholder_text="EPSG Code")
         self.epsg_entry.pack(side="left", padx=5)
 
-        ctk.CTkButton(self.final_panel, text="Final Georeferencing", command=self.process_all_images).pack(side="left", padx=5)
-        self.progress = ttk.Progressbar(self.final_panel, orient="horizontal", mode="determinate")
-        self.progress.pack(side="left", fill="x", expand=True, padx=5)
+        ctk.CTkButton(self.final_panel, text="Final Georeferencing",
+                      command=self.process_all_images).pack(side="left", padx=5)
 
-        # ---- 5  NEW  BATCH‑MAIN‑FOLDER PANEL --------------------------
+        self.progress = ctk.CTkProgressBar(self.final_panel, width=220)  # ← NEW (was ttk)
+        self.progress.set(0)
+        self.progress.pack(side="left", padx=8)
+        self.progress_eta = ctk.CTkLabel(self.final_panel, text="ETA: –")  # ← NEW
+        self.progress_eta.pack(side="left", padx=5)
+
+        # ---- 5  BATCH‑MAIN‑FOLDER PANEL (single bar + ETA) -------
         self.batch_panel = ctk.CTkFrame(self)
         self.batch_panel.grid(row=5, column=0, sticky="nsew", padx=5, pady=5)
 
         self.batch_main_label = ctk.CTkLabel(self.batch_panel, text="Main Folder: Not selected")
         self.batch_main_label.pack(side="left", padx=5)
-        ctk.CTkButton(self.batch_panel, text="Browse Main Folder", command=self.select_batch_main_folder).pack(side="left", padx=5)
-        ctk.CTkButton(self.batch_panel, text="Start Batch Process", command=self.start_batch_process).pack(side="left", padx=5)
+        ctk.CTkButton(self.batch_panel, text="Browse Main Folder",
+                      command=self.select_batch_main_folder).pack(side="left", padx=5)
+        ctk.CTkButton(self.batch_panel, text="Start Batch Process",
+                      command=self.start_batch_process).pack(side="left", padx=5)
 
-        self.batch_progress = ttk.Progressbar(self.batch_panel, orient="horizontal", mode="determinate", length=180)
-        self.batch_progress.pack(side="left", fill="x", expand=True, padx=5)
-
-        self.batch_inner_progress = ttk.Progressbar(self.batch_panel, orient="horizontal", mode="determinate", length=150)
-        self.batch_inner_progress.pack(side="left", padx=5)
+        self.batch_progress = ctk.CTkProgressBar(self.batch_panel, width=220)  # ← NEW (single bar)
+        self.batch_progress.set(0)
+        self.batch_progress.pack(side="left", padx=8)
+        self.batch_eta_label = ctk.CTkLabel(self.batch_panel, text="ETA: –")  # ← NEW
+        self.batch_eta_label.pack(side="left", padx=5)
 
     def toggle_manual_entry(self, *args):
         if self.aoi_var.get() == "manual":
@@ -411,52 +435,57 @@ class GeoReferenceModule(ctk.CTkToplevel):
         ctk_img = ctk.CTkImage(light_image=img, dark_image=img, size=img.size)
         self.cropped_label.configure(image=ctk_img)
         self.cropped_label.image = ctk_img
-
-    # --- Load folder for batch processing (Input Folder) ---
+    # --- Load folder for batch processing -------------------------
     def load_folder(self):
         folder = filedialog.askdirectory()
         if folder:
             self.input_folder = folder
-            # Filter only image files (avoid non-image files like .zip)
             self.image_list = sorted(glob.glob(os.path.join(folder, "*.bmp")) +
                                      glob.glob(os.path.join(folder, "*.jpg")) +
                                      glob.glob(os.path.join(folder, "*.jpeg")) +
                                      glob.glob(os.path.join(folder, "*.png")) +
                                      glob.glob(os.path.join(folder, "*.tif")))
             self.input_folder_label.configure(text=f"Input Folder: {folder}")
-            messagebox.showinfo(
-                "Info", f"Loaded {len(self.image_list)} images")
+            messagebox.showinfo("Info", f"Loaded {len(self.image_list)} images")
 
-    # --- Select Output Folder ---
     def select_output_folder(self):
         folder = filedialog.askdirectory()
         if folder:
             self.output_folder = folder
             self.output_folder_label.configure(text=f"Output Folder: {folder}")
 
-    # --- Batch processing: Final Georeferencing using original warp_and_autocrop_image logic ---
+    # ---------------------------------------------------------------
+    # --------------  SINGLE‑FOLDER (progress+ETA) ------------------
+    # ---------------------------------------------------------------
     def process_all_images(self):
         if not self.image_list or self.H is None:
             messagebox.showerror("Error", "Load a folder and homography first")
             return
 
-        def process():
+        def _worker():
             total = len(self.image_list)
-            for i, path in enumerate(self.image_list):
+            start_ts = time.time()
+            for idx, path in enumerate(self.image_list, start=1):
                 try:
-                    base_name = os.path.splitext(os.path.basename(path))[0]
-                    output_path = os.path.join(
-                        self.output_folder, f"{base_name}.tif")
-                    self.georeference_and_save_image(path, output_path)
-                    self.progress["value"] = (i + 1) / total * 100
-                    self.update_idletasks()
+                    base = os.path.splitext(os.path.basename(path))[0]
+                    out_path = os.path.join(self.output_folder, f"{base}.tif")
+                    self.georeference_and_save_image(path, out_path)
                 except Exception as e:
-                    print(f"Error processing {path}: {str(e)}")
+                    print(f"Error processing {path}: {e}")
+
+                frac = idx / total
+                self.progress.set(frac)
+                self.progress_eta.configure(text=self._eta_string(start_ts, frac))
+                self.update_idletasks()
+
+            self.progress_eta.configure(text="Done")
             messagebox.showinfo("Complete", "Processing finished!")
 
-        threading.Thread(target=process, daemon=True).start()
+        threading.Thread(target=_worker, daemon=True).start()
 
-    # --- Helper for batch processing that writes a 4-band GeoTIFF ---
+    # ---------------------------------------------------------------
+    # ---- Helper that writes output GeoTIFF (unchanged code) -------
+    # ---------------------------------------------------------------
     def georeference_and_save_image(self, img_path, output_path):
         img = cv2.imread(img_path)
         if img is None:
@@ -573,8 +602,9 @@ class GeoReferenceModule(ctk.CTkToplevel):
         dst_ds = None
         return True
 
-
-
+    # ---------------------------------------------------------------
+    # ----------------  BATCH PROCESS (single bar) ------------------
+    # ---------------------------------------------------------------
     def select_batch_main_folder(self):
         folder = filedialog.askdirectory()
         if folder:
@@ -599,45 +629,42 @@ class GeoReferenceModule(ctk.CTkToplevel):
                 return
 
             total_subfolders = len(subfolders)
+            start_ts = time.time()
+
             for s_idx, sub in enumerate(sorted(subfolders), start=1):
                 img_paths = sorted(glob.glob(os.path.join(sub, "*.bmp")) +
                                    glob.glob(os.path.join(sub, "*.jpg")) +
                                    glob.glob(os.path.join(sub, "*.jpeg")) +
                                    glob.glob(os.path.join(sub, "*.png")) +
                                    glob.glob(os.path.join(sub, "*.tif")))
+
                 if not img_paths:
                     print(f"[Batch]  Skipping empty folder: {sub}")
-                    self.batch_progress["value"] = s_idx / total_subfolders * 100
-                    self.update_idletasks()
-                    continue
+                else:
+                    out_sub = os.path.join(self.output_folder, os.path.basename(sub))
+                    os.makedirs(out_sub, exist_ok=True)
 
-                out_sub = os.path.join(self.output_folder, os.path.basename(sub))
-                os.makedirs(out_sub, exist_ok=True)
+                    for img_path in img_paths:
+                        try:
+                            out_name = os.path.splitext(os.path.basename(img_path))[0] + ".tif"
+                            out_path = os.path.join(out_sub, out_name)
+                            self.georeference_and_save_image(img_path, out_path)
+                        except Exception as e:
+                            print(f"[Batch] Error in {img_path}: {e}")
 
-                for i_idx, img_path in enumerate(img_paths, start=1):
-                    try:
-                        out_name = os.path.splitext(os.path.basename(img_path))[0] + ".tif"
-                        out_path = os.path.join(out_sub, out_name)
-                        self.georeference_and_save_image(img_path, out_path)
-                    except Exception as e:
-                        print(f"[Batch] Error in {img_path}: {e}")
-
-                    # inner (per‑image) progress
-                    self.batch_inner_progress["value"] = i_idx / len(img_paths) * 100
-                    self.update_idletasks()
-
-                # reset inner bar & update outer bar
-                self.batch_inner_progress["value"] = 0
-                self.batch_progress["value"] = s_idx / total_subfolders * 100
+                frac = s_idx / total_subfolders
+                self.batch_progress.set(frac)
+                self.batch_eta_label.configure(text=self._eta_string(start_ts, frac))
                 self.update_idletasks()
 
+            self.batch_eta_label.configure(text="Done")
+            self.batch_progress.set(1.0)
             messagebox.showinfo("Batch Complete", "All sub‑folders processed.")
-            self.batch_progress["value"] = 0
 
         threading.Thread(target=_batch_thread, daemon=True).start()
 
 
-# ----------------------------------------------------------------------
+# ------------------------------------------------------------------
 def main():
     root = ctk.CTk()
     root.withdraw()
