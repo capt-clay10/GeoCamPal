@@ -10,8 +10,8 @@ import glob
 from osgeo import gdal, osr
 osr.DontUseExceptions()
 import sys
-from tkinter import ttk          # still used for other bits if needed
-import time                      # ← NEW
+from tkinter import ttk          
+import time
 
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("green")
@@ -36,11 +36,9 @@ class StdoutRedirector:
     def flush(self):
         pass
 
-
+# %% main window
 class GeoReferenceModule(ctk.CTkToplevel):
-    # ---------------------------------------------------------------
-    # ----------------------  UI LAYOUT  ----------------------------
-    # ---------------------------------------------------------------
+
     def __init__(self, master=None, *args, **kwargs):
         super().__init__(master=master, *args, **kwargs)
         self.title("Georeferencing Tool")
@@ -76,9 +74,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
         sys.stderr = self.stdout_redirector
         print("Here you may see console outputs")
 
-    # ---------------------------------------------------------------
-    # ------------------  ETA helper (NEW)  -------------------------
-    # ---------------------------------------------------------------
+
     def _eta_string(self, start_ts: float, frac_done: float) -> str:
         """Return a human‑readable ETA string."""
         if frac_done <= 0:
@@ -99,7 +95,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
         for r in range(5):
             self.grid_rowconfigure(r, weight=1)
 
-        # ---- 0  TOP IMAGES (unchanged) ----------------------------
+        # ---- TOP IMAGES  ----------------------------
         self.top_panel = ctk.CTkFrame(self)
         self.top_panel.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
 
@@ -121,7 +117,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
         self.cropped_label = ctk.CTkLabel(self.cropped_frame, text="Cropped Georeferenced Image")
         self.cropped_label.pack(fill="both", expand=True)
 
-        # ---- 1  FILE CONTROLS (unchanged) -------------------------
+        # ---- 1  FILE CONTROLS -------------------------
         self.control_panel = ctk.CTkFrame(self)
         self.control_panel.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
 
@@ -139,7 +135,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
         ctk.CTkButton(self.control_panel, text="Initial Georeferencing",
                       command=self.perform_initial_georeferencing).pack(side="left", padx=10)
 
-        # ---- 2  AOI (unchanged) ----------------------------------
+        # ---- 2  AOI  ----------------------------------
         self.aoi_panel = ctk.CTkFrame(self)
         self.aoi_panel.grid(row=2, column=0, sticky="nsew", padx=5, pady=5)
 
@@ -159,7 +155,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
         self.manual_entry.grid_remove()
         self.aoi_var.trace_add("write", self.toggle_manual_entry)
 
-        # ---- 3  CROP (unchanged) ---------------------------------
+        # ---- 3  CROP ---------------------------------
         self.crop_panel = ctk.CTkFrame(self)
         self.crop_panel.grid(row=3, column=0, sticky="nsew", padx=5, pady=5)
 
@@ -182,7 +178,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
         col += 1
         ctk.CTkButton(self.crop_panel, text="Show Crop", command=self.show_crop).grid(row=0, column=col, padx=5)
 
-        # ---- 4  SINGLE‑FOLDER FINAL (progress bar replaced) ------
+        # ---- 4  SINGLE‑FOLDER FINAL  ------
         self.final_panel = ctk.CTkFrame(self)
         self.final_panel.grid(row=4, column=0, sticky="nsew", padx=5, pady=5)
 
@@ -484,7 +480,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
         threading.Thread(target=_worker, daemon=True).start()
 
     # ---------------------------------------------------------------
-    # ---- Helper that writes output GeoTIFF (unchanged code) -------
+    # ---- Helper that writes output GeoTIFF -------
     # ---------------------------------------------------------------
     def georeference_and_save_image(self, img_path, output_path):
         img = cv2.imread(img_path)

@@ -322,7 +322,6 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
         utm_est = cv2.perspectiveTransform(pts, self.H_final).reshape(-1, 2)
         errors = np.linalg.norm(utm_est - self.utm_points, axis=1)
 
-        # sanity-check manual transform
         ones = np.ones((self.pixel_points.shape[0], 1), np.float32)
         x_hom = np.hstack([self.pixel_points, ones])
         utm_est2 = (self.H_final @ x_hom.T).T
@@ -336,7 +335,7 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
         self.log(report)
 
     # --------------------------------------------------------------------------
-    #             Simulated-annealing helpers (unchanged except docstring)
+    #             Simulated-annealing helpers 
     # --------------------------------------------------------------------------
     def compute_homography_and_errors(
         self, pixel_points, utm_points, subset_indices, ransac_thresh=0.5

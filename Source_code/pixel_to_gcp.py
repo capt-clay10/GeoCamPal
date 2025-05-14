@@ -36,7 +36,7 @@ class StdoutRedirector:
         self.text_widget.see(tk.END)
 
     def flush(self):
-        pass  # This is needed for Python's IO requirements.
+        pass  
 
 
 class PixelToGCPWindow(ctk.CTkToplevel):

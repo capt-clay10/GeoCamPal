@@ -262,9 +262,7 @@ class HSVMaskTool(ctk.CTkToplevel):
             self.top_frame = ctk.CTkFrame(self.image_display_window)
             self.top_frame.pack(fill="both", expand=True)
 
-            # for col in range(3):
-            #     self.top_frame.grid_columnconfigure(col, weight=1, minsize=400)
-            # left column stays 400px, center/right share the rest
+
             self.top_frame.grid_columnconfigure(0, weight=1, minsize=400)
             self.top_frame.grid_columnconfigure(1, weight=2, minsize=400)
             self.top_frame.grid_columnconfigure(2, weight=1, minsize=400)
@@ -313,11 +311,6 @@ class HSVMaskTool(ctk.CTkToplevel):
             self.title("Feature identifier- batch process")
             self.geometry("1200x600")
             self.resizable(False, False)
-
-            # try:
-            #     self.iconbitmap(resource_path("launch_logo.ico"))
-            # except Exception as e:
-            #     print("Warning: Could not load window icon:", e)
 
             self.do_invert_mask = tk.BooleanVar(master=self, value=False)
             self.use_bbox = tk.BooleanVar(master=self, value=False)
@@ -917,16 +910,13 @@ class HSVMaskTool(ctk.CTkToplevel):
 
         # 2) Check that the label widget still exists
         if hasattr(self, 'edge_label') and self.edge_label.winfo_exists():
-            # Instead of image=None, use an empty string for safety
             self.edge_label.configure(image=None, text="")
             self.edge_label.image = None
 
-        # Also reset mask_label if needed
         if hasattr(self, 'mask_label') and self.mask_label.winfo_exists():
             self.mask_label.configure(image=None, text="")
             self.mask_label.image = None
 
-        # Proceed to load the new file
         file_path = self.image_files[self.current_index]
         original_image = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
         if original_image is None:
@@ -949,9 +939,6 @@ class HSVMaskTool(ctk.CTkToplevel):
         if self.mode == "ml" and self.image_files:
             if self.current_index < len(self.image_files) - 1:
                 self.current_index += 1
-                # Remove any polygons or edges from memory if you want, e.g.:
-                # self.edge_points.clear()  # if you want a fresh start
-                # But do NOT destroy or re-create the label! Just call:
                 self.load_current_image()
                 self.update_image_display()
                 self.update_mask_display()
@@ -1013,9 +1000,7 @@ class HSVMaskTool(ctk.CTkToplevel):
 
         cv_rgb = cv2.cvtColor(self.cv_image, cv2.COLOR_BGR2RGB)
         pil_img = Image.fromarray(cv_rgb)
-        # ctk_img = ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=(pil_img.width, pil_img.height))
-        # self.image_label.configure(image=ctk_img)
-        # self.image_label.image = ctk_img
+ 
 
         self.update_image_display()
 
@@ -1188,8 +1173,6 @@ class HSVMaskTool(ctk.CTkToplevel):
 
         self.edge_points = valid_points
 
-        # Also store it as a feature if desired:
-        # But we only do that after the user finishes editing. So just keep edge_points for now.
 
         if self.mode != "batch":
             overlay = self.full_image.copy()
@@ -1212,7 +1195,6 @@ class HSVMaskTool(ctk.CTkToplevel):
 
     def start_freehand(self):
         self.freehand_mode = True
-        # record the state so we can undo/redo
         self._record_history()
     
         # unbind the old click-based handlers
@@ -1231,9 +1213,7 @@ class HSVMaskTool(ctk.CTkToplevel):
         # convert canvas coords back into image coords
         x = self.edit_canvas.canvasx(event.x) / self.zoom_scale
         y = self.edit_canvas.canvasy(event.y) / self.zoom_scale
-        # just append, so it tacks onto whatever was there before
         self.edited_edge_points.append([x, y])
-        # redraw the line immediately
         self.redraw_canvas()
     
     
@@ -1405,7 +1385,7 @@ class HSVMaskTool(ctk.CTkToplevel):
         as a feature (either polygon or polyline). If there are no points because an
         auto-closing action already stored a polygon, then the UI simply returns to normal.
         """
-        # If there are fewer than 2 points in the current edit session...
+
         if len(self.edited_edge_points) < 2:
             # ...but if we already have at least one feature stored, then assume the polygon was auto-closed.
             if not self.features:
@@ -1721,8 +1701,6 @@ class HSVMaskTool(ctk.CTkToplevel):
                 transform = None
                 crs       = None
     
-            # Always write a GeoJSON; if crs available, transform to real world,
-            # otherwise use pixel coords
             if crs is not None:
                 world_coords = [(transform * (x, y))[0:2] for x, y in self.edge_points]
                 geom = LineString(world_coords)

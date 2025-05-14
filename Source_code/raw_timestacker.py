@@ -32,7 +32,7 @@ class StdoutRedirector:
         pass  # Nothing required for flush in this context
 
 # -----------------------------------------------------------------------------
-# ROI Selector (small helper window – unchanged)
+# ROI Selector (small helper window)
 # -----------------------------------------------------------------------------
 class ScrollZoomBBoxSelector(tk.Frame):
     """A scroll‑zoom capable widget that lets the user draw a bounding box."""
@@ -163,31 +163,57 @@ class ScrollZoomBBoxSelector(tk.Frame):
         print("Final bounding box:", self.bbox)
 
 # -----------------------------------------------------------------------------
-# Core timestack generator (unchanged)
+# Core timestack generator 
 # -----------------------------------------------------------------------------
 
 def generate_calibrated_timestack(image_files, bbox, resolution_x_m, output_path, progress_callback=None):
     x, y, w, h = bbox
-    timestack_lines = []
 
-    image_files.sort(key=lambda f: datetime.strptime("_".join(os.path.basename(f).split("_")[0:6]), "%Y_%m_%d_%H_%M_%S"))
+    # sanity‐check the box immediately
+    if w <= 0 or h <= 0:
+        raise ValueError(f"Invalid bounding box {bbox}: width and height must be > 0")
+
+    timestack_lines = []
+    image_files.sort(key=lambda f: datetime.strptime(
+        "_".join(os.path.basename(f).split("_")[0:6]),
+        "%Y_%m_%d_%H_%M_%S"
+    ))
     total = len(image_files)
 
     for i, file in enumerate(image_files, 1):
+        # load the image
         if file.lower().endswith(".tif"):
             img = tifffile.imread(file)
         else:
             img = np.array(Image.open(file).convert("RGB"))
-        roi = img[y:y + h, x:x + w]
+
+        # extract ROI
+        roi = img[y : y + h, x : x + w]
+
+        # if it’s empty, warn + skip
+        if roi.size == 0:
+            print(f"Warning: Skipping '{os.path.basename(file)}' (empty ROI)")  
+            if progress_callback:
+                progress_callback(i, total)
+            continue
+
+        # normalize planes to 3 channels
         if roi.ndim == 2:
             roi = np.stack([roi] * 3, axis=-1)
         elif roi.shape[2] > 3:
             roi = roi[:, :, :3]
+
+        # compute the mean‐line
         line_avg = np.round(np.mean(roi, axis=0)).astype(np.uint8)
         timestack_lines.append(line_avg)
+
         if progress_callback:
             progress_callback(i, total)
 
+    if not timestack_lines:
+        raise ValueError("No valid ROI slices—nothing to stack.")
+
+    # stack + save (w,h>0 guaranteed)
     pseudo_ts = np.stack(timestack_lines, axis=0)
     out_img = Image.fromarray(pseudo_ts)
     if out_img.width != w:
@@ -200,8 +226,10 @@ def generate_calibrated_timestack(image_files, bbox, resolution_x_m, output_path
 
     return output_path
 
+
+
 # -----------------------------------------------------------------------------
-# Utility to get resource path (PyInstaller friendly)
+# Utility to get resource path
 # -----------------------------------------------------------------------------
 
 def resource_path(relative_path: str) -> str:
@@ -458,7 +486,7 @@ class TimestackTool(ctk.CTkToplevel):
             messagebox.showerror("Error", "Select an output folder first.")
             return
 
-        # Allow bbox via text – this was missing originally -----------------
+        # Allow bbox via text
         if self.add_bbox_text.get() and self.bbox_text.get().strip():
             if not self._parse_bbox_text():
                 return
@@ -466,7 +494,7 @@ class TimestackTool(ctk.CTkToplevel):
             messagebox.showerror("Error", "Provide a valid bounding box (via selector or text).")
             return
 
-        # Resolution ----------------------------------------------------------
+        # Resolution
         if self.add_resolution_manual.get():
             try:
                 resolution_x_m = float(self.resolution_entry.get())
@@ -479,68 +507,90 @@ class TimestackTool(ctk.CTkToplevel):
             except Exception:
                 resolution_x_m = self.default_resolution
 
-        # Collect sub‑folders --------------------------------------------------
-        subfolders = [os.path.join(main_batch_folder, d) for d in os.listdir(main_batch_folder) if os.path.isdir(os.path.join(main_batch_folder, d))]
+        # Collect sub-folders
+        subfolders = [
+            os.path.join(main_batch_folder, d)
+            for d in os.listdir(main_batch_folder)
+            if os.path.isdir(os.path.join(main_batch_folder, d))
+        ]
         if not subfolders:
-            messagebox.showerror("Error", "No sub‑folders found in the selected batch folder.")
+            messagebox.showerror("Error", "No sub-folders found in the selected batch folder.")
             return
         total = len(subfolders)
 
-        # Reset batch progress bar -------------------------------------------
+        # Reset batch progress bar & ETA label
         self.batch_progress_bar.set(0)
-        self.batch_progress_label.configure(text="Starting …")
+        self.batch_progress_label.configure(text="ETA: --")
 
-        # Background worker ---------------------------------------------------
+        # Prepare a place to store our start time
+        self.batch_start_time = None
+
         def process():
-            start = time.time()
+            # record when we actually start
+            self.batch_start_time = time.time()
             processed = 0
-            for idx, sub in enumerate(subfolders, 1):
+
+            for sub in subfolders:
                 # Gather images inside subfolder
                 img_files = []
                 for ext in ("*.jpg", "*.jpeg", "*.png", "*.tif"):
                     img_files.extend(glob.glob(os.path.join(sub, ext)))
-                if not img_files:
-                    # skip empty folder but still update progress
-                    processed += 1
-                    _update_ui(processed, total, start)
-                    continue
-                # Sort & output name --------------------------------------
-                img_files.sort(key=lambda f: os.path.basename(f))
-                first_ts = "_".join(os.path.basename(img_files[0]).split("_")[0:5])
-                out_name = f"{first_ts}_raw_timestack.png"
-                out_path = os.path.join(out_folder, out_name)
-                try:
-                    generate_calibrated_timestack(img_files, self.bbox, resolution_x_m, out_path)
-                except Exception as exc:
-                    print(f"Error processing {sub}: {exc}")
+
+                if img_files:
+                    img_files.sort(key=lambda f: os.path.basename(f))
+                    first_ts = "_".join(os.path.basename(img_files[0]).split("_")[0:5])
+                    out_name = f"{first_ts}_raw_timestack.png"
+                    out_path = os.path.join(out_folder, out_name)
+                    try:
+                        generate_calibrated_timestack(img_files, self.bbox, resolution_x_m, out_path)
+                    except Exception as exc:
+                        print(f"Error processing {sub}: {exc}")
+
                 processed += 1
-                _update_ui(processed, total, start)
-            messagebox.showinfo("Batch Done", f"Processed {processed} sub‑folders.")
+                _update_ui(processed, total)
+
+            messagebox.showinfo("Batch Done", f"Processed {processed} sub-folders.")
             self.batch_progress_bar.set(0)
             self.batch_progress_label.configure(text="")
 
-        def _update_ui(done, tot, t_start):
+        def _update_ui(done, tot):
+            # update progress bar
             frac = done / tot
-            elapsed = time.time() - t_start
-            eta = (elapsed / done) * (tot - done) if done else 0
             self.batch_progress_bar.set(frac)
-            self.batch_progress_label.configure(text=f"{done} / {tot} | ETA: {int(eta)} s")
+
+            # compute ETA using the instance attribute
+            elapsed = time.time() - self.batch_start_time
+            if done > 0:
+                rem = (elapsed / done) * (tot - done)
+            else:
+                rem = 0
+            mins = int(rem) // 60
+            secs = int(rem) % 60
+            eta_str = f"{mins}m {secs}s" if mins else f"{secs}s"
+
+            # show ETA next to the bar
+            self.batch_progress_label.configure(text=f"ETA: {eta_str}")
 
         threading.Thread(target=process, daemon=True).start()
 
+
     # ------------------------------------------------------------------
-    # Helper: parse bbox text (shared)
+    # Helper: parse bbox text 
     # ------------------------------------------------------------------
     def _parse_bbox_text(self):
         try:
             parts = [int(p.strip()) for p in self.bbox_text.get().split(",")]
             if len(parts) != 4:
-                raise ValueError
-            self.bbox = tuple(parts)
+                raise ValueError("Must be 4 values: x,y,w,h")
+            x, y, w, h = parts
+            if w <= 0 or h <= 0:
+                raise ValueError("Width and height must both be > 0")
+            self.bbox = (x, y, w, h)
             return True
-        except Exception:
-            messagebox.showerror("Error", "Invalid bbox format. Enter as x,y,w,h")
+        except ValueError as e:
+            messagebox.showerror("Error", f"Invalid bbox: {e}")
             return False
+
 
 if __name__ == "__main__":
     root = ctk.CTk()

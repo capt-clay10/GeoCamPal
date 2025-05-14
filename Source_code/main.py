@@ -3,7 +3,7 @@ import os
 import customtkinter as ctk
 from PIL import Image
 
-# Import your refactored submodule classes:
+# %% Import the refactored submodule classes:
 from pixel_to_gcp import PixelToGCPWindow
 from hsv_mask import HSVMaskTool
 from dem_generator import CreateDemWindow
@@ -15,12 +15,12 @@ from wave_runup import WaveRunUpCalculator
 # 1) Resource helper for PyInstaller or direct script
 def resource_path(relative_path: str) -> str:
     try:
-        base_path = sys._MEIPASS  # PyInstaller temp folder
+        base_path = sys._MEIPASS 
     except Exception:
-        base_path = os.path.dirname(__file__)  # Running from source
+        base_path = os.path.dirname(__file__)  
     return os.path.join(base_path, relative_path)
 
-# 2) Optional splash screen
+# 2) Splash screen
 def show_splash(duration_ms=1000):
     splash = ctk.CTk()
     splash.iconbitmap(resource_path("launch_logo.ico"))

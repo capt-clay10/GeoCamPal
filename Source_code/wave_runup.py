@@ -5,6 +5,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import customtkinter as ctk
+from collections import defaultdict
 import os
 import datetime
 import csv
@@ -105,7 +106,6 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         # For batch processing.
         self.batch_raw_folder = ""
         self.batch_mask_folder = ""
-        # We'll create a CTkProgressBar for batch progress.
         self.batch_progress_bar = None
         
         # --- Top Frame containing two panels ---
@@ -275,11 +275,19 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
                         resolution_x_m = float(self.manual_res_entry.get())
                     except Exception:
                         resolution_x_m = 0.25
+                        print("Warning: Invalid manual resolution provided. Using default of 0.25 m/pixel.")
                 else:
-                    try:
-                        resolution_x_m = float(self.raw_image.info.get("pixel_resolution", 0.25))
-                    except Exception:
+                    resolution_from_metadata = self.raw_image.info.get("pixel_resolution")
+                    if resolution_from_metadata:
+                        try:
+                            resolution_x_m = float(resolution_from_metadata)
+                        except ValueError:
+                            resolution_x_m = 0.25
+                            print("Warning: Non-numeric resolution in image metadata. Using default of 0.25 m/pixel.")
+                    else:
                         resolution_x_m = 0.25
+                        print("Warning: No resolution found in metadata and no manual resolution given; setting to default 0.25 m/pixel.")
+
                 
                 # Update the identified pixel resolution label.
                 self.pixel_res_label.configure(text=f"Identified Pixel Resolution: {resolution_x_m} m")
@@ -368,7 +376,15 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         
         # Plot the extracted runup contour.
         self.ax.clear()
-        self.ax.plot(distance_array, time_array_adjusted, 'bo-', label="Runup Contour")
+        self.ax.plot(
+            distance_array,
+            time_array_adjusted,
+            marker='o',
+            markersize=2,
+            linestyle='-',
+            color='tab:blue',
+            label="Runup Contour"
+        )
         self.ax.set_xlabel("Cross-shore distance (m)")
         self.ax.set_ylabel("Time (s)")
         self.ax.set_title("Extracted Runup Contour")
@@ -436,128 +452,128 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         if not self.batch_raw_folder or not self.batch_mask_folder:
             messagebox.showerror("Error", "Please select both batch raw and batch mask folders.")
             return
-        # List files that contain the designated substrings.
-        raw_files = [f for f in os.listdir(self.batch_raw_folder) if "_raw_timestack" in f]
-        mask_files = [f for f in os.listdir(self.batch_mask_folder) if "_raw_timestack_edge" in f]
-        
-        # Pair files by extracting a date string from the file name.
-        pairs = {}
+
+        # 1) list all PNGs in each folder
+        raw_files  = [f for f in os.listdir(self.batch_raw_folder)  if f.lower().endswith('.png')]
+        mask_files = [f for f in os.listdir(self.batch_mask_folder) if f.lower().endswith('.png')]
+
+        # 2) group by the common YYYY_MM_DD_HH_MM key
         date_pattern = r"(\d{4}[-_]\d{2}[-_]\d{2}[-_]\d{2}[-_]\d{2})"
-        for rf in raw_files:
-            match = re.search(date_pattern, rf)
-            if match:
-                date_str = match.group(1)
-                pairs[date_str] = pairs.get(date_str, {})
-                pairs[date_str]['raw'] = rf
-        for mf in mask_files:
-            match = re.search(date_pattern, mf)
-            if match:
-                date_str = match.group(1)
-                pairs[date_str] = pairs.get(date_str, {})
-                pairs[date_str]['mask'] = mf
-        
-        # Keep only pairs where both raw and mask files exist.
-        valid_pairs = {k: v for k, v in pairs.items() if 'raw' in v and 'mask' in v}
+        groups = defaultdict(lambda: {"raw": [], "mask": []})
+
+        for f in raw_files:
+            m = re.search(date_pattern, f)
+            if m:
+                groups[m.group(1)]["raw"].append(f)
+        for f in mask_files:
+            m = re.search(date_pattern, f)
+            if m:
+                groups[m.group(1)]["mask"].append(f)
+
+        # 3) build valid_pairs list of (raw, mask)
+        valid_pairs = []
+        for key, files in groups.items():
+            for raw in files["raw"]:
+                for mask in files["mask"]:
+                    valid_pairs.append((raw, mask))
+
         total_pairs = len(valid_pairs)
         if total_pairs == 0:
             messagebox.showerror("Error", "No valid pairs found for batch processing.")
             return
-        
-        processed = 0
-        all_runup_data = []  # For aggregated plotting.
-        # Optionally, if no output folder is selected, use the raw folder.
+
+        # default output into raw folder if not set
         if not self.output_folder:
             self.output_folder = self.batch_raw_folder
-        
-        # Initialize progress bar.
+
+        # reset progress
         self.batch_progress_bar.set(0)
         self.batch_progress_label.configure(text=f"0 / {total_pairs} pairs processed")
         self.update()
-        
-        # Process each pair.
-        for date_str, files in valid_pairs.items():
-            raw_file_path = os.path.join(self.batch_raw_folder, files['raw'])
-            mask_file_path = os.path.join(self.batch_mask_folder, files['mask'])
+
+        all_runup_data = []
+        processed = 0
+
+        for raw_name, mask_name in valid_pairs:
+            raw_path  = os.path.join(self.batch_raw_folder, raw_name)
+            mask_path = os.path.join(self.batch_mask_folder, mask_name)
+
             try:
-                raw_img = Image.open(raw_file_path)
-                mask_img = Image.open(mask_file_path).convert("L")
-            except Exception as e:
-                continue  # Skip the pair if there is an error loading files.
-            
-            # Use manual resolution if checked; otherwise, try metadata.
+                raw_img  = Image.open(raw_path)
+                mask_img = Image.open(mask_path).convert("L")
+            except:
+                continue
+
+            # resolution & timing
             if self.manual_res_var.get():
                 try:
                     resolution_x_m = float(self.manual_res_entry.get())
-                except Exception:
+                except:
                     resolution_x_m = float(raw_img.info.get("pixel_resolution", 0.25))
             else:
                 resolution_x_m = float(raw_img.info.get("pixel_resolution", 0.25))
+
             try:
                 time_interval_sec = float(raw_img.info.get("time_interval", 1))
-            except Exception:
+            except:
                 time_interval_sec = 1
+
             flip_horizontal = self.land_left.get()
-            
-            # Create combined image for processing (similar to load_mask).
-            raw_copy = raw_img.copy().convert("RGBA")
-            mask_resized = mask_img.resize(raw_copy.size)
-            overlay = Image.new("RGBA", raw_copy.size, (255, 0, 0, 0))
-            overlay_data = overlay.load()
-            mask_data = mask_resized.load()
-            for i in range(raw_copy.width):
-                for j in range(raw_copy.height):
-                    if mask_data[i, j] > 128:
-                        overlay_data[i, j] = (255, 0, 0, 100)
-            combined = Image.alpha_composite(raw_copy, overlay)
-            
-            # Extract runup.
-            time_array, distance_array, _ = extract_runup_from_mask(mask_file_path, resolution_x_m, time_interval_sec, flip_horizontal)
+
+            # extract runup
+            t_arr, d_arr, _ = extract_runup_from_mask(mask_path,
+                                                      resolution_x_m,
+                                                      time_interval_sec,
+                                                      flip_horizontal)
             total_time = raw_img.height * time_interval_sec
-            time_array_adjusted = total_time - time_array
-            
-            # Export CSV for this pair.
-            base_name = os.path.basename(raw_file_path)
-            out_file_name = base_name.replace("raw", "runup")
-            out_file_name = os.path.splitext(out_file_name)[0] + ".csv"
-            out_file_path = os.path.join(self.output_folder, out_file_name)
-            
-            # Extract base datetime from file name.
-            match = re.search(r"(\d{4})[-_](\d{2})[-_](\d{2})[-_](\d{2})[-_](\d{2})", base_name)
-            if match:
-                year, month, day, hour, minute = map(int, match.groups())
-                base_datetime = datetime.datetime(year, month, day, hour, minute, 0)
+            t_adj = total_time - t_arr
+
+            # export CSV
+            out_name = os.path.splitext(raw_name.replace("raw", "runup"))[0] + ".csv"
+            out_path = os.path.join(self.output_folder, out_name)
+
+            # find base datetime from raw_name
+            m = re.search(date_pattern, raw_name)
+            if m:
+                year,mo,da,hr,mi = map(int, re.split('[-_]', m.group(1)))
+                base_dt = datetime.datetime(year,mo,da,hr,mi)
             else:
-                base_datetime = datetime.datetime.now()
-            
-            with open(out_file_path, mode="w", newline="") as csvfile:
+                base_dt = datetime.datetime.now()
+
+            with open(out_path, 'w', newline='') as csvfile:
                 writer = csv.writer(csvfile)
-                writer.writerow(["time", "distance"])
-                for sec, dist in zip(time_array_adjusted, distance_array):
-                    new_time = base_datetime + datetime.timedelta(seconds=float(sec))
-                    time_str = new_time.strftime("%Y-%m-%d-%H-%M-%S")
-                    writer.writerow([time_str, dist])
-            
-            # Append runup data for aggregated plot.
-            all_runup_data.append((distance_array, time_array_adjusted))
+                writer.writerow(["time","distance"])
+                for sec,dist in zip(t_adj, d_arr):
+                    ts = (base_dt + datetime.timedelta(seconds=float(sec))) \
+                              .strftime("%Y-%m-%d-%H-%M-%S")
+                    writer.writerow([ts, dist])
+
+            all_runup_data.append((d_arr, t_adj))
             processed += 1
-            self.batch_progress_bar.set(processed / total_pairs)
+            self.batch_progress_bar.set(processed/total_pairs)
             self.batch_progress_label.configure(text=f"{processed} / {total_pairs} pairs processed")
-            self.update()  # Refresh UI
-            
-        # Plot aggregated runup on top right panel.
+            self.update()
+
+        # plot aggregated
         self.ax.clear()
-        for dist_arr, time_arr in all_runup_data:
-            self.ax.plot(dist_arr, time_arr, 'o-', label="Runup")
+        for d_arr, t_arr in all_runup_data:
+            self.ax.plot(
+                d_arr,
+                t_arr,
+                marker='o',
+                markersize=1,
+                linestyle='-'
+            )
         self.ax.set_xlabel("Distance (m)")
         self.ax.set_ylabel("Time (s)")
         self.ax.set_title("Aggregated Runup Contours")
         self.ax.grid(True)
         self.canvas_plot.draw()
+
         messagebox.showinfo("Batch Process", "Batch processing completed.")
 
 
 def main():
-    # create a hidden root so CTkToplevel has something to attach to
     root = ctk.CTk()
     root.withdraw()
     # now spawn your tool as a child window

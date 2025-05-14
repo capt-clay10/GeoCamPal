@@ -1,13 +1,9 @@
 """
 GeoCamPal – Create DEMs from shoreline GeoJSON files and water‑level CSV.
 
-NEW 2025‑05‑12
-• Adds uniform‑spacing densification so DEMs are based on evenly spaced
-  sample points instead of the hand‑drawn vertices in the GeoJSON.
-• Adds a "Vertex spacing (m)" entry to let the user pick the spacing.
 """
 
-# ───────────────────────────── imports ─────────────────────────────
+# %% ───────────────────────────── imports ─────────────────────────────
 from rasterio.transform import from_origin
 import rasterio
 from rasterio import features
@@ -34,7 +30,7 @@ matplotlib.use("Agg")
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("green")
 
-# ───────────────────────── util helpers ────────────────────────────
+# %% ───────────────────────── util helpers ────────────────────────────
 def resource_path(relative_path: str) -> str:
     try:
         base_path = sys._MEIPASS  # type: ignore
@@ -55,7 +51,7 @@ class StdoutRedirector:
         pass
 
 
-# ──────────────────────── main window ──────────────────────────────
+# %% ──────────────────────── main window ──────────────────────────────
 class CreateDemWindow(ctk.CTkToplevel):
     """
     GUI window that creates Digital Elevation Models (DEMs)
@@ -82,7 +78,7 @@ class CreateDemWindow(ctk.CTkToplevel):
         # UI state variables
         self.export_xyz_var = tk.BooleanVar(value=False)
 
-        # default filename pattern (same as previous version)
+        # default filename pattern
         DEFAULT_PATTERN = (
             r"(?P<year>\d{4})_(?P<month>\d{2})_(?P<day>\d{2})_"
             r"(?P<hour1>\d{2})_(?P<min1>\d{2})-(?P<hour2>\d{2})_(?P<min2>\d{2})_"
@@ -291,7 +287,7 @@ class CreateDemWindow(ctk.CTkToplevel):
         self.current_day_index = 0
         self.plot_waterlevel_overlay()
 
-    # ---------- plotting helpers (unchanged logic, condensed for brevity) ----------
+    # ---------- plotting helpers ----------
     def update_figure_in_label(self, label: ctk.CTkLabel, fig):
         import io
         buf = io.BytesIO()
@@ -348,7 +344,7 @@ class CreateDemWindow(ctk.CTkToplevel):
         self.update_figure_in_label(self.top_right_label, fig)
         plt.close(fig)
 
-    # ─────────────────── densification helper (NEW) ──────────────────
+    # ─────────────────── densification helper ──────────────────
     def densify_geometry(self, geom, spacing: float):
         """Return equally spaced coordinates along a geometry."""
         coords = []
