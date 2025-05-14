@@ -3,7 +3,7 @@ import os
 import customtkinter as ctk
 from PIL import Image
 
-# %% Import the refactored submodule classes:
+# Import your refactored submodule classes:
 from pixel_to_gcp import PixelToGCPWindow
 from hsv_mask import HSVMaskTool
 from dem_generator import CreateDemWindow
@@ -15,12 +15,12 @@ from wave_runup import WaveRunUpCalculator
 # 1) Resource helper for PyInstaller or direct script
 def resource_path(relative_path: str) -> str:
     try:
-        base_path = sys._MEIPASS 
+        base_path = sys._MEIPASS  # PyInstaller temp folder
     except Exception:
-        base_path = os.path.dirname(__file__)  
+        base_path = os.path.dirname(__file__)  # Running from source
     return os.path.join(base_path, relative_path)
 
-# 2) Splash screen
+# 2) Optional splash screen
 def show_splash(duration_ms=1000):
     splash = ctk.CTk()
     splash.iconbitmap(resource_path("launch_logo.ico"))
@@ -98,7 +98,7 @@ def launcher_window():
     except Exception:
         pass
 
-    ctk.CTkLabel(frame, text="Select a tool to open", font=("Arial", 18, "bold")).pack(pady=(0,15))
+    ctk.CTkLabel(frame, text="Select a tool", font=("Arial", 18, "bold")).pack(pady=(0,15))
 
     # (C) Georeferencing
     ctk.CTkLabel(frame, text="Georeferencing", font=("Arial", 14, "bold")).pack(anchor="w")
@@ -127,12 +127,23 @@ def launcher_window():
     ctk.CTkButton(ts_frame, text="Raw Timestack Image", command=open_timestack).pack(side="left", padx=5)
     ctk.CTkButton(ts_frame, text="Wave Run Up",          command=open_wave_run).pack(side="left", padx=5)
 
-    # Footer
-    footer = ctk.CTkLabel(frame,
-        text="Application created by Clayton Soares\nUniversity of Kiel",
-        font=("Arial", 10)
+    # ——— Footer ———
+    footer_text = (
+        "creator: Clayton Soares\n"
+        "contact: clayton.soares@ifg.uni-kiel.de\n"
+        "Institute: Institute of Geosciences, CAU, Kiel\n"
+        "source code: https://github.com/capt-clay10/GeoCamPal.git"
     )
-    footer.pack(side="bottom", anchor="w", pady=(10,0))
+    
+    footer = ctk.CTkLabel(
+        frame,
+        text=footer_text,
+        font=("Times New Roman", 10),
+        justify="left",
+        anchor="w"
+    )
+    
+    footer.pack(side="bottom", anchor="w", fill="x", pady=(10,0))
 
     dialog.mainloop()
 
