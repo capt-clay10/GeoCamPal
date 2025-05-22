@@ -136,9 +136,9 @@ Creates DEM rasters from shoreline GeoJSONs (exported from feature identifier to
 
 ### Raw Timestacker and Wave Run-Up Calculator
 
-![Run‑Up](https://github.com/user-attachments/assets/d2a0f3eb-0071-4e1f-bd4f-eda190cc72df)
+![Image](https://github.com/user-attachments/assets/05a0e52a-b52d-4af1-a411-cdd6b1fe94a2)
 
-Generate distance‑time timestack PNGs from image bursts or video frames. Includes ROI selector, resolution tagging, and batch processing. Feed time stack in the Feature identifier tool to identify the wave runup line, currently limited to HSV based (in image only the effluent line not actual wave runup)
+Generate distance‑time timestack PNGs from image bursts or video frames. Includes ROI selector, resolution tagging, and batch processing. Feed time stack in the Feature identifier tool to identify the wave runup line, currently limited to HSV based or manual
 Overlay the binary mask (exported from feature identifier tool), extract the run‑up contour, and export **(time, distance)** CSVs.
 
 ---
