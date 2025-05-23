@@ -79,7 +79,7 @@ $ python main.py
 
 ### Launcher
 
-![Launcher](https://github.com/user-attachments/assets/11783475-2a91-4141-8101-7bb8e8cb67ca)
+![Image](https://github.com/user-attachments/assets/beb10b19-331c-4dce-b042-e3b67e62424e)
 
 The central hub: click any card to open the corresponding tool in a new window.
 
@@ -129,7 +129,7 @@ Automatic HSV masking **+** manual editing.
 ---
 
 ### DEM Generator
-
+![Image](https://github.com/user-attachments/assets/f710d0b6-7fd0-4dd0-98c6-516068f73fb0)
 Creates DEM rasters from shoreline GeoJSONs (exported from feature identifier tool) and water‑level data, with optional XYZ export and batch mode support.
 
 ---
