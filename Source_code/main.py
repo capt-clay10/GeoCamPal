@@ -98,10 +98,12 @@ def launcher_window():
     except Exception:
         pass
 
-    ctk.CTkLabel(frame, text="Select a tool", font=("Arial", 18, "bold")).pack(pady=(0,15))
+    ctk.CTkLabel(frame, text="Select a tool", font=("Arial", 18, "bold")) \
+        .pack(pady=(0,15))
 
     # (C) Georeferencing
-    ctk.CTkLabel(frame, text="Georeferencing", font=("Arial", 14, "bold")).pack(anchor="w")
+    ctk.CTkLabel(frame, text="Georeferencing", font=("Arial", 14, "bold")) \
+        .pack(anchor="w")
     geo_frame = ctk.CTkFrame(frame, fg_color="transparent")
     geo_frame.pack(fill="x", pady=5)
     ctk.CTkButton(geo_frame, text="Pixel to GCP", command=open_pixel_to_gcp).pack(side="left", padx=5)
@@ -109,7 +111,8 @@ def launcher_window():
     ctk.CTkButton(geo_frame, text="Georef Images", command=open_georef).pack(side="left", padx=5)
 
     # (D) HSV Tool
-    ctk.CTkLabel(frame, text="Feature Identifier tool", font=("Arial", 14, "bold")).pack(anchor="w", pady=(10,0))
+    ctk.CTkLabel(frame, text="Feature Identifier tool", font=("Arial", 14, "bold")) \
+        .pack(anchor="w", pady=(10,0))
     hsv_frame = ctk.CTkFrame(frame, fg_color="transparent")
     hsv_frame.pack(fill="x", pady=5)
     ctk.CTkButton(hsv_frame, text="Individual Analysis", command=open_hsv_individual).pack(side="left", padx=5)
@@ -117,11 +120,16 @@ def launcher_window():
     ctk.CTkButton(hsv_frame, text="Batch Process",       command=open_hsv_batch).pack(side="left", padx=5)
 
     # (E) DEM Generator
-    ctk.CTkLabel(frame, text="DEM Generator", font=("Arial", 14, "bold")).pack(anchor="w", pady=(10,0))
-    ctk.CTkButton(frame, text="Create DEM", command=open_dem).pack(fill="x", pady=5)
+    ctk.CTkLabel(frame, text="DEM Generator", font=("Arial", 14, "bold")) \
+        .pack(anchor="w", pady=(10,0))
+    dem_frame = ctk.CTkFrame(frame, fg_color="transparent")
+    dem_frame.pack(fill="x", pady=5)
+    ctk.CTkButton(dem_frame, text="Create DEM", command=open_dem) \
+        .pack(side="left", padx=5)
 
     # (F) Time-stacking
-    ctk.CTkLabel(frame, text="Time-stacking", font=("Arial", 14, "bold")).pack(anchor="w", pady=(10,0))
+    ctk.CTkLabel(frame, text="Time-stacking", font=("Arial", 14, "bold")) \
+        .pack(anchor="w", pady=(10,0))
     ts_frame = ctk.CTkFrame(frame, fg_color="transparent")
     ts_frame.pack(fill="x", pady=5)
     ctk.CTkButton(ts_frame, text="Raw Timestack Image", command=open_timestack).pack(side="left", padx=5)
@@ -134,7 +142,6 @@ def launcher_window():
         "Institute: Institute of Geosciences, CAU, Kiel\n"
         "source code: https://github.com/capt-clay10/GeoCamPal.git"
     )
-    
     footer = ctk.CTkLabel(
         frame,
         text=footer_text,
@@ -142,7 +149,6 @@ def launcher_window():
         justify="left",
         anchor="w"
     )
-    
     footer.pack(side="bottom", anchor="w", fill="x", pady=(10,0))
 
     dialog.mainloop()
