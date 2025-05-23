@@ -178,7 +178,7 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
 
         sys.stdout = StdoutRedirector(self.text_console)
         sys.stderr = sys.stdout
-        print("Here you may see console outputs\n")
+        print("Here you may see console outputs\n--------------------------------\n")
 
     # --------------------------------------------------------------------------
     #                               Helper UI

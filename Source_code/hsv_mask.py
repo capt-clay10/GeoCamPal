@@ -245,7 +245,7 @@ class HSVMaskTool(ctk.CTkToplevel):
             sys.stdout = self.stdout_redirector
             self.original_stderr = sys.stderr
             sys.stderr = self.stdout_redirector
-            print("Here you may see console outputs\n")
+            print("Here you may see console outputs\n--------------------------------\n")
 
             # image display window
             self.image_display_window = ctk.CTkToplevel(self)
@@ -1669,7 +1669,7 @@ class HSVMaskTool(ctk.CTkToplevel):
         if not export_path:
             messagebox.showerror("Error", "Please select an export folder.")
             return
-    
+        print("Batch process has started")
         geojson_folder = os.path.join(export_path, "geojson")
         overlay_folder = os.path.join(export_path, "shoreline overlay")
         os.makedirs(geojson_folder, exist_ok=True)

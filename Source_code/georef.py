@@ -72,7 +72,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
         self.stdout_redirector = StdoutRedirector(self.console_text)
         sys.stdout = self.stdout_redirector
         sys.stderr = self.stdout_redirector
-        print("Here you may see console outputs")
+        print("Here you may see console outputs\n--------------------------------\n")
 
 
     def _eta_string(self, start_ts: float, frac_done: float) -> str:
@@ -618,6 +618,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
             messagebox.showerror("Error", "Please load a homography matrix first.")
             return
 
+        print("Batch process has started")
         def _batch_thread():
             subfolders = [f.path for f in os.scandir(self.batch_main_folder) if f.is_dir()]
             if not subfolders:

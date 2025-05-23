@@ -178,7 +178,7 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         self.stdout_redirector = StdoutRedirector(self.console_text)
         sys.stdout = self.stdout_redirector
         sys.stderr = self.stdout_redirector
-        print("Here you may see console outputs\n")
+        print("Here you may see console outputs\n--------------------------------\n")
 
     def load_raw_image(self):
         file_path = filedialog.askopenfilename(title="Select Raw Time-Stack Image", filetypes=[("PNG Images", "*.png")])
@@ -372,7 +372,7 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         if not self.batch_raw_folder or not self.batch_mask_folder:
             messagebox.showerror("Error", "Please select both batch raw and batch mask folders.")
             return
-
+        print("Batch process has started")
         # 2) List all PNGs
         raw_files  = [f for f in os.listdir(self.batch_raw_folder)  if f.lower().endswith('.png')]
         mask_files = [f for f in os.listdir(self.batch_mask_folder) if f.lower().endswith('.png')]

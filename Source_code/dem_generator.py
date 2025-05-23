@@ -96,7 +96,7 @@ class CreateDemWindow(ctk.CTkToplevel):
         console_text.pack(fill="both", expand=True, padx=5, pady=5)
         sys.stdout = StdoutRedirector(console_text)
         sys.stderr = sys.stdout
-        print("Here you may see console outputs\n")
+        print("Here you may see console outputs\n--------------------------------\n")
 
     # ───────────────────── UI helpers ───────────────────────────────
     def _create_top_panel(self):
@@ -497,6 +497,7 @@ class CreateDemWindow(ctk.CTkToplevel):
             self.hide_progress_bar()
             return
         total = len(self.daily_dates)
+        print("Batch process has started")
         for i, date_val in enumerate(self.daily_dates, 1):
             self.progress_bar.set(i / total)
             self.progress_label.configure(text=f"Batch {i}/{total}")

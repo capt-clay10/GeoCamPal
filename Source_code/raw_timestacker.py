@@ -13,13 +13,14 @@ import sys
 import tifffile
 import customtkinter as ctk
 import rasterio
+from scipy.interpolate import interp1d  # for gap interpolation
 
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("green")
 
-# ------------------------------------------------------------------------------
+# -------------------------------------------------------------------------------
 # StdoutRedirector: Redirect console output to the built-in console widget
-# ------------------------------------------------------------------------------
+# -------------------------------------------------------------------------------
 class StdoutRedirector:
     def __init__(self, text_widget):
         self.text_widget = text_widget
@@ -31,9 +32,9 @@ class StdoutRedirector:
     def flush(self):
         pass
 
-# ------------------------------------------------------------------------------
+# -------------------------------------------------------------------------------
 # ROI Selector (small helper window)
-# ------------------------------------------------------------------------------
+# -------------------------------------------------------------------------------
 class ScrollZoomBBoxSelector(tk.Frame):
     """A scroll-zoom capable widget that lets the user draw a bounding box."""
     def __init__(self, master, **kwargs):
@@ -159,9 +160,9 @@ class ScrollZoomBBoxSelector(tk.Frame):
     def on_enter_key(self, _):
         print("Final bounding box:", self.bbox)
 
-# ------------------------------------------------------------------------------
+# -------------------------------------------------------------------------------
 # Core timestack generators
-# ------------------------------------------------------------------------------
+# -------------------------------------------------------------------------------
 def generate_with_fill(image_files, bbox, resolution_x_m, output_path,
                        freq_hz=1.0, duration_s=600.0, progress_callback=None):
     x, y, w, h = bbox
@@ -208,39 +209,99 @@ def generate_with_fill(image_files, bbox, resolution_x_m, output_path,
                     tasks[idx] = fn
                     tasks_dt[idx] = dt
 
-    # build lines
+    # build lines, using NaN for missing
     lines = []
     for i, fn in enumerate(tasks, start=1):
         if progress_callback:
             progress_callback(i, N)
         if fn is None or not os.path.exists(fn):
-            line = np.zeros((w, 3), dtype=np.uint8)
+            line = np.full((w, 3), np.nan, dtype=float)
         else:
             img = tifffile.imread(fn) if fn.lower().endswith(".tif") else np.array(Image.open(fn).convert("RGB"))
             roi = img[y:y+h, x:x+w]
             if roi.size == 0:
-                line = np.zeros((w, 3), dtype=np.uint8)
+                line = np.full((w, 3), np.nan, dtype=float)
             else:
                 if roi.ndim == 2:
-                    roi = np.stack([roi] * 3, axis=-1)
+                    roi = np.stack([roi]*3, axis=-1)
                 elif roi.shape[2] > 3:
                     roi = roi[:, :, :3]
-                line = np.round(np.mean(roi, axis=0)).astype(np.uint8)
+                line = np.round(np.mean(roi, axis=0)).astype(float)
         lines.append(line)
 
-    ts = np.stack(lines, axis=0)[::-1, :, :]
-    out = Image.fromarray(ts)
-    if out.width != w:
-        out = out.resize((w, ts.shape[0]), Image.NEAREST)
+    # stack without flipping
+    ts = np.stack(lines, axis=0)  # shape (N, w, 3) dtype=float with NaNs
+
+    # count NaN rows before
+    nan_rows_before = np.all(np.isnan(ts), axis=(1,2))
+    total_nan_before = int(nan_rows_before.sum())
+
+    # detect tail nan-run
+    tail_nan = 0
+    for flag in nan_rows_before[::-1]:
+        if flag:
+            tail_nan += 1
+        else:
+            break
+
+    extrapolate_tail = True
+    if tail_nan > 5:
+        print(f"Warning: {tail_nan} missing rows at tail; not extrapolating, leaving as NaN")
+        extrapolate_tail = False
+
+    # interpolate/extrapolate per column & channel
+    idxs = np.arange(N)
+    for j in range(w):
+        for c in range(3):
+            col = ts[:, j, c]
+            nanmask = np.isnan(col)
+            if not nanmask.any():
+                continue
+            valid = ~nanmask
+            vidx = idxs[valid]
+            vvals = col[valid]
+            if vidx.size == 0:
+                continue
+            first, last = vidx[0], vidx[-1]
+            # head: constant fill
+            if first > 0:
+                col[:first] = vvals[0]
+            # tail: constant if allowed
+            if last < N-1 and extrapolate_tail:
+                col[last+1:] = vvals[-1]
+            # interior: cubic interp
+            if last - first >= 1:
+                f = interp1d(vidx, vvals, kind='cubic', bounds_error=False)
+                mid = idxs[first:last+1][nanmask[first:last+1]]
+                if mid.size > 0:
+                    col[mid] = f(mid)
+            ts[:, j, c] = col
+
+    # count how many rows got filled
+    nan_rows_after = np.all(np.isnan(ts), axis=(1,2))
+    filled = int(((nan_rows_before) & (~nan_rows_after)).sum())
+    remaining = int(nan_rows_after.sum())
+    if filled > 0:
+        print(f"Filled {filled} missing rows via interpolation/extrapolation.")
+    if remaining > 0:
+        print(f"Remaining {remaining} NaN rows (tail), left unfilled.")
+
+    # flip, convert NaNs to 0, clip & save
+    ts = ts[::-1, :, :]
+    ts = np.nan_to_num(ts, nan=0)
+    ts = np.clip(ts, 0, 255).astype(np.uint8)
+
+    out_img = Image.fromarray(ts)
+    if out_img.width != w:
+        out_img = out_img.resize((w, ts.shape[0]), Image.NEAREST)
     info = PngInfo()
     info.add_text("pixel_resolution", f"{resolution_x_m:.6f}")
     info.add_text("bounding_box", f"{x},{y},{w},{h}")
-    out.save(output_path, format="PNG", pnginfo=info)
+    out_img.save(output_path, format="PNG", pnginfo=info)
     return output_path
 
 def generate_no_fill(image_files, bbox, resolution_x_m, output_path, progress_callback=None):
     x, y, w, h = bbox
-    # sort purely by filename datetime
     def parse_dt(f):
         p = os.path.splitext(os.path.basename(f))[0].split("_")[:7]
         return datetime(int(p[0]), int(p[1]), int(p[2]),
@@ -254,11 +315,10 @@ def generate_no_fill(image_files, bbox, resolution_x_m, output_path, progress_ca
             progress_callback(i, total)
         img = tifffile.imread(fn) if fn.lower().endswith(".tif") else np.array(Image.open(fn).convert("RGB"))
         roi = img[y:y+h, x:x+w]
-        # skip empty ROIs entirely
         if roi.size == 0:
             continue
         if roi.ndim == 2:
-            roi = np.stack([roi] * 3, axis=-1)
+            roi = np.stack([roi]*3, axis=-1)
         elif roi.shape[2] > 3:
             roi = roi[:, :, :3]
         line = np.round(np.mean(roi, axis=0)).astype(np.uint8)
@@ -277,9 +337,9 @@ def generate_no_fill(image_files, bbox, resolution_x_m, output_path, progress_ca
     out.save(output_path, format="PNG", pnginfo=info)
     return output_path
 
-# ------------------------------------------------------------------------------
+# -------------------------------------------------------------------------------
 # Utility to get resource path
-# ------------------------------------------------------------------------------
+# -------------------------------------------------------------------------------
 def resource_path(rel: str) -> str:
     try:
         base = sys._MEIPASS
@@ -287,9 +347,9 @@ def resource_path(rel: str) -> str:
         base = os.path.dirname(__file__)
     return os.path.join(base, rel)
 
-# ------------------------------------------------------------------------------
+# -------------------------------------------------------------------------------
 # Main GUI class – TimestackTool
-# ------------------------------------------------------------------------------
+# -------------------------------------------------------------------------------
 class TimestackTool(ctk.CTkToplevel):
     def __init__(self, master=None):
         super().__init__(master)
@@ -321,7 +381,7 @@ class TimestackTool(ctk.CTkToplevel):
         self.stdout_redirector = StdoutRedirector(self.console_text)
         sys.stdout = self.stdout_redirector
         sys.stderr = self.stdout_redirector
-        print("Here you may see console outputs\n")
+        print("Here you may see console outputs\n--------------------------------\n")
 
     def _build_ui(self):
         # Top: preview image
@@ -596,6 +656,7 @@ class TimestackTool(ctk.CTkToplevel):
         self.batch_pb.set(0)
         self.batch_lbl.configure(text="ETA: --")
         start = time.time()
+        print("Batch process has started")
 
         def update_ui(done):
             frac = done / total

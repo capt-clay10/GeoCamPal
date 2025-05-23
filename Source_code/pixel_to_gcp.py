@@ -119,7 +119,7 @@ class PixelToGCPWindow(ctk.CTkToplevel):
         self.stdout_redirector = StdoutRedirector(self.console_text)
         sys.stdout = self.stdout_redirector
         sys.stderr = self.stdout_redirector
-        print("Here you may see console outputs\n")
+        print("Here you may see console outputs\n--------------------------------\n")
     
         # =============================
         # MIDDLE SECTION: INSTRUCTIONS
