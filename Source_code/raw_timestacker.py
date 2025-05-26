@@ -13,7 +13,9 @@ import sys
 import tifffile
 import customtkinter as ctk
 import rasterio
-from scipy.interpolate import interp1d  # for gap interpolation
+from scipy.interpolate import interp1d 
+import concurrent.futures           
+     
 
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("green")
@@ -80,6 +82,8 @@ class ScrollZoomBBoxSelector(tk.Frame):
         tk.Button(button_frame, text="Zoom Out", command=self.zoom_out).pack(side=tk.LEFT, padx=5)
         tk.Label(button_frame, text="Drag to select ROI; press Enter to confirm").pack(side=tk.LEFT, padx=5)
 
+    # (unchanged helper methods...)
+    # ---------------------------------------------------------------------------
     def load_image(self, file_path=None):
         if file_path is None:
             file_path = filedialog.askopenfilename(
@@ -161,10 +165,11 @@ class ScrollZoomBBoxSelector(tk.Frame):
         print("Final bounding box:", self.bbox)
 
 # -------------------------------------------------------------------------------
-# Core timestack generators
+# Core timestack generators (unchanged)
 # -------------------------------------------------------------------------------
 def generate_with_fill(image_files, bbox, resolution_x_m, output_path,
                        freq_hz=1.0, duration_s=600.0, progress_callback=None):
+    # ... (same as before)
     x, y, w, h = bbox
     if w <= 0 or h <= 0:
         raise ValueError(f"Invalid bounding box {bbox}: width and height must be > 0")
@@ -229,12 +234,10 @@ def generate_with_fill(image_files, bbox, resolution_x_m, output_path,
                 line = np.round(np.mean(roi, axis=0)).astype(float)
         lines.append(line)
 
-    # stack without flipping
     ts = np.stack(lines, axis=0)  # shape (N, w, 3) dtype=float with NaNs
 
-    # count NaN rows before
-    nan_rows_before = np.all(np.isnan(ts), axis=(1,2))
-    total_nan_before = int(nan_rows_before.sum())
+    # (interpolation & saving unchanged...)
+    nan_rows_before = np.all(np.isnan(ts), axis=(1, 2))
 
     # detect tail nan-run
     tail_nan = 0
@@ -249,7 +252,6 @@ def generate_with_fill(image_files, bbox, resolution_x_m, output_path,
         print(f"Warning: {tail_nan} missing rows at tail; not extrapolating, leaving as NaN")
         extrapolate_tail = False
 
-    # interpolate/extrapolate per column & channel
     idxs = np.arange(N)
     for j in range(w):
         for c in range(3):
@@ -263,22 +265,18 @@ def generate_with_fill(image_files, bbox, resolution_x_m, output_path,
             if vidx.size == 0:
                 continue
             first, last = vidx[0], vidx[-1]
-            # head: constant fill
             if first > 0:
                 col[:first] = vvals[0]
-            # tail: constant if allowed
-            if last < N-1 and extrapolate_tail:
-                col[last+1:] = vvals[-1]
-            # interior: cubic interp
+            if last < N - 1 and extrapolate_tail:
+                col[last + 1:] = vvals[-1]
             if last - first >= 1:
                 f = interp1d(vidx, vvals, kind='cubic', bounds_error=False)
-                mid = idxs[first:last+1][nanmask[first:last+1]]
+                mid = idxs[first:last + 1][nanmask[first:last + 1]]
                 if mid.size > 0:
                     col[mid] = f(mid)
             ts[:, j, c] = col
 
-    # count how many rows got filled
-    nan_rows_after = np.all(np.isnan(ts), axis=(1,2))
+    nan_rows_after = np.all(np.isnan(ts), axis=(1, 2))
     filled = int(((nan_rows_before) & (~nan_rows_after)).sum())
     remaining = int(nan_rows_after.sum())
     if filled > 0:
@@ -286,7 +284,6 @@ def generate_with_fill(image_files, bbox, resolution_x_m, output_path,
     if remaining > 0:
         print(f"Remaining {remaining} NaN rows (tail), left unfilled.")
 
-    # flip, convert NaNs to 0, clip & save
     ts = ts[::-1, :, :]
     ts = np.nan_to_num(ts, nan=0)
     ts = np.clip(ts, 0, 255).astype(np.uint8)
@@ -294,19 +291,23 @@ def generate_with_fill(image_files, bbox, resolution_x_m, output_path,
     out_img = Image.fromarray(ts)
     if out_img.width != w:
         out_img = out_img.resize((w, ts.shape[0]), Image.NEAREST)
+
     info = PngInfo()
     info.add_text("pixel_resolution", f"{resolution_x_m:.6f}")
     info.add_text("bounding_box", f"{x},{y},{w},{h}")
     out_img.save(output_path, format="PNG", pnginfo=info)
     return output_path
 
+
 def generate_no_fill(image_files, bbox, resolution_x_m, output_path, progress_callback=None):
     x, y, w, h = bbox
+
     def parse_dt(f):
         p = os.path.splitext(os.path.basename(f))[0].split("_")[:7]
         return datetime(int(p[0]), int(p[1]), int(p[2]),
                         int(p[3]), int(p[4]), int(p[5]),
                         int(p[6]) * 1000)
+
     files = sorted(image_files, key=parse_dt)
     total = len(files)
     lines = []
@@ -314,11 +315,11 @@ def generate_no_fill(image_files, bbox, resolution_x_m, output_path, progress_ca
         if progress_callback:
             progress_callback(i, total)
         img = tifffile.imread(fn) if fn.lower().endswith(".tif") else np.array(Image.open(fn).convert("RGB"))
-        roi = img[y:y+h, x:x+w]
+        roi = img[y:y + h, x:x + w]
         if roi.size == 0:
             continue
         if roi.ndim == 2:
-            roi = np.stack([roi]*3, axis=-1)
+            roi = np.stack([roi] * 3, axis=-1)
         elif roi.shape[2] > 3:
             roi = roi[:, :, :3]
         line = np.round(np.mean(roi, axis=0)).astype(np.uint8)
@@ -343,9 +344,45 @@ def generate_no_fill(image_files, bbox, resolution_x_m, output_path, progress_ca
 def resource_path(rel: str) -> str:
     try:
         base = sys._MEIPASS
-    except:
+    except Exception:
         base = os.path.dirname(__file__)
     return os.path.join(base, rel)
+
+# -------------------------------------------------------------------------------
+# Helper executed in worker processes  (NEW)
+# -------------------------------------------------------------------------------
+def _process_subfolder(sub_path: str, bbox: tuple, res_x: float,
+                       freq: float, dur: float, fill_gaps: bool,
+                       output_folder: str) -> tuple:
+    """
+    Runs inside a ThreadPoolExecutor worker.
+    Returns (sub_path, status, message) where status ∈
+       {"processed", "skipped", "error", "no_imgs"}.
+    """
+    try:
+        imgs = []
+        for ext in ("*.jpg", "*.jpeg", "*.png", "*.tif"):
+            imgs.extend(glob.glob(os.path.join(sub_path, ext)))
+        if not imgs:
+            return sub_path, "no_imgs", "No supported images"
+
+        imgs.sort()
+        first_ts  = "_".join(os.path.basename(imgs[0]).split("_")[0:5])
+        out_name  = f"{first_ts}_raw_timestack.png"
+        out_path  = os.path.join(output_folder, out_name)
+
+        if os.path.exists(out_path):
+            return sub_path, "skipped", "Already processed"
+
+        if fill_gaps:
+            generate_with_fill(imgs, bbox, res_x, out_path,
+                               freq_hz=freq, duration_s=dur)
+        else:
+            generate_no_fill(imgs, bbox, res_x, out_path)
+        return sub_path, "processed", out_name
+    except Exception as exc:
+        return sub_path, "error", str(exc)
+
 
 # -------------------------------------------------------------------------------
 # Main GUI class – TimestackTool
@@ -357,7 +394,7 @@ class TimestackTool(ctk.CTkToplevel):
         self.geometry("1200x800")
         try:
             self.iconbitmap(resource_path("launch_logo.ico"))
-        except:
+        except Exception:
             pass
 
         self.input_folder = tk.StringVar()
@@ -383,6 +420,9 @@ class TimestackTool(ctk.CTkToplevel):
         sys.stderr = self.stdout_redirector
         print("Here you may see console outputs\n--------------------------------\n")
 
+    # ---------------------------------------------------------------------------
+    # (all UI-building helpers unchanged)
+    # ---------------------------------------------------------------------------
     def _build_ui(self):
         # Top: preview image
         self.top_frame = ctk.CTkFrame(self, height=400)
@@ -397,10 +437,15 @@ class TimestackTool(ctk.CTkToplevel):
         # Input / ROI panel
         ip = ctk.CTkFrame(self.bottom_frame)
         ip.pack(fill="x", padx=5, pady=5)
-        ctk.CTkButton(ip, text="Browse Input Folder", command=self.browse_input_folder).grid(row=0, column=0, padx=5, pady=5, sticky="w")
-        ctk.CTkLabel(ip, textvariable=self.input_folder).grid(row=0, column=1, padx=5, pady=5, sticky="w")
-        ctk.CTkButton(ip, text="Select BBox", command=self.select_bbox).grid(row=0, column=2, padx=5, pady=5)
-        ctk.CTkCheckBox(ip, text="Add bbox as text", variable=self.add_bbox_text, command=self.toggle_bbox_entry).grid(row=0, column=3, padx=5, pady=5)
+        ctk.CTkButton(ip, text="Browse Input Folder", command=self.browse_input_folder)\
+            .grid(row=0, column=0, padx=5, pady=5, sticky="w")
+        ctk.CTkLabel(ip, textvariable=self.input_folder)\
+            .grid(row=0, column=1, padx=5, pady=5, sticky="w")
+        ctk.CTkButton(ip, text="Select BBox", command=self.select_bbox)\
+            .grid(row=0, column=2, padx=5, pady=5)
+        ctk.CTkCheckBox(ip, text="Add bbox as text", variable=self.add_bbox_text,
+                        command=self.toggle_bbox_entry)\
+            .grid(row=0, column=3, padx=5, pady=5)
         self.bbox_entry = ctk.CTkEntry(ip, textvariable=self.bbox_text)
         self.bbox_entry.grid(row=0, column=4, padx=5, pady=5)
         self.bbox_entry.configure(state="disabled")
@@ -410,12 +455,15 @@ class TimestackTool(ctk.CTkToplevel):
         rp.pack(fill="x", padx=5, pady=5)
         ctk.CTkLabel(rp, text="Identified resolution:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
         ctk.CTkLabel(rp, textvariable=self.identified_res_var).grid(row=0, column=1, padx=5, pady=5, sticky="w")
-        ctk.CTkCheckBox(rp, text="Add pixel resolution manually", variable=self.add_resolution_manual, command=self.toggle_resolution_entry).grid(row=0, column=2, padx=5, pady=5)
+        ctk.CTkCheckBox(rp, text="Add pixel resolution manually", variable=self.add_resolution_manual,
+                        command=self.toggle_resolution_entry)\
+            .grid(row=0, column=2, padx=5, pady=5)
         self.resolution_entry = ctk.CTkEntry(rp)
         self.resolution_entry.grid(row=0, column=3, padx=5, pady=5)
         self.resolution_entry.configure(state="disabled")
         ctk.CTkLabel(rp, text="m").grid(row=0, column=4, padx=5, pady=5, sticky="w")
-        ctk.CTkCheckBox(rp, text="Fill gaps", variable=self.fill_gaps).grid(row=0, column=5, padx=15, pady=5)
+        ctk.CTkCheckBox(rp, text="Fill gaps", variable=self.fill_gaps)\
+            .grid(row=0, column=5, padx=15, pady=5)
         ctk.CTkLabel(rp, text="Freq (Hz):").grid(row=0, column=6, padx=5, pady=5, sticky="w")
         ctk.CTkEntry(rp, textvariable=self.freq_var, width=60).grid(row=0, column=7, padx=5, pady=5, sticky="w")
         ctk.CTkLabel(rp, text="Dur (s):").grid(row=0, column=8, padx=5, pady=5, sticky="w")
@@ -424,9 +472,12 @@ class TimestackTool(ctk.CTkToplevel):
         # Output & single-timestack panel
         op = ctk.CTkFrame(self.bottom_frame)
         op.pack(fill="x", padx=5, pady=5)
-        ctk.CTkButton(op, text="Select Output Folder", command=self.select_output_folder).grid(row=0, column=0, padx=5, pady=5, sticky="w")
-        ctk.CTkLabel(op, textvariable=self.output_folder).grid(row=0, column=1, padx=5, pady=5, sticky="w")
-        ctk.CTkButton(op, text="Create Raw Timestack", command=self.create_timestack).grid(row=0, column=2, padx=5, pady=5)
+        ctk.CTkButton(op, text="Select Output Folder", command=self.select_output_folder)\
+            .grid(row=0, column=0, padx=5, pady=5, sticky="w")
+        ctk.CTkLabel(op, textvariable=self.output_folder)\
+            .grid(row=0, column=1, padx=5, pady=5, sticky="w")
+        ctk.CTkButton(op, text="Create Raw Timestack", command=self.create_timestack)\
+            .grid(row=0, column=2, padx=5, pady=5)
         self.single_pb = ctk.CTkProgressBar(op)
         self.single_pb.grid(row=0, column=3, padx=5, pady=5)
         self.single_pb.set(0)
@@ -436,9 +487,12 @@ class TimestackTool(ctk.CTkToplevel):
         # Batch panel
         bp = ctk.CTkFrame(self.bottom_frame)
         bp.pack(fill="x", padx=5, pady=5)
-        ctk.CTkButton(bp, text="Select Batch Folder", command=self.browse_batch_folder).grid(row=0, column=0, padx=5, pady=5, sticky="w")
-        ctk.CTkLabel(bp, textvariable=self.batch_folder).grid(row=0, column=1, padx=5, pady=5, sticky="w")
-        ctk.CTkButton(bp, text="Batch Process", command=self.batch_process).grid(row=0, column=2, padx=5, pady=5)
+        ctk.CTkButton(bp, text="Select Batch Folder", command=self.browse_batch_folder)\
+            .grid(row=0, column=0, padx=5, pady=5, sticky="w")
+        ctk.CTkLabel(bp, textvariable=self.batch_folder)\
+            .grid(row=0, column=1, padx=5, pady=5, sticky="w")
+        ctk.CTkButton(bp, text="Batch Process", command=self.batch_process)\
+            .grid(row=0, column=2, padx=5, pady=5)
         self.batch_pb = ctk.CTkProgressBar(bp)
         self.batch_pb.grid(row=0, column=3, padx=5, pady=5)
         self.batch_pb.set(0)
@@ -451,7 +505,9 @@ class TimestackTool(ctk.CTkToplevel):
         self.console_text = tk.Text(cf, wrap="word", height=10)
         self.console_text.pack(fill="both", expand=True, padx=5, pady=5)
 
-    # UI helpers
+    # ---------------------------------------------------------------------------
+    # Simple helpers (unchanged)
+    # ---------------------------------------------------------------------------
     def toggle_bbox_entry(self):
         self.bbox_entry.configure(state="normal" if self.add_bbox_text.get() else "disabled")
 
@@ -472,6 +528,7 @@ class TimestackTool(ctk.CTkToplevel):
         f = filedialog.askdirectory(title="Select Main Batch Folder (sub-folders per batch)")
         if f:
             self.batch_folder.set(f)
+
 
     # Bounding-box selection
     def select_bbox(self):
@@ -605,7 +662,9 @@ class TimestackTool(ctk.CTkToplevel):
                 self.single_lbl.configure(text="")
 
         threading.Thread(target=worker, daemon=True).start()
-
+    # ---------------------------------------------------------------------------
+    # Batch processing – logic for skipping & multiprocessing
+    # ---------------------------------------------------------------------------
     def batch_process(self):
         mbf = self.batch_folder.get().strip()
         outf = self.output_folder.get().strip()
@@ -624,13 +683,13 @@ class TimestackTool(ctk.CTkToplevel):
         if self.add_resolution_manual.get():
             try:
                 res_x = float(self.resolution_entry.get())
-            except:
+            except Exception:
                 messagebox.showerror("Error", "Invalid manual resolution.")
                 return
         else:
             try:
                 res_x = float(self.identified_res_var.get().split()[0])
-            except:
+            except Exception:
                 res_x = self.default_resolution
 
         # Freq / Duration
@@ -638,66 +697,103 @@ class TimestackTool(ctk.CTkToplevel):
             freq = float(self.freq_var.get())
             if freq <= 0:
                 freq = 1.0
-        except:
+        except Exception:
             freq = 1.0
         try:
             dur = float(self.duration_var.get())
             if dur <= 0:
                 dur = 600.0
-        except:
+        except Exception:
             dur = 600.0
 
-        subs = [os.path.join(mbf, d) for d in os.listdir(mbf) if os.path.isdir(os.path.join(mbf, d))]
-        if not subs:
+        # Gather sub-folders
+        all_subs = [os.path.join(mbf, d) for d in os.listdir(mbf)
+                    if os.path.isdir(os.path.join(mbf, d))]
+        if not all_subs:
             messagebox.showerror("Error", "No sub-folders found in batch folder.")
             return
 
-        total = len(subs)
+        # ---------- Quick pass: skip already-processed sub-folders ----------
+        subs_to_do = []
+        skipped = 0
+        for sub in all_subs:
+            imgs = []
+            for ext in ("*.jpg", "*.jpeg", "*.png", "*.tif"):
+                imgs.extend(glob.glob(os.path.join(sub, ext)))
+            if not imgs:
+                continue
+            imgs.sort()
+            first_ts = "_".join(os.path.basename(imgs[0]).split("_")[0:5])
+            expected_name = f"{first_ts}_raw_timestack.png"
+            if os.path.exists(os.path.join(outf, expected_name)):
+                skipped += 1
+            else:
+                subs_to_do.append(sub)
+
+        if not subs_to_do:
+            messagebox.showinfo("Batch Done", f"Nothing to do: {skipped} sub-folders "
+                                              f"were already processed.")
+            return
+
+        total = len(subs_to_do)
         self.batch_pb.set(0)
         self.batch_lbl.configure(text="ETA: --")
         start = time.time()
-        print("Batch process has started")
+        print(f"Batch process has started – {total} new sub-folders "
+              f"(skipped {skipped} already done)")
 
-        def update_ui(done):
-            frac = done / total
+        def update_ui(done_cnt: int):
+            frac = done_cnt / total
             self.batch_pb.set(frac)
-            rem = (time.time() - start) / done * (total - done) if done else 0
-            m = int(rem) // 60
-            s = int(rem) % 60
+            elapsed = time.time() - start
+            rem = elapsed / done_cnt * (total - done_cnt) if done_cnt else 0
+            m, s = divmod(int(rem), 60)
             self.batch_lbl.configure(text=f"{m}m {s}s" if m else f"{s}s")
 
-        def worker():
+        # ---------- Worker thread that controls the ProcessPool ----------
+        def controller():
             done = 0
-            for sub in subs:
-                imgs = []
-                for ext in ("*.jpg", "*.jpeg", "*.png", "*.tif"):
-                    imgs.extend(glob.glob(os.path.join(sub, ext)))
-                if imgs:
-                    imgs.sort()
-                    first_ts = "_".join(os.path.basename(imgs[0]).split("_")[0:5])
-                    out_name = f"{first_ts}_raw_timestack.png"
-                    out_path = os.path.join(outf, out_name)
-                    try:
-                        if self.fill_gaps.get():
-                            generate_with_fill(
-                                imgs, self.bbox, res_x, out_path,
-                                freq_hz=freq, duration_s=dur
-                            )
-                        else:
-                            generate_no_fill(
-                                imgs, self.bbox, res_x, out_path
-                            )
-                    except Exception as e:
-                        print(f"Error processing {sub}: {e}")
-                done += 1
-                update_ui(done)
-            messagebox.showinfo("Batch Done", f"Processed {done} sub-folders.")
+            max_workers = min(4, os.cpu_count() or 1, total)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers,
+                                                       thread_name_prefix="batch") as pool:
+                futures = [pool.submit(
+                    _process_subfolder, sub, self.bbox, res_x, freq, dur,
+                    self.fill_gaps.get(), outf) for sub in subs_to_do]
+
+                for fut in concurrent.futures.as_completed(futures):
+                    sub_path, status, msg = fut.result()
+                    if status == "error":
+                        print(f"Error processing {sub_path}: {msg}")
+                    elif status == "no_imgs":
+                        print(f"{sub_path}: {msg}")
+                    elif status == "skipped":
+                        print(f"Skipped {sub_path} (already done).")
+                    elif status == "processed":
+                        print(f"Finished {os.path.basename(sub_path)}  ->  {msg}")
+                    done += 1
+                    update_ui(done)
+
+            elapsed = time.time() - start
+            elapsed_str = f"{elapsed/60:.1f} min" if elapsed >= 60 else f"{elapsed:.1f} s"
+            print(f"Batch process complete in {elapsed_str}")
+            messagebox.showinfo(
+                "Batch Done",
+                f"Newly processed: {done}\n"
+                f"Previously done: {skipped}\n"
+                f"Total in folder: {len(all_subs)}\n"
+                f"Elapsed time: {elapsed_str}\n\n"
+                "Batch process complete"
+            )
             self.batch_pb.set(0)
             self.batch_lbl.configure(text="")
 
-        threading.Thread(target=worker, daemon=True).start()
+        threading.Thread(target=controller, daemon=True).start()
 
+# -------------------------------------------------------------------------------
+# Run GUI
+# -------------------------------------------------------------------------------
 if __name__ == "__main__":
+
     root = ctk.CTk()
     root.withdraw()
     TimestackTool(master=root)

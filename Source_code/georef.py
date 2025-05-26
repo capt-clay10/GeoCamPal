@@ -1,24 +1,25 @@
-import numpy as np
-from PIL import Image, ImageTk
 import os
+import sys
+import time
+import glob
+import threading
+import concurrent.futures                 
+import numpy as np
 import cv2
+from PIL import Image, ImageTk
 import customtkinter as ctk
 import tkinter as tk
 from tkinter import filedialog, messagebox
-import threading
-import glob
 from osgeo import gdal, osr
 osr.DontUseExceptions()
-import sys
-from tkinter import ttk          
-import time
 
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("green")
 
-
+# %% ─────────────────────────── helpers ──────────────────────────────────────────
 def resource_path(relative_path: str) -> str:
-    try:
+    """Return absolute path to bundled resources (handles PyInstaller)."""
+    try:                       # PyInstaller puts files in a temp folder
         base_path = sys._MEIPASS
     except Exception:
         base_path = os.path.dirname(__file__)
@@ -26,6 +27,7 @@ def resource_path(relative_path: str) -> str:
 
 
 class StdoutRedirector:
+    """Redirect print/traceback output to a Tk Text widget."""
     def __init__(self, text_widget):
         self.text_widget = text_widget
 
@@ -36,9 +38,14 @@ class StdoutRedirector:
     def flush(self):
         pass
 
-# %% main window
+
+MAX_BATCH_WORKERS = max(1, min(4, os.cpu_count() or 1))  # ≤ 4 workers
+
+
+# %% ─────────────────────── main window class ────────────────────────────────────
 class GeoReferenceModule(ctk.CTkToplevel):
 
+    # ───────────────────── init / UI scaffolding ──────────────────────────────
     def __init__(self, master=None, *args, **kwargs):
         super().__init__(master=master, *args, **kwargs)
         self.title("Georeferencing Tool")
@@ -49,43 +56,50 @@ class GeoReferenceModule(ctk.CTkToplevel):
         except Exception as e:
             print("Warning: Could not load window icon:", e)
 
-        # ---------- state ----------
-        self.H = None
+        # ---------------- state ----------------
+        self.H: np.ndarray | None = None
         self.image_list = []
-        self.current_index = 0
         self.input_folder = ""
         self.output_folder = ""
         self.batch_main_folder = ""
         self.scale_factor = 4
-        self.current_zoom = 1.0
+        self.user_epsg: int | None = None    # ← NEW
+        self.executor: concurrent.futures.ThreadPoolExecutor | None = None  # ← NEW
 
-        # ---------- UI ----------
+        # ---------------- UI -------------------
         self.initialize_components()
 
-        # console panel stays identical
+        # -------- console ------
         self.grid_rowconfigure(6, weight=0)
-        self.console_frame = ctk.CTkFrame(self)
-        self.console_frame.grid(row=6, column=0, sticky="nsew", padx=5, pady=5)
-        self.console_text = tk.Text(self.console_frame, wrap="word", height=8)
-        self.console_text.pack(fill="both", expand=True, padx=5, pady=5)
-
-        self.stdout_redirector = StdoutRedirector(self.console_text)
-        sys.stdout = self.stdout_redirector
-        sys.stderr = self.stdout_redirector
+        console_frame = ctk.CTkFrame(self)
+        console_frame.grid(row=6, column=0, sticky="nsew", padx=5, pady=5)
+        console_text = tk.Text(console_frame, wrap="word", height=8)
+        console_text.pack(fill="both", expand=True, padx=5, pady=5)
+        sys.stdout = StdoutRedirector(console_text)
+        sys.stderr = sys.stdout
         print("Here you may see console outputs\n--------------------------------\n")
 
+        # graceful close
+        self.protocol("WM_DELETE_WINDOW", self._on_close)      # ← NEW
 
-    def _eta_string(self, start_ts: float, frac_done: float) -> str:
-        """Return a human‑readable ETA string."""
+    # ---------------- graceful shutdown  ----------------
+    def _on_close(self):
+        if self.executor:
+            self.executor.shutdown(wait=False, cancel_futures=True)
+        self.destroy()
+
+    # ───────────────── ETA string ────────────────────────────
+    @staticmethod
+    def _eta_string(start_ts: float, frac_done: float) -> str:
         if frac_done <= 0:
             return "ETA: –"
         elapsed = time.time() - start_ts
         remaining = elapsed * (1 / frac_done - 1)
         if remaining >= 3600:
-            return f"ETA: {remaining / 3600:.1f} h"
+            return f"ETA: {remaining / 3600:.1f} h"
         if remaining >= 60:
-            return f"ETA: {remaining / 60:.1f} min"
-        return f"ETA: {int(remaining)} s"
+            return f"ETA: {remaining / 60:.1f} min"
+        return f"ETA: {int(remaining)} s"
 
     # ---------------------------------------------------------------
     def initialize_components(self):
@@ -451,222 +465,215 @@ class GeoReferenceModule(ctk.CTkToplevel):
             self.output_folder_label.configure(text=f"Output Folder: {folder}")
 
     # ---------------------------------------------------------------
-    # --------------  SINGLE‑FOLDER (progress+ETA) ------------------
-    # ---------------------------------------------------------------
-    def process_all_images(self):
-        if not self.image_list or self.H is None:
-            messagebox.showerror("Error", "Load a folder and homography first")
-            return
-
-        def _worker():
-            total = len(self.image_list)
-            start_ts = time.time()
-            for idx, path in enumerate(self.image_list, start=1):
-                try:
-                    base = os.path.splitext(os.path.basename(path))[0]
-                    out_path = os.path.join(self.output_folder, f"{base}.tif")
-                    self.georeference_and_save_image(path, out_path)
-                except Exception as e:
-                    print(f"Error processing {path}: {e}")
-
-                frac = idx / total
-                self.progress.set(frac)
-                self.progress_eta.configure(text=self._eta_string(start_ts, frac))
-                self.update_idletasks()
-
-            self.progress_eta.configure(text="Done")
-            messagebox.showinfo("Complete", "Processing finished!")
-
-        threading.Thread(target=_worker, daemon=True).start()
-
-    # ---------------------------------------------------------------
     # ---- Helper that writes output GeoTIFF -------
     # ---------------------------------------------------------------
-    def georeference_and_save_image(self, img_path, output_path):
+    # ──────────────────── georeference_and_save_image ─────────────────────────
+    def georeference_and_save_image(self, img_path: str, output_path: str) -> bool:
+        """Same as before but uses self.user_epsg (validated once)."""
         img = cv2.imread(img_path)
         if img is None:
             print(f"Unable to read {img_path}")
             return False
-        h, w = img.shape[:2]
 
-        # Use AOI selection for processing:
+        h, w = img.shape[:2]
         original_corners = self.get_original_corners(h, w)
         transformed = cv2.perspectiveTransform(original_corners, self.H)
         min_coords = np.floor(transformed.min(axis=(0, 1))).astype(int)
         max_coords = np.ceil(transformed.max(axis=(0, 1))).astype(int)
 
-        # Retrieve cropping adjustments from the cropping entries
+        # crop factors
         try:
-            crop_south = float(self.crop_entries[0].get())
-        except:
-            crop_south = 0.0
-        try:
-            crop_north = float(self.crop_entries[1].get())
-        except:
-            crop_north = 0.0
-        try:
-            crop_east = float(self.crop_entries[2].get())
-        except:
-            crop_east = 0.0
-        try:
-            crop_west = float(self.crop_entries[3].get())
-        except:
-            crop_west = 0.0
+            crop_south = float(self.crop_entries[0].get() or 0)
+            crop_north = float(self.crop_entries[1].get() or 0)
+            crop_east  = float(self.crop_entries[2].get() or 0)
+            crop_west  = float(self.crop_entries[3].get() or 0)
+        except ValueError:
+            crop_south = crop_north = crop_east = crop_west = 0
 
-        min_y = min_coords[1] + \
-            int((max_coords[1] - min_coords[1]) * crop_south)
-        max_y = max_coords[1] + \
-            int((max_coords[1] - min_coords[1]) * crop_north)
-        max_x = max_coords[0] - \
-            int((max_coords[0] - min_coords[0]) * crop_east)
-        min_x = min_coords[0] - \
-            int((max_coords[0] - min_coords[0]) * crop_west)
+        min_y = min_coords[1] + int((max_coords[1]-min_coords[1]) * crop_south)
+        max_y = max_coords[1] + int((max_coords[1]-min_coords[1]) * crop_north)
+        max_x = max_coords[0] - int((max_coords[0]-min_coords[0]) * crop_east)
+        min_x = min_coords[0] - int((max_coords[0]-min_coords[0]) * crop_west)
 
         try:
             scale = float(self.scale_entry.get())
-        except:
+        except ValueError:
             scale = self.scale_factor
 
-        output_width = int((max_x - min_x) * scale)
+        output_width  = int((max_x - min_x) * scale)
         output_height = int((max_y - min_y) * scale)
 
-        translation = np.array([
-            [1, 0, -min_x * scale],
-            [0, 1, -min_y * scale],
-            [0, 0, 1]
-        ], dtype=np.float32)
-        H_scaled = self.H.copy()
-        H_scaled[:2] *= scale
-        H_final = translation @ H_scaled
+        translation = np.array([[1, 0, -min_x * scale],
+                                [0, 1, -min_y * scale],
+                                [0, 0, 1                     ]], dtype=np.float32)
 
-        warped = cv2.warpPerspective(
-            img, H_final, (output_width, output_height), flags=cv2.INTER_LANCZOS4)
+        H_scaled      = self.H.copy();  H_scaled[:2] *= scale
+        H_final       = translation @ H_scaled
+        warped        = cv2.warpPerspective(img, H_final,
+                                            (output_width, output_height),
+                                            flags=cv2.INTER_LANCZOS4)
 
-        # --- AUTO-CROP: Adjust image to non-black pixels using contour detection ---
+        # auto-crop dark borders
         gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
         _, thresh = cv2.threshold(gray, 1, 255, cv2.THRESH_BINARY)
-        contours, _ = cv2.findContours(
-            thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL,
+                                       cv2.CHAIN_APPROX_SIMPLE)
         if contours:
             x_crop, y_crop, w_crop, h_crop = cv2.boundingRect(contours[0])
             warped = warped[y_crop:y_crop+h_crop, x_crop:x_crop+w_crop]
         else:
-            x_crop, y_crop = 0, 0
+            x_crop = y_crop = 0
 
-        # Compute GCPs (adjusting pixel values by auto-crop offsets)
-        adjusted_corners = cv2.perspectiveTransform(
-            original_corners, H_final).reshape(-1, 2)
+        # ---- write GeoTIFF ---------------------------------------------------
         gcps = []
-        for (px, py), (utm_x, utm_y) in zip(adjusted_corners, transformed.reshape(-1, 2)):
-            gcp = gdal.GCP()
-            gcp.GCPX = float(utm_x)
-            gcp.GCPY = float(utm_y)
-            # Adjust pixel coordinates for auto-crop offsets:
-            gcp.GCPPixel = float(px - x_crop)
-            gcp.GCPLine = float(py - y_crop)
-            gcps.append(gcp)
+        adj_corners = cv2.perspectiveTransform(original_corners, H_final).reshape(-1, 2)
+        for (px, py), (utm_x, utm_y) in zip(adj_corners, transformed.reshape(-1, 2)):
+            g = gdal.GCP()
+            g.GCPX, g.GCPY = float(utm_x), float(utm_y)
+            g.GCPPixel, g.GCPLine = float(px - x_crop), float(py - y_crop)
+            gcps.append(g)
 
-        # Get user EPSG code from the final panel
-        try:
-            user_epsg = int(self.epsg_entry.get())
-        except Exception as e:
-            messagebox.showerror(
-                "Error", "Invalid EPSG code provided. Please enter a valid EPSG number.")
-            return False
-
-        srs = osr.SpatialReference()
-        srs.ImportFromEPSG(user_epsg)
-
+        srs = osr.SpatialReference();  srs.ImportFromEPSG(self.user_epsg)
         driver = gdal.GetDriverByName("GTiff")
-        dst_ds = driver.Create(
-            output_path, warped.shape[1], warped.shape[0], 4, gdal.GDT_Byte, options=["ALPHA=YES"])
+        dst_ds = driver.Create(output_path, warped.shape[1], warped.shape[0],
+                               4, gdal.GDT_Byte, options=["ALPHA=YES"])
         dst_ds.SetGCPs(gcps, srs.ExportToWkt())
-        geotransform = gdal.GCPsToGeoTransform(gcps)
-        if geotransform is not None:
-            dst_ds.SetGeoTransform(geotransform)
-        else:
-            print("Warning: Unable to compute geotransform from GCPs.")
+        gt = gdal.GCPsToGeoTransform(gcps)
+        if gt: dst_ds.SetGeoTransform(gt)
 
         rgb = cv2.cvtColor(warped, cv2.COLOR_BGR2RGB)
-        for band_idx in range(3):
-            out_band = dst_ds.GetRasterBand(band_idx + 1)
-            out_band.WriteArray(rgb[:, :, band_idx])
-        alpha = np.where(
-            np.all(rgb == [0, 0, 0], axis=-1), 0, 255).astype(np.uint8)
+        for i in range(3):
+            dst_ds.GetRasterBand(i+1).WriteArray(rgb[..., i])
+        alpha = np.where(np.all(rgb == [0,0,0], axis=-1), 0, 255).astype(np.uint8)
         dst_ds.GetRasterBand(4).WriteArray(alpha)
-        dst_ds.FlushCache()
-        dst_ds = None
+        dst_ds.FlushCache();  dst_ds = None
         return True
 
-    # ---------------------------------------------------------------
-    # ----------------  BATCH PROCESS (single bar) ------------------
-    # ---------------------------------------------------------------
+    # ─────────────────── single-folder processing (validate EPSG once) ────────
+    def process_all_images(self):
+        if not self.image_list or self.H is None:
+            messagebox.showerror("Error", "Load a folder and homography first")
+            return
+        try:
+            self.user_epsg = int(self.epsg_entry.get())
+        except ValueError:
+            messagebox.showerror("Error", "Please enter a valid EPSG code before running.")
+            return
+
+        def _worker():
+            total, start_ts = len(self.image_list), time.time()
+            for idx, path in enumerate(self.image_list, 1):
+                try:
+                    base = os.path.splitext(os.path.basename(path))[0]
+                    out  = os.path.join(self.output_folder, f"{base}.tif")
+                    self.georeference_and_save_image(path, out)
+                except Exception as e:
+                    print(f"Error processing {path}: {e}")
+                self.progress.set(idx/total)
+                self.progress_eta.configure(text=self._eta_string(start_ts, idx/total))
+                self.update_idletasks()
+            self.progress_eta.configure(text="Done")
+            messagebox.showinfo("Complete", "Processing finished!")
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    # ─────────────────── parallel + resumable batch processing ────────────────
+    
     def select_batch_main_folder(self):
         folder = filedialog.askdirectory()
         if folder:
             self.batch_main_folder = folder
             self.batch_main_label.configure(text=f"Main Folder: {folder}")
-
+    
     def start_batch_process(self):
         if not self.batch_main_folder:
-            messagebox.showerror("Error", "Please select a MAIN folder containing sub‑folders.")
+            messagebox.showerror("Error", "Please select a MAIN folder first.")
             return
         if not self.output_folder:
             messagebox.showerror("Error", "Please select an OUTPUT folder.")
             return
         if self.H is None:
-            messagebox.showerror("Error", "Please load a homography matrix first.")
+            messagebox.showerror("Error", "Load a homography matrix first.")
+            return
+        try:
+            self.user_epsg = int(self.epsg_entry.get())
+        except ValueError:
+            messagebox.showerror("Error", "Please enter a valid EPSG code before running.")
             return
 
-        print("Batch process has started")
+        print(f"Batch process has started (≤ {MAX_BATCH_WORKERS} workers)\n")
+
         def _batch_thread():
-            subfolders = [f.path for f in os.scandir(self.batch_main_folder) if f.is_dir()]
-            if not subfolders:
-                messagebox.showerror("Error", "No sub‑folders found in the main folder.")
+            all_subs = [f.path for f in os.scandir(self.batch_main_folder) if f.is_dir()]
+            if not all_subs:
+                messagebox.showerror("Error", "No sub-folders found.")
                 return
 
-            total_subfolders = len(subfolders)
-            start_ts = time.time()
+            processed = {d for d in os.listdir(self.output_folder)
+                           if os.path.isdir(os.path.join(self.output_folder, d))}
+            todo = [s for s in sorted(all_subs) if os.path.basename(s) not in processed]
 
-            for s_idx, sub in enumerate(sorted(subfolders), start=1):
-                img_paths = sorted(glob.glob(os.path.join(sub, "*.bmp")) +
-                                   glob.glob(os.path.join(sub, "*.jpg")) +
-                                   glob.glob(os.path.join(sub, "*.jpeg")) +
-                                   glob.glob(os.path.join(sub, "*.png")) +
-                                   glob.glob(os.path.join(sub, "*.tif")))
+            if (skipped := len(all_subs) - len(todo)):
+                print(f"[Batch] Skipping {skipped} sub-folder(s) already done.\n")
+            if not todo:
+                self.batch_progress.set(1.0); self.batch_eta_label.configure(text="Done")
+                messagebox.showinfo("Batch Complete", "All sub-folders already processed.")
+                return
 
-                if not img_paths:
-                    print(f"[Batch]  Skipping empty folder: {sub}")
-                else:
-                    out_sub = os.path.join(self.output_folder, os.path.basename(sub))
-                    os.makedirs(out_sub, exist_ok=True)
+            total, start_ts = len(todo), time.time()
+            self.batch_progress.set(0)
 
-                    for img_path in img_paths:
-                        try:
-                            out_name = os.path.splitext(os.path.basename(img_path))[0] + ".tif"
-                            out_path = os.path.join(out_sub, out_name)
-                            self.georeference_and_save_image(img_path, out_path)
-                        except Exception as e:
-                            print(f"[Batch] Error in {img_path}: {e}")
+            def _process_sub(sub):
+                imgs = sorted(glob.glob(os.path.join(sub, "*.[jp][pn]*g")) +
+                              glob.glob(os.path.join(sub, "*.tif")) +
+                              glob.glob(os.path.join(sub, "*.bmp")))
+                if not imgs:
+                    print(f"[Batch] Skipping empty folder: {sub}")
+                    return
+                out_sub = os.path.join(self.output_folder, os.path.basename(sub))
+                os.makedirs(out_sub, exist_ok=True)
+                for img in imgs:
+                    try:
+                        out = os.path.join(out_sub,
+                                           os.path.splitext(os.path.basename(img))[0] + ".tif")
+                        self.georeference_and_save_image(img, out)
+                    except Exception as e: print(f"[Batch] Error in {img}: {e}")
 
-                frac = s_idx / total_subfolders
-                self.batch_progress.set(frac)
-                self.batch_eta_label.configure(text=self._eta_string(start_ts, frac))
-                self.update_idletasks()
-
-            self.batch_eta_label.configure(text="Done")
+            # pool inside the background thread
+            self.executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=MAX_BATCH_WORKERS, thread_name_prefix="batch")
+            with self.executor as executor:
+                fut2sub = {executor.submit(_process_sub, s): s for s in todo}
+                for idx, fut in enumerate(concurrent.futures.as_completed(fut2sub), 1):
+                    if fut.exception():
+                        print(f"[Batch] Exception in {fut2sub[fut]}: {fut.exception()}")
+                    frac = idx / total
+                    self.batch_progress.set(frac)
+                    self.batch_eta_label.configure(text=self._eta_string(start_ts, frac))
+                    self.update_idletasks()
+            self.executor = None
+            
+            elapsed = time.time() - start_ts
+            m, s = divmod(elapsed, 60)
+            print(f"\nBatch process complete in {int(m)} min {s:.1f} s.")
+          
             self.batch_progress.set(1.0)
-            messagebox.showinfo("Batch Complete", "All sub‑folders processed.")
+            self.batch_eta_label.configure(text="Done")
+            messagebox.showinfo("Batch Complete", "Selected sub-folders processed.")
+            
+            print("\nBatch process complete\n")
 
         threading.Thread(target=_batch_thread, daemon=True).start()
 
+    # initialise_components and other helper methods … keep original code here
+    # ---------------------------------------------------------------------
 
-# ------------------------------------------------------------------
+
+# ──────────────────────────────── main loop ─────────────────────────────────
 def main():
     root = ctk.CTk()
     root.withdraw()
-    win = GeoReferenceModule(master=root)
-    win.mainloop()
+    GeoReferenceModule(master=root).mainloop()
 
 
 if __name__ == "__main__":
