@@ -745,10 +745,15 @@ class TimestackTool(ctk.CTkToplevel):
         def update_ui(done_cnt: int):
             frac = done_cnt / total
             self.batch_pb.set(frac)
+        
             elapsed = time.time() - start
-            rem = elapsed / done_cnt * (total - done_cnt) if done_cnt else 0
-            m, s = divmod(int(rem), 60)
+            if done_cnt:
+                est_remaining = (total - done_cnt) / (done_cnt / elapsed)   # folders/s
+            else:
+                est_remaining = 0
+            m, s = divmod(int(est_remaining), 60)
             self.batch_lbl.configure(text=f"{m}m {s}s" if m else f"{s}s")
+
 
         # ---------- Worker thread that controls the ProcessPool ----------
         def controller():

@@ -464,9 +464,6 @@ class GeoReferenceModule(ctk.CTkToplevel):
             self.output_folder = folder
             self.output_folder_label.configure(text=f"Output Folder: {folder}")
 
-    # ---------------------------------------------------------------
-    # ---- Helper that writes output GeoTIFF -------
-    # ---------------------------------------------------------------
     # ──────────────────── georeference_and_save_image ─────────────────────────
     def georeference_and_save_image(self, img_path: str, output_path: str) -> bool:
         """Same as before but uses self.user_epsg (validated once)."""
@@ -649,7 +646,12 @@ class GeoReferenceModule(ctk.CTkToplevel):
                         print(f"[Batch] Exception in {fut2sub[fut]}: {fut.exception()}")
                     frac = idx / total
                     self.batch_progress.set(frac)
-                    self.batch_eta_label.configure(text=self._eta_string(start_ts, frac))
+                    if idx:
+                        remaining = (total - idx) / (idx / (time.time() - start_ts))   # folders left / folders per second
+                    else:
+                        remaining = 0
+                    m, s = divmod(int(remaining), 60)
+                    self.batch_eta_label.configure(text=f"ETA: {m}m {s}s" if m else f"ETA: {s}s")
                     self.update_idletasks()
             self.executor = None
             
