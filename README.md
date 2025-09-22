@@ -12,12 +12,12 @@
 
 | Module | What it does |
 |--------|--------------|
-| **Feature Identifier** | HSV masking **+** manual polygon editing for feature identification and export |
+| **Feature Identifier** | HSV masking **+** manual polygon editing **+** Use pre-made binary masks for feature identification and export |
 | **Pixel → GCP Converter** | Pick Ground‑Control Points (GCPs) in imagery and export pixel‑to‑world mappings. |
 | **Homography Matrix Creator** | Derive homography matrices (RANSAC & optional simulated‑annealing subset selection). |
-| **Georeferencing Tool** | Batch‑warp oblique images into spatial reference systems with secondary AOI cropping. |
+| **Georeferencing Tool** | Batch‑warp oblique images into spatial reference systems. |
 | **DEM Generator** | Fuse shorelines and water‑level data into daily DEM rasters (with optional XYZ export). |
-| **Raw Timestacker** | Build calibrated timestack images from video/photo bursts. |
+| **Raw Timestacker** | Build calibrated timestack images from image bursts. |
 | **Wave Run‑Up Calculator** | Extract run‑up contours and generate distance‑time plots or CSV outputs. |
 
 ---
@@ -70,7 +70,6 @@ $ python main.py
 ```text
 1. Launch the application → select the desired module from the launcher window.
 2. Follow the left‑to‑right workflow inside each module (input → configure → run → export).
-3. For help, hover tooltips or check the status console at the bottom of every window.
 ```
 
 ---
@@ -79,9 +78,9 @@ $ python main.py
 
 ### Launcher
 
-![Image](https://github.com/user-attachments/assets/beb10b19-331c-4dce-b042-e3b67e62424e)
+<img width="598" height="630" alt="Image" src="https://github.com/user-attachments/assets/3e272324-d1bb-467d-9b57-3d73b5b797f9" />e)
 
-The central hub: click any card to open the corresponding tool in a new window.
+The central hub: click any SUB-MODULE to open the corresponding tool in a new window.
 
 ---
 
@@ -115,12 +114,12 @@ The central hub: click any card to open the corresponding tool in a new window.
 
 ### Feature Identifier
 
-Automatic HSV masking **+** manual editing.
+Automatic HSV masking **+** manual editing **+** Use pre-made binary masks.
 
 | Mode | Use Case |
 |------|----------|
-| **Individual** | Tweak HSV sliders on a single image. |
-| **Machine Learning** | Step through a folder, export masks/edges as COCO. |
+| **Single Image** | Tweak HSV sliders on a single image. |
+| **Folder processing** | Step through a folder, export masks/edges as COCO. |
 | **Batch** | Fire‑and‑forget detection across a directory. |
 
 ![Auto](https://github.com/user-attachments/assets/3a3abb66-9938-4d82-93c0-c66147afa488)
@@ -130,7 +129,7 @@ Automatic HSV masking **+** manual editing.
 
 ### DEM Generator
 ![Image](https://github.com/user-attachments/assets/f710d0b6-7fd0-4dd0-98c6-516068f73fb0)
-Creates DEM rasters from shoreline GeoJSONs (exported from feature identifier tool) and water‑level data, with optional XYZ export and batch mode support.
+Creates DEM rasters from shoreline GeoJSONs (exported from the feature identifier tool) and water‑level data, with optional XYZ export and batch mode support.
 
 ---
 
@@ -138,8 +137,8 @@ Creates DEM rasters from shoreline GeoJSONs (exported from feature identifier to
 
 ![Image](https://github.com/user-attachments/assets/05a0e52a-b52d-4af1-a411-cdd6b1fe94a2)
 
-Generate distance‑time timestack PNGs from image bursts or video frames. Includes ROI selector, resolution tagging, and batch processing. Feed time stack in the Feature identifier tool to identify the wave runup line, currently limited to HSV based or manual
-Overlay the binary mask (exported from feature identifier tool), extract the run‑up contour, and export **(time, distance)** CSVs.
+Generate distance‑time timestack PNGs from image bursts or video frames. Includes ROI selector, resolution tagging, and batch processing. Feed time stack in the Feature identifier tool to identify the wave runup line, currently limited to HSV-based or manual identification.
+Overlay the binary mask (exported from the feature identifier tool), extract the run‑up contour, and export **(time, distance)** CSVs.
 
 ---
 
