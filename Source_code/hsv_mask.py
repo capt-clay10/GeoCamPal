@@ -13,6 +13,7 @@ from shapely.geometry import LineString, Polygon
 import rasterio
 import warnings
 from rasterio.errors import NotGeoreferencedWarning
+from difflib import SequenceMatcher  # <-- added for filename similarity
 warnings.filterwarnings("ignore", category=NotGeoreferencedWarning)
 # Theme
 ctk.set_appearance_mode("Dark")
@@ -202,11 +203,21 @@ class HSVMaskTool(ctk.CTkToplevel):
         self.advanced_check_var = tk.BooleanVar(master=self, value=False)
         self.use_dual_hsv = tk.BooleanVar(master=self, value=False)
 
+        # >>> New: ML predicted mask controls <<<
+        self.use_ml_pred_mask = tk.BooleanVar(master=self, value=False)
+        self.ml_mask_file_path = tk.StringVar(master=self, value="")     # for individual
+        self.ml_mask_folder_path = tk.StringVar(master=self, value="")   # for ml/folder
+        self.common_name_len_var = tk.StringVar(master=self, value="")   # for ml/folder
+        # display-only (shortened) text for the UI labels
+        self.ml_mask_file_disp = tk.StringVar(master=self, value="")
+        self.ml_mask_folder_disp = tk.StringVar(master=self, value="")
+
+
         if self.mode in ("individual", "ml"):
             # super().__init__(*args, **kwargs)
             self.title("Feature Identifier- Configuration")
             # Increase height to accommodate console
-            self.geometry("1100x650")
+            self.geometry("1100x750")
             self.resizable(False, False)
 
             self.filename_label = ctk.CTkLabel(
@@ -217,6 +228,8 @@ class HSVMaskTool(ctk.CTkToplevel):
             self.bottom_frame = ctk.CTkFrame(self)
             self.bottom_frame.pack(side="top", fill="x", expand=False)
             self.setup_controls(self.bottom_frame)
+            self._editing_feature_idx = None  # index of the feature being edited (or None)
+
 
             # Keybindings for configuration window.
             self.bind("<Left>", lambda e: self.prev_image())
@@ -262,10 +275,10 @@ class HSVMaskTool(ctk.CTkToplevel):
             self.top_frame = ctk.CTkFrame(self.image_display_window)
             self.top_frame.pack(fill="both", expand=True)
 
+            self.top_frame.grid_columnconfigure(0, weight=1, minsize=400, uniform="panels")
+            self.top_frame.grid_columnconfigure(1, weight=2, minsize=400, uniform="panels")
+            self.top_frame.grid_columnconfigure(2, weight=1, minsize=400, uniform="panels")
 
-            self.top_frame.grid_columnconfigure(0, weight=1, minsize=400)
-            self.top_frame.grid_columnconfigure(1, weight=2, minsize=400)
-            self.top_frame.grid_columnconfigure(2, weight=1, minsize=400)
 
             self.top_frame.grid_rowconfigure(0, weight=1)
 
@@ -304,6 +317,8 @@ class HSVMaskTool(ctk.CTkToplevel):
 
             self._blank_img = ctk.CTkImage(Image.new("RGBA", (1, 1), (0, 0, 0, 0)),
                                            size=(1, 1))
+
+
 
         else:
             # BATCH MODE:
@@ -394,6 +409,8 @@ class HSVMaskTool(ctk.CTkToplevel):
         self.pan_start_x = 0
         self.pan_start_y = 0
         self.zoomed_image = None
+        self._restore_center_mask_panel()
+
 
     def checkbox_invert_mask_toggle(self):
         self.do_invert_mask.set(not self.do_invert_mask.get())
@@ -410,6 +427,20 @@ class HSVMaskTool(ctk.CTkToplevel):
         if hasattr(self, "image_display_window") and self.image_display_window.winfo_exists():
             self.image_display_window.destroy()
         self.destroy()
+    
+    def _restore_center_mask_panel(self):
+        """Ensure the middle panel is the standard mask label (not the edit canvas)."""
+        if hasattr(self, "top_center_frame") and self.top_center_frame.winfo_exists():
+            # remove anything that may have been inserted by the editor
+            for w in self.top_center_frame.winfo_children():
+                try:
+                    w.destroy()
+                except Exception:
+                    pass
+            # recreate the standard mask label
+            self.mask_label = ctk.CTkLabel(self.top_center_frame, text="", fg_color="white", anchor="center")
+            self.mask_label.pack(fill="both", expand=True)
+
 
     # -------------- UTILITY METHODS --------------
 
@@ -422,6 +453,87 @@ class HSVMaskTool(ctk.CTkToplevel):
             # valid image id → no TclError
             lbl.configure(image=self._blank_img)
             lbl.image = self._blank_img           # keep reference
+
+    # >>> New helpers for external mask workflow <<<
+
+    # --- path display helpers for ML rows ---
+    def _shorten_path(self, path, maxlen=40):
+        """Return a middle-ellipsized path for display only."""
+        if not path:
+            return ""
+        if len(path) <= maxlen:
+            return path
+        # keep start and end
+        part = maxlen // 2 - 2
+        return path[:part] + "…/" + path[-(part+2):]
+
+    def _read_mask_image(self, path):
+        """Read a mask as grayscale uint8 {0,255}. Returns None on failure."""
+        if not path or not os.path.exists(path):
+            return None
+        m = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+        if m is None:
+            return None
+        if m.ndim == 3:
+            # if RGB/RGBA, convert to grayscale
+            if m.shape[2] == 4:
+                b, g, r, a = cv2.split(m)
+                m = a  # prefer alpha if provided
+            else:
+                m = cv2.cvtColor(m, cv2.COLOR_BGR2GRAY)
+        # binarize
+        _, mbin = cv2.threshold(m, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+        return mbin
+
+    def _resize_mask_to_cv(self, m):
+        """Resize a binary mask to current cv_image size with nearest-neighbor."""
+        if self.cv_image is None or m is None:
+            return None
+        m = self._ensure_binary_u8(m)
+        h, w = self.cv_image.shape[:2]
+        if m.shape != (h, w):
+            m = cv2.resize(m, (w, h), interpolation=cv2.INTER_NEAREST)
+        return m
+
+
+    def _best_match_in_folder(self, img_base, folder, common_len_text):
+        """
+        Find the most appropriate mask file in 'folder' for an image basename 'img_base' (w/o extension).
+        If common_len_text is provided and numeric, match by leading prefix of that many characters.
+        Otherwise, pick by highest SequenceMatcher ratio against basenames in folder.
+        """
+        if not folder or not os.path.isdir(folder):
+            return None
+        mask_exts = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff")
+        mask_files = [os.path.join(folder, f) for f in os.listdir(folder)
+                      if f.lower().endswith(mask_exts)]
+
+        if not mask_files:
+            return None
+
+        base_noext = img_base
+        # Try "common name length" as integer prefix length
+        if common_len_text.strip():
+            try:
+                n = int(common_len_text.strip())
+                if n > 0:
+                    prefix = base_noext[:n]
+                    # exact prefix match preferred
+                    candidates = [p for p in mask_files if os.path.basename(p).startswith(prefix)]
+                    if candidates:
+                        # if multiple, choose the one with closest overall similarity anyway
+                        best = max(candidates,
+                                   key=lambda p: SequenceMatcher(None, base_noext, os.path.splitext(os.path.basename(p))[0]).ratio())
+                        return best
+            except ValueError:
+                # ignore and fall back to similarity
+                pass
+
+        # Fallback: highest similarity of basenames
+        def sim(path):
+            return SequenceMatcher(None, base_noext, os.path.splitext(os.path.basename(path))[0]).ratio()
+
+        return max(mask_files, key=sim)
 
     # -------------- IMAGE DISPLAY METHODS --------------
 
@@ -515,25 +627,22 @@ class HSVMaskTool(ctk.CTkToplevel):
         """
         Build out the controls (import, HSV sliders, edge detection, export).
         """
-        # Row 1: Import Frame
+        # ── Row 1: Import Frame ─────────────────────────────────────────────────────
         import_frame = ctk.CTkFrame(parent)
         import_frame.pack(side="top", fill="x", pady=5)
-
+    
         if self.mode in ("ml", "batch"):
-            load_btn = ctk.CTkButton(
-                import_frame, text="Load Folder", command=self.load_folder)
+            load_btn = ctk.CTkButton(import_frame, text="Load Folder", command=self.load_folder)
         else:
-            load_btn = ctk.CTkButton(
-                import_frame, text="Load Image", command=self.load_image)
+            load_btn = ctk.CTkButton(import_frame, text="Load Image", command=self.load_image)
         load_btn.pack(side="left", padx=5)
-
+    
         bbox_control_frame = ctk.CTkFrame(import_frame)
         bbox_control_frame.pack(side="left", padx=5)
-
-        # self.use_bbox = tk.BooleanVar(master=self, value=False)
+    
         self.bbox_frame = ctk.CTkFrame(import_frame)
         self.bbox_frame.pack(side="left", padx=5)
-
+    
         self.bbox_check = ctk.CTkCheckBox(
             self.bbox_frame,
             text="Use Bounding Box?",
@@ -541,238 +650,301 @@ class HSVMaskTool(ctk.CTkToplevel):
             command=self.toggle_bbox_options
         )
         self.bbox_check.pack(side="left", padx=5)
-
+    
         self.bbox_entry = ctk.CTkEntry(self.bbox_frame, width=160)
         self.bbox_entry.insert(0, "(460, 302, 2761, 1782)")
-
-        self.use_inner_mask = tk.BooleanVar(master=self, value=False)
+    
         self.inner_mask_check = ctk.CTkCheckBox(
-            bbox_control_frame, text="Use Inner Mask", variable=self.use_inner_mask)
+            bbox_control_frame, text="Use Inner Mask", variable=self.use_inner_mask
+        )
         self.inner_mask_check.pack(side="left", padx=5)
         self.inner_mask_check.configure(state="disabled")
-
-        # Row 2: Enhance Frame
-        enhance_frame = ctk.CTkFrame(parent)
-        enhance_frame.pack(side="top", fill="x", pady=5)
-
+    
+        # ── Row 1.5: ML predicted mask (directly under import row) ─────────────────
+        # Checkbox row (always visible)
+        self.ml_row = ctk.CTkFrame(parent)
+        self.ml_row.pack(side="top", fill="x", pady=(2, 0))
+        self.ml_check = ctk.CTkCheckBox(
+            self.ml_row,
+            text="Use ML predicted mask",
+            variable=self.use_ml_pred_mask,
+            command=self.toggle_ml_mask_options
+        )
+        self.ml_check.pack(side="left", padx=5)
+    
+        # Options row (appears only when checkbox is ticked) — created now, packed later
+        self.ml_opts_row = ctk.CTkFrame(parent)
+        self.ml_opts_row.pack_forget()
+    
+        if self.mode == "individual":
+            # Use a small grid so the calc button doesn't get squished by a long path
+            self.ml_opts_row.grid_columnconfigure(1, weight=1)
+    
+            self.btn_browse_ml_mask = ctk.CTkButton(
+                self.ml_opts_row, text="Load associated mask", command=self.browse_ml_mask_file
+            )
+            self.btn_browse_ml_mask.grid(row=0, column=0, padx=5, pady=3, sticky="w")
+    
+            # Shortened (display) text; full path is kept in self.ml_mask_file_path
+            self.lbl_ml_mask_path = ctk.CTkLabel(
+                self.ml_opts_row, textvariable=self.ml_mask_file_disp, width=320, anchor="w"
+            )
+            self.lbl_ml_mask_path.grid(row=0, column=1, padx=5, pady=3, sticky="we")
+    
+            self.btn_calc_edge_with_ml = ctk.CTkButton(
+                self.ml_opts_row, text="Calculate Edge with Mask", command=self.calculate_edge_with_ml_mask
+            )
+            self.btn_calc_edge_with_ml.grid(row=0, column=2, padx=8, pady=3, sticky="e")
+    
+        elif self.mode == "ml":
+            self.ml_opts_row.grid_columnconfigure(1, weight=1)
+    
+            self.btn_browse_ml_mask_folder = ctk.CTkButton(
+                self.ml_opts_row, text="Load associated mask folder", command=self.browse_ml_mask_folder
+            )
+            self.btn_browse_ml_mask_folder.grid(row=0, column=0, padx=5, pady=3, sticky="w")
+    
+            self.lbl_ml_mask_folder = ctk.CTkLabel(
+                self.ml_opts_row, textvariable=self.ml_mask_folder_disp, width=320, anchor="w"
+            )
+            self.lbl_ml_mask_folder.grid(row=0, column=1, padx=5, pady=3, sticky="we")
+    
+            ctk.CTkLabel(self.ml_opts_row, text="Common file name length").grid(
+                row=0, column=2, padx=(10, 2), pady=3, sticky="e"
+            )
+            self.entry_common_len = ctk.CTkEntry(
+                self.ml_opts_row, width=80, textvariable=self.common_name_len_var, placeholder_text=""
+            )
+            self.entry_common_len.grid(row=0, column=3, padx=2, pady=3, sticky="w")
+    
+            self.btn_calc_edge_with_ml = ctk.CTkButton(
+                self.ml_opts_row, text="Calculate Edge with Mask", command=self.calculate_edge_with_ml_mask
+            )
+            self.btn_calc_edge_with_ml.grid(row=0, column=4, padx=8, pady=3, sticky="e")
+    
+        # ── Row 2: Enhance Frame (we keep a handle to pack ML options before this row) ──
+        self.enhance_frame = ctk.CTkFrame(parent)
+        self.enhance_frame.pack(side="top", fill="x", pady=5)
+    
         self.enable_enhancements = tk.BooleanVar(master=self, value=True)
         enhance_chk = ctk.CTkCheckBox(
-            enhance_frame, text="Enhance?", variable=self.enable_enhancements)
+            self.enhance_frame, text="Enhance?", variable=self.enable_enhancements
+        )
         enhance_chk.pack(side="left", padx=5)
-
-        ctk.CTkLabel(enhance_frame, text="S Mult").pack(side="left", padx=2)
-        self.s_multiplier_slider = ctk.CTkSlider(
-            enhance_frame, from_=100, to=500)
+    
+        ctk.CTkLabel(self.enhance_frame, text="S Mult").pack(side="left", padx=2)
+        self.s_multiplier_slider = ctk.CTkSlider(self.enhance_frame, from_=100, to=500)
         self.s_multiplier_slider.set(100)
         self.s_multiplier_slider.pack(side="left", padx=2)
-
-        ctk.CTkLabel(enhance_frame, text="V Mult").pack(side="left", padx=2)
-        self.v_multiplier_slider = ctk.CTkSlider(
-            enhance_frame, from_=100, to=500)
+    
+        ctk.CTkLabel(self.enhance_frame, text="V Mult").pack(side="left", padx=2)
+        self.v_multiplier_slider = ctk.CTkSlider(self.enhance_frame, from_=100, to=500)
         self.v_multiplier_slider.set(100)
         self.v_multiplier_slider.pack(side="left", padx=2)
-
+    
         self.use_dual_hsv = tk.BooleanVar(master=self, value=False)
-        dual_chk = ctk.CTkCheckBox(enhance_frame, text="Use Dual HSV Range", variable=self.use_dual_hsv,
-                                   command=self.toggle_dual_sliders)
+        dual_chk = ctk.CTkCheckBox(
+            self.enhance_frame,
+            text="Use Dual HSV Range",
+            variable=self.use_dual_hsv,
+            command=self.toggle_dual_sliders
+        )
         dual_chk.pack(side="left", padx=10)
-
-        # Row 3: HSV Sliders
+    
+        # ── Row 3: HSV Sliders ──────────────────────────────────────────────────────
         hsv_frame = ctk.CTkFrame(parent)
         hsv_frame.pack(side="top", fill="x", pady=5)
-
+    
         # Lower row
         lower_container = ctk.CTkFrame(hsv_frame)
         lower_container.pack(side="top", fill="x", pady=2)
-
+    
         first_lower_frame = ctk.CTkFrame(lower_container)
         first_lower_frame.pack(side="left", fill="x", expand=True)
-        ctk.CTkLabel(first_lower_frame, text="Lower HSV:").pack(
-            side="left", padx=5)
+        ctk.CTkLabel(first_lower_frame, text="Lower HSV:").pack(side="left", padx=5)
         self.h_low_slider, self.h_low_var, self.h_low_lbl = self.make_slider_with_label(
-            first_lower_frame, "H", 0, 255, 0)
+            first_lower_frame, "H", 0, 255, 0
+        )
         self.s_low_slider, self.s_low_var, self.s_low_lbl = self.make_slider_with_label(
-            first_lower_frame, "S", 0, 255, 0)
+            first_lower_frame, "S", 0, 255, 0
+        )
         self.v_low_slider, self.v_low_var, self.v_low_lbl = self.make_slider_with_label(
-            first_lower_frame, "V", 0, 255, 0)
-
+            first_lower_frame, "V", 0, 255, 0
+        )
+    
         self.dual_lower_frame = ctk.CTkFrame(lower_container)
         self.dual_lower_frame.pack(side="left", fill="x", expand=True)
-        ctk.CTkLabel(self.dual_lower_frame, text="Lower HSV (Dual):").pack(
-            side="left", padx=5)
+        ctk.CTkLabel(self.dual_lower_frame, text="Lower HSV (Dual):").pack(side="left", padx=5)
         self.h2_low_slider, self.h2_low_var, self.h2_low_lbl = self.make_slider_with_label(
-            self.dual_lower_frame, "H2", 0, 255, 0)
+            self.dual_lower_frame, "H2", 0, 255, 0
+        )
         self.s2_low_slider, self.s2_low_var, self.s2_low_lbl = self.make_slider_with_label(
-            self.dual_lower_frame, "S2", 0, 255, 0)
+            self.dual_lower_frame, "S2", 0, 255, 0
+        )
         self.v2_low_slider, self.v2_low_var, self.v2_low_lbl = self.make_slider_with_label(
-            self.dual_lower_frame, "V2", 0, 255, 0)
-
+            self.dual_lower_frame, "V2", 0, 255, 0
+        )
+    
         # Upper row
         upper_container = ctk.CTkFrame(hsv_frame)
         upper_container.pack(side="top", fill="x", pady=2)
-
+    
         first_upper_frame = ctk.CTkFrame(upper_container)
         first_upper_frame.pack(side="left", fill="x", expand=True)
-        ctk.CTkLabel(first_upper_frame, text="Upper HSV:").pack(
-            side="left", padx=5)
+        ctk.CTkLabel(first_upper_frame, text="Upper HSV:").pack(side="left", padx=5)
         self.h_high_slider, self.h_high_var, self.h_high_lbl = self.make_slider_with_label(
-            first_upper_frame, "H", 0, 255, 255)
+            first_upper_frame, "H", 0, 255, 255
+        )
         self.s_high_slider, self.s_high_var, self.s_high_lbl = self.make_slider_with_label(
-            first_upper_frame, "S", 0, 255, 255)
+            first_upper_frame, "S", 0, 255, 255
+        )
         self.v_high_slider, self.v_high_var, self.v_high_lbl = self.make_slider_with_label(
-            first_upper_frame, "V", 0, 255, 255)
-
+            first_upper_frame, "V", 0, 255, 255
+        )
+    
         self.dual_upper_frame = ctk.CTkFrame(upper_container)
         self.dual_upper_frame.pack(side="left", fill="x", expand=True)
-        ctk.CTkLabel(self.dual_upper_frame, text="Upper HSV (Dual):").pack(
-            side="left", padx=5)
+        ctk.CTkLabel(self.dual_upper_frame, text="Upper HSV (Dual):").pack(side="left", padx=5)
         self.h2_high_slider, self.h2_high_var, self.h2_high_lbl = self.make_slider_with_label(
-            self.dual_upper_frame, "H2", 0, 255, 255)
+            self.dual_upper_frame, "H2", 0, 255, 255
+        )
         self.s2_high_slider, self.s2_high_var, self.s2_high_lbl = self.make_slider_with_label(
-            self.dual_upper_frame, "S2", 0, 255, 255)
+            self.dual_upper_frame, "S2", 0, 255, 255
+        )
         self.v2_high_slider, self.v2_high_var, self.v2_high_lbl = self.make_slider_with_label(
-            self.dual_upper_frame, "V2", 0, 255, 255)
-
-        # Row 4: Edge Controls
+            self.dual_upper_frame, "V2", 0, 255, 255
+        )
+    
+        # ── Row 4: Edge Controls ───────────────────────────────────────────────────
         edge_container = ctk.CTkFrame(parent)
         edge_container.pack(side="top", fill="x", pady=5)
-
+    
         calc_frame = ctk.CTkFrame(edge_container)
         calc_frame.pack(side="top", fill="x", pady=2)
-
+    
         if self.mode == "batch":
-            invert_chk = ctk.CTkCheckBox(
-                calc_frame, text="Invert Mask?", variable=self.do_invert_mask)
+            invert_chk = ctk.CTkCheckBox(calc_frame, text="Invert Mask?", variable=self.do_invert_mask)
             invert_chk.pack(side="left", padx=10)
-
+    
         if self.mode != "batch":
-            btn_calc = ctk.CTkButton(
-                calc_frame, text="Calculate Mask", command=self.calculate_mask)
+            btn_calc = ctk.CTkButton(calc_frame, text="Calculate Mask", command=self.calculate_mask)
             btn_calc.pack(side="left", padx=5)
-            invert_chk = ctk.CTkCheckBox(
-                calc_frame, text="Invert Mask?", variable=self.do_invert_mask)
+            invert_chk = ctk.CTkCheckBox(calc_frame, text="Invert Mask?", variable=self.do_invert_mask)
             invert_chk.pack(side="left", padx=10)
-
+    
         if self.mode == "ml":
-            btn_prev = ctk.CTkButton(
-                calc_frame, text="Previous", command=self.prev_image)
+            btn_prev = ctk.CTkButton(calc_frame, text="Previous", command=self.prev_image)
             btn_prev.pack(side="left", padx=5)
-            btn_next = ctk.CTkButton(
-                calc_frame, text="Next", command=self.next_image)
+            btn_next = ctk.CTkButton(calc_frame, text="Next", command=self.next_image)
             btn_next.pack(side="left", padx=5)
-
+    
         if self.mode in ("ml", "individual"):
-            btn_edge = ctk.CTkButton(
-                calc_frame, text="Calculate Edge", command=self.calculate_edge)
+            btn_edge = ctk.CTkButton(calc_frame, text="Calculate Edge", command=self.calculate_edge)
             btn_edge.pack(side="left", padx=5)
-            # Renamed "Cut Detected Edge" -> "Edit Detected Feature"
             btn_cut_feature = ctk.CTkButton(
-                calc_frame, text="Edit Detected Feature", command=self.cut_detected_feature)
+                calc_frame, text="Edit Detected Feature", command=self.cut_detected_feature
+            )
             btn_cut_feature.pack(side="left", padx=5)
-
+    
             thickness_frame = ctk.CTkFrame(calc_frame)
             thickness_frame.pack(side="left", padx=3)
-            ctk.CTkLabel(thickness_frame,
-                         text="Edge Thickness (pixels)").pack(side="top")
-            self.thickness_value_label = ctk.CTkLabel(
-                thickness_frame, text="2")
+            ctk.CTkLabel(thickness_frame, text="Edge Thickness (pixels)").pack(side="top")
+            self.thickness_value_label = ctk.CTkLabel(thickness_frame, text="2")
             self.thickness_value_label.pack(side="top")
             self.edge_thickness_slider = ctk.CTkSlider(
-                thickness_frame, from_=1, to=50,
-                command=lambda val: self.thickness_value_label.configure(
-                    text=f"{int(float(val))}")
+                thickness_frame,
+                from_=1,
+                to=50,
+                command=lambda val: self.thickness_value_label.configure(text=f"{int(float(val))}")
             )
             self.edge_thickness_slider.set(2)
             self.edge_thickness_slider.pack(side="top")
-
+    
         adv_frame = ctk.CTkFrame(edge_container)
         adv_frame.pack(side="top", fill="x", pady=2)
-        self.advanced_check = ctk.CTkCheckBox(adv_frame, text="Advanced Settings", variable=self.advanced_check_var,
-                                              command=self.toggle_advanced_settings)
+        self.advanced_check = ctk.CTkCheckBox(
+            adv_frame,
+            text="Advanced Settings",
+            variable=self.advanced_check_var,
+            command=self.toggle_advanced_settings
+        )
         self.advanced_check.pack(side="left", padx=5)
-
-        self.min_contour_label = ctk.CTkLabel(
-            adv_frame, text="Min contour size")
-        self.min_contour_entry = ctk.CTkEntry(
-            adv_frame, width=60, placeholder_text="Min")
-        self.max_contour_label = ctk.CTkLabel(
-            adv_frame, text="Max contour size")
-        self.max_contour_entry = ctk.CTkEntry(
-            adv_frame, width=60, placeholder_text="Max")
-
+    
+        self.min_contour_label = ctk.CTkLabel(adv_frame, text="Min contour size")
+        self.min_contour_entry = ctk.CTkEntry(adv_frame, width=60, placeholder_text="Min")
+        self.max_contour_label = ctk.CTkLabel(adv_frame, text="Max contour size")
+        self.max_contour_entry = ctk.CTkEntry(adv_frame, width=60, placeholder_text="Max")
+    
         self.min_contour_label.pack_forget()
         self.min_contour_entry.pack_forget()
         self.max_contour_label.pack_forget()
         self.max_contour_entry.pack_forget()
-
-        # Row 5: Export Options
+    
+        # ── Row 5: Export Options ──────────────────────────────────────────────────
         export_frame = ctk.CTkFrame(parent)
         export_frame.pack(side="top", fill="x", pady=5)
-
-        ctk.CTkLabel(export_frame, text="Export Folder:").pack(
-            side="left", padx=5)
+    
+        ctk.CTkLabel(export_frame, text="Export Folder:").pack(side="left", padx=5)
         self.export_path_entry = ctk.CTkEntry(export_frame, width=200)
         self.export_path_entry.pack(side="left", padx=5)
-        btn_browse = ctk.CTkButton(
-            export_frame, text="Browse", command=self.browse_export_folder)
+        btn_browse = ctk.CTkButton(export_frame, text="Browse", command=self.browse_export_folder)
         btn_browse.pack(side="left", padx=5)
-
-        # Row 6: Feature frame
+    
+        # ── Row 6: Feature frame ───────────────────────────────────────────────────
         featureid_frame = ctk.CTkFrame(parent)
         featureid_frame.pack(side="top", fill="x", pady=5)
-
-        ctk.CTkLabel(featureid_frame, text="Feature ID:").pack(
-            side="left", padx=5)
+    
+        ctk.CTkLabel(featureid_frame, text="Feature ID:").pack(side="left", padx=5)
         self.feature_id_entry = ctk.CTkEntry(featureid_frame, width=100)
         self.feature_id_entry.pack(side="left", padx=5)
-
-        ctk.CTkLabel(featureid_frame, text="Image ID:").pack(
-            side="left", padx=5)
+    
+        ctk.CTkLabel(featureid_frame, text="Image ID:").pack(side="left", padx=5)
         self.image_id_entry = ctk.CTkEntry(featureid_frame, width=50)
         self.image_id_entry.insert(0, "1")
         self.image_id_entry.pack(side="left", padx=5)
-
-        ctk.CTkLabel(featureid_frame, text="Category ID:").pack(
-            side="left", padx=5)
+    
+        ctk.CTkLabel(featureid_frame, text="Category ID:").pack(side="left", padx=5)
         self.category_id_entry = ctk.CTkEntry(featureid_frame, width=50)
         self.category_id_entry.insert(0, "1")
         self.category_id_entry.pack(side="left", padx=5)
-
+    
+        # ── Row 7: Export buttons or Batch button ──────────────────────────────────
         export_buttons_frame = ctk.CTkFrame(parent)
         export_buttons_frame.pack(side="top", fill="x", pady=5)
-
+    
         if self.mode in ("individual", "ml"):
             btn_export_edge = ctk.CTkButton(
-                export_buttons_frame, text="Export feature as training data", command=self.export_training_data)
+                export_buttons_frame, text="Export feature as training data", command=self.export_training_data
+            )
             btn_export_edge.pack(side="left", padx=5)
             btn_export_mask = ctk.CTkButton(
-                export_buttons_frame, text="Export mask as training data", command=self.export_mask_as_training_data)
+                export_buttons_frame, text="Export mask as training data", command=self.export_mask_as_training_data
+            )
             btn_export_mask.pack(side="left", padx=5)
             btn_export_test = ctk.CTkButton(
-                export_buttons_frame, text="Export as Test Data", command=self.export_as_test_data)
+                export_buttons_frame, text="Export as Test Data", command=self.export_as_test_data
+            )
             btn_export_test.pack(side="left", padx=5)
             if self.mode == "individual":
                 btn_export_overlay = ctk.CTkButton(
-                    export_buttons_frame, text="Export as Overlay", command=self.export_as_overlay)
+                    export_buttons_frame, text="Export as Overlay", command=self.export_as_overlay
+                )
                 btn_export_overlay.pack(side="left", padx=5)
         else:
-            btn_batch_process = ctk.CTkButton(
-                export_frame, text="Batch Process", command=self.batch_process)
+            # batch mode
+            btn_batch_process = ctk.CTkButton(export_frame, text="Batch Process", command=self.batch_process)
             btn_batch_process.pack(side="left", padx=5)
-
-        btn_save_settings = ctk.CTkButton(
-            export_frame, text="Save Settings", command=self.save_settings)
+    
+        btn_save_settings = ctk.CTkButton(export_frame, text="Save Settings", command=self.save_settings)
         btn_save_settings.pack(side="left", padx=5)
-        btn_load_settings = ctk.CTkButton(
-            export_frame, text="Load Settings", command=self.load_settings)
+        btn_load_settings = ctk.CTkButton(export_frame, text="Load Settings", command=self.load_settings)
         btn_load_settings.pack(side="left", padx=5)
-
-        # Row 6: Shortcuts
+    
+        # ── Row 8: Shortcuts ───────────────────────────────────────────────────────
         if self.mode in ("individual", "ml"):
             shortcut_frame = ctk.CTkFrame(parent)
             shortcut_frame.pack(side="top", fill="x", pady=5)
-            ctk.CTkLabel(shortcut_frame, text="Shortcuts:", font=(
-                "Arial", 10, "bold")).pack(side="left", padx=5)
+            ctk.CTkLabel(shortcut_frame, text="Shortcuts:", font=("Arial", 10, "bold")).pack(side="left", padx=5)
             shortcuts = [
                 ("Left/Right", "Prev/Next"),
                 ("Plus", "Calculate mask"),
@@ -780,18 +952,274 @@ class HSVMaskTool(ctk.CTkToplevel):
                 ("F5", "Calculate Edge w/ mask"),
                 ("F6", "Calculate Edge w/ inverted mask"),
                 ("Space", "Export Test"),
-                ("Return", "Export Training data")
+                ("Return", "Export Training data"),
             ]
             for i, (key, action) in enumerate(shortcuts):
-                ctk.CTkLabel(shortcut_frame, text=key, font=(
-                    "Arial", 10, "bold")).pack(side="left")
-                ctk.CTkLabel(shortcut_frame, text=f" = {
-                             action}", font=("Arial", 10)).pack(side="left")
+                ctk.CTkLabel(shortcut_frame, text=key, font=("Arial", 10, "bold")).pack(side="left")
+                ctk.CTkLabel(shortcut_frame, text=f" = {action}", font=("Arial", 10)).pack(side="left")
                 if i < len(shortcuts) - 1:
-                    ctk.CTkLabel(shortcut_frame, text=" || ",
-                                 font=("Arial", 10)).pack(side="left")
-
+                    ctk.CTkLabel(shortcut_frame, text=" || ", font=("Arial", 10)).pack(side="left")
+    
+        # Initial visibility/placement for dual sliders and ML rows
         self.toggle_dual_sliders()
+        self.toggle_ml_mask_options()  # ensures ML rows stay directly under the import row
+
+
+    # -------------- ML MASK TOGGLE & ACTIONS --------------
+
+    def toggle_ml_mask_options(self):
+        """Show/hide the ML mask options row immediately below the checkbox row (and above Enhance row)."""
+        # Ensure checkbox row stays right under import row:
+        try:
+            # Put the checkbox row right before the enhance frame if it's not already
+            self.ml_row.pack_forget()
+            self.ml_row.pack(side="top", fill="x", pady=(2, 0), before=self.enhance_frame)
+        except Exception:
+            # fallback to regular pack if 'before' not available
+            self.ml_row.pack(side="top", fill="x", pady=(2, 0))
+
+        if self.use_ml_pred_mask.get():
+            self.ml_opts_row.pack_forget()
+            try:
+                self.ml_opts_row.pack(side="top", fill="x", pady=(2, 5), before=self.enhance_frame)
+            except Exception:
+                self.ml_opts_row.pack(side="top", fill="x", pady=(2, 5))
+        else:
+            self.ml_opts_row.pack_forget()
+
+
+    def browse_ml_mask_file(self):
+        path = filedialog.askopenfilename(
+            filetypes=[("Mask/Image Files", "*.png;*.jpg;*.jpeg;*.bmp;*.tif;*.tiff")])
+        if path:
+            self.ml_mask_file_path.set(path)
+            self.ml_mask_file_disp.set(self._shorten_path(path))  # show short path
+
+    def browse_ml_mask_folder(self):
+        folder = filedialog.askdirectory()
+        if folder:
+            self.ml_mask_folder_path.set(folder)
+            self.ml_mask_folder_disp.set(self._shorten_path(folder))  # show short path
+    
+    def _ensure_binary_u8(self, img):
+        """Return a strictly binary uint8 mask (0/255). Accepts BGR/GRAY/float/bool."""
+        if img is None:
+            return None
+        if img.ndim == 3:
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        img = (img > 0).astype(np.uint8) * 255 if img.dtype == bool else img
+        # Normalize dynamic range then hard threshold
+        if img.dtype != np.uint8:
+            img = cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        _, bin8 = cv2.threshold(img, 127, 255, cv2.THRESH_BINARY)
+        return bin8
+
+    def _centerline_polyline_from_skeleton(self, skel_bin):
+        """
+        Given a 1-pixel wide skeleton (uint8 {0,255} or {0,1}), return a single
+        ordered polyline (list of [x,y] in cv_image coords) along the longest
+        8-connected path. No contours used → no double line.
+        """
+        import numpy as np
+        sk = (skel_bin > 0).astype(np.uint8)
+        rows, cols = np.where(sk)
+        if rows.size == 0:
+            return []
+    
+        # map pixel -> node id
+        H, W = sk.shape
+        idx_map = -np.ones((H, W), dtype=np.int32)
+        idx_map[rows, cols] = np.arange(rows.size, dtype=np.int32)
+    
+        # build adjacency (8-neighbors)
+        offsets = [(-1,-1),(-1,0),(-1,1),(0,-1),(0,1),(1,-1),(1,0),(1,1)]
+        adj = [[] for _ in range(rows.size)]
+        deg = np.zeros(rows.size, dtype=np.int32)
+    
+        for i, (r, c) in enumerate(zip(rows, cols)):
+            for dr, dc in offsets:
+                rr, cc = r + dr, c + dc
+                if 0 <= rr < H and 0 <= cc < W and sk[rr, cc]:
+                    j = idx_map[rr, cc]
+                    if j >= 0:
+                        adj[i].append(int(j))
+            deg[i] = len(adj[i])
+    
+        # pick start: an endpoint if available (degree 1), else any node
+        endpoints = np.where(deg == 1)[0]
+        start = int(endpoints[0]) if endpoints.size > 0 else 0
+    
+        # BFS to farthest node
+        def bfs_far(src):
+            from collections import deque
+            q = deque([src])
+            parent = {src: -1}
+            while q:
+                u = q.popleft()
+                for v in adj[u]:
+                    if v not in parent:
+                        parent[v] = u
+                        q.append(v)
+            far = u  # last popped is a farthest
+            return far, parent
+    
+        a, _ = bfs_far(start)      # farthest from start
+        b, pa = bfs_far(a)         # farthest from a (graph "diameter")
+        # reconstruct path a→b using parents from the second BFS
+        path = []
+        cur = b
+        while cur != -1:
+            path.append(cur)
+            cur = pa[cur]
+        path.reverse()
+    
+        # convert node indices → (x,y) in cv_image coords (x=col, y=row)
+        poly = [[int(cols[i]), int(rows[i])] for i in path]
+        return poly if len(poly) >= 2 else []
+
+
+
+    def _detect_edge_from_current_mask_robust(self):
+        """
+        Make a single editable polyline from current_mask by skeletonizing and
+        taking the longest 8-connected path of skeleton pixels.
+        Populates self.edge_points & self.features, updates right panel.
+        """
+        import numpy as np
+        import cv2
+    
+        if self.current_mask is None or self.cv_image is None or self.full_image is None:
+            return False
+    
+        # strict binary
+        mask = self._ensure_binary_u8(self.current_mask)
+        if cv2.countNonZero(mask) == 0:
+            self.edge_points, self.features = [], []
+            self.update_edge_display()
+            return False
+    
+        # Skeletonize (prefer skimage; fallback to OpenCV thinning or distance ridge)
+        try:
+            from skimage.morphology import skeletonize
+            skel = skeletonize((mask > 0)).astype(np.uint8) * 255
+        except Exception:
+            try:
+                import cv2.ximgproc as xip
+                skel = xip.thinning(mask, thinningType=xip.THINNING_ZHANGSUEN)
+            except Exception:
+                dt = cv2.distanceTransform((mask > 0).astype(np.uint8), cv2.DIST_L2, 3)
+                dt = cv2.normalize(dt, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+                _, skel = cv2.threshold(dt, max(1, int(dt.max() * 0.6)), 255, cv2.THRESH_BINARY)
+    
+        # small close to connect tiny gaps but keep 1-px width
+        ker = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        skel = cv2.morphologyEx(skel, cv2.MORPH_CLOSE, ker, iterations=1)
+    
+        # === centerline polyline in cv_image coords ===
+        pts_cv = self._centerline_polyline_from_skeleton(skel)
+        if len(pts_cv) < 2:
+            self.edge_points, self.features = [], []
+            self.update_edge_display()
+            return False
+    
+        # scale to full_image coords (we render/export there)
+        sx = self.full_image.shape[1] / self.cv_image.shape[1]
+        sy = self.full_image.shape[0] / self.cv_image.shape[0]
+        pts_full = [[int(x * sx), int(y * sy)] for x, y in pts_cv]
+    
+        # optional inner-bbox filtering (non-destructive)
+        if self.use_bbox.get() and self.use_inner_mask.get() and self.inner_bbox_mask is not None:
+            kept = []
+            H, W = self.inner_bbox_mask.shape[:2]
+            for x, y in pts_full:
+                if 0 <= x < W and 0 <= y < H and self.inner_bbox_mask[y, x] > 0:
+                    kept.append([x, y])
+            if len(kept) >= 2:
+                pts_full = kept
+    
+        # store exactly ONE polyline → editor shows one line
+        self.edge_points = pts_full
+        self.features = [("polyline", pts_full.copy())]
+        self.update_edge_display()
+        return True
+
+
+
+
+    def calculate_edge_with_ml_mask(self):
+        """
+        Load/choose the ML mask for the current image, set it as current_mask,
+        and extract an edge that populates self.features (so the editor works).
+        """
+        if self.cv_image is None:
+            # Attempt to get an image ready in ml mode
+            if self.mode == "ml" and self.image_files:
+                self.load_current_image()
+            if self.cv_image is None:
+                messagebox.showwarning("Image", "Please load an image first.")
+                return
+    
+        # Resolve a mask path based on mode
+        mask_path = None
+        if self.mode == "individual":
+            mask_path = self.ml_mask_file_path.get().strip()
+            if not mask_path:
+                messagebox.showwarning("ML mask", "Please load an associated mask.")
+                return
+        elif self.mode == "ml":
+            if not self.image_files:
+                messagebox.showwarning("Folder", "Please load an image folder first.")
+                return
+            folder = self.ml_mask_folder_path.get().strip()
+            if not folder:
+                messagebox.showwarning("Mask folder", "Please load the associated mask folder.")
+                return
+            # pick best match for current image
+            cur_img = self.image_files[self.current_index]
+            base = os.path.splitext(os.path.basename(cur_img))[0]
+            mask_path = self._best_match_in_folder(base, folder, self.common_name_len_var.get())
+            if mask_path is None:
+                messagebox.showerror("Mask match", f"No matching mask found for:\n{os.path.basename(cur_img)}")
+                return
+        else:
+            messagebox.showwarning("Mode", "Calculate Edge with Mask is not available in batch mode.")
+            return
+    
+        # Read mask and prepare
+        m = self._read_mask_image(mask_path)
+        if m is None:
+            messagebox.showerror("Mask", f"Failed to read mask:\n{mask_path}")
+            return
+    
+        m = self._resize_mask_to_cv(m)
+        if m is None:
+            messagebox.showerror("Mask", "Could not resize mask to the working image size.")
+            return
+    
+        # Optional: intersect with bbox if user enabled
+        if self.use_bbox.get():
+            try:
+                x, y, w, h = map(int, self.bbox_entry.get().strip("()").split(","))
+                x = int(x * self.scale); y = int(y * self.scale)
+                w = int(w * self.scale); h = int(h * self.scale)
+                bbox_mask = np.zeros(self.cv_image.shape[:2], dtype=np.uint8)
+                bbox_mask[y:y+h, x:x+w] = 255
+                m = cv2.bitwise_and(m, bbox_mask)
+                if self.use_inner_mask.get():
+                    kernel_inner = np.ones((20, 20), np.uint8)
+                    self.inner_bbox_mask = cv2.erode(bbox_mask, kernel_inner, iterations=1)
+            except Exception:
+                pass  # ignore malformed bbox
+    
+        # Store & show
+        self.current_mask = self._ensure_binary_u8(m)
+        self.display_mask()
+    
+        # Now do the robust edge extraction
+        ok = self._detect_edge_from_current_mask_robust()
+        if not ok:
+            messagebox.showwarning("Edge", "No contour/edge could be extracted from the mask.")
+
 
     # -------------- BBOX TOGGLE --------------
 
@@ -901,12 +1329,14 @@ class HSVMaskTool(ctk.CTkToplevel):
             return
 
         # 1) Clear old shapes
+        self._restore_center_mask_panel()
+
         self.features = []
         self.edge_points = []
         self.edited_edge_points = []
 
-        self._clear_ctk_label(self.edge_label)   # <‑‑ use helper
-        self._clear_ctk_label(self.mask_label)   # <‑‑ use helper
+        self._clear_ctk_label(self.edge_label)   # <-- use helper
+        self._clear_ctk_label(self.mask_label)   # <-- use helper
 
         # 2) Check that the label widget still exists
         if hasattr(self, 'edge_label') and self.edge_label.winfo_exists():
@@ -926,8 +1356,7 @@ class HSVMaskTool(ctk.CTkToplevel):
         # Update references
         self.image_path = file_path
         self.filename_label.configure(
-            text=f"{os.path.basename(file_path)} ({
-                self.current_index+1} / {len(self.image_files)})"
+            text=f"{os.path.basename(file_path)} ({self.current_index+1} / {len(self.image_files)})"
         )
         self.full_image = original_image.copy()
         self.compute_full_masks(original_image)
@@ -936,6 +1365,7 @@ class HSVMaskTool(ctk.CTkToplevel):
             self.process_loaded_image(original_image)
 
     def next_image(self):
+        self._restore_center_mask_panel()
         if self.mode == "ml" and self.image_files:
             if self.current_index < len(self.image_files) - 1:
                 self.current_index += 1
@@ -946,11 +1376,13 @@ class HSVMaskTool(ctk.CTkToplevel):
                 messagebox.showinfo("Info", "Already at the last image.")
 
     def prev_image(self):
+        self._restore_center_mask_panel()
+
         if self.mode == "ml" and self.image_files:
             if self.current_index > 0:
                 self.current_index -= 1
-                self._clear_ctk_label(self.mask_label)   # <‑‑ changed
-                self._clear_ctk_label(self.edge_label)   # <‑‑ changed
+                self._clear_ctk_label(self.mask_label)   # <-- changed
+                self._clear_ctk_label(self.edge_label)   # <-- changed
                 self.load_current_image()
                 self.update_image_display()
                 self.update_mask_display()
@@ -1172,7 +1604,13 @@ class HSVMaskTool(ctk.CTkToplevel):
             valid_points = rescaled_points
 
         self.edge_points = valid_points
+        
 
+        # Also reflect this as a feature so Edit Detected Feature & thickness apply
+        if valid_points:
+            self.features = [("polyline", valid_points.copy())]
+        else:
+            self.features = []
 
         if self.mode != "batch":
             overlay = self.full_image.copy()
@@ -1207,15 +1645,12 @@ class HSVMaskTool(ctk.CTkToplevel):
         self.edit_canvas.bind("<B1-Motion>",       self.on_freehand_draw)
         self.edit_canvas.bind("<ButtonRelease-1>", self.finish_freehand)
 
-    
-    
     def on_freehand_draw(self, event):
         # convert canvas coords back into image coords
         x = self.edit_canvas.canvasx(event.x) / self.zoom_scale
         y = self.edit_canvas.canvasy(event.y) / self.zoom_scale
         self.edited_edge_points.append([x, y])
         self.redraw_canvas()
-    
     
     def finish_freehand(self, event):
         self.freehand_mode = False
@@ -1241,25 +1676,52 @@ class HSVMaskTool(ctk.CTkToplevel):
         Allows editing of the last-detected shape (self.edge_points).
         The user can add new polylines or polygons or draw freehand.
         """
-        
         self.vertex_mode = "delete"
         self.freehand_mode = False
-        
-        if not self.edge_points or len(self.edge_points) < 2:
-            print(
-                "No valid detected feature to edit. Starting empty if you want to create new shapes.")
+    
+        # Decide which feature we’re editing:
+        # 1) Prefer an existing polyline in self.features (last one)
+        # 2) Otherwise fall back to self.edge_points
+        points_to_edit = []
+        self._editing_feature_idx = None
+    
+        # Find last polyline feature
+        for idx in range(len(self.features) - 1, -1, -1):
+            ftype, pts = self.features[idx]
+            if ftype == "polyline" and len(pts) >= 2:
+                self._editing_feature_idx = idx
+                points_to_edit = pts.copy()
+                break
+    
+        # If no polyline feature found but we have edge_points, use them
+        if self._editing_feature_idx is None and self.edge_points and len(self.edge_points) >= 2:
+            points_to_edit = self.edge_points.copy()
+    
+        # If we are editing an existing feature, temporarily remove it from the list
+        # so the right panel won’t render it during editing (prevents double lines).
+        if self._editing_feature_idx is not None:
+            self._removed_feature = self.features.pop(self._editing_feature_idx)
+        else:
+            self._removed_feature = None
+    
+        # If nothing to edit, start empty
+        if not points_to_edit:
+            print("No valid detected feature to edit. Starting empty if you want to create new shapes.")
             self.edge_points = []
-
-        self.initial_edge_points = self.edge_points.copy()
-        self.edited_edge_points = self.edge_points.copy()
+    
+        self.initial_edge_points = points_to_edit.copy()
+        self.edited_edge_points  = points_to_edit.copy()
         self.edit_history = [self.edited_edge_points.copy()]
         self.selected_vertex = None
         self.is_polygon_mode = False
         self.freehand_mode = False
-
+    
         # Clear the center frame and create editing canvas
         for widget in self.top_center_frame.winfo_children():
             widget.destroy()
+    
+        # Since we removed the feature from the list, refresh the right pane to avoid showing it
+        self.update_edge_display()
 
         self.zoom_scale = 1.0
         self.pan_x = self.pan_y = 0
@@ -1378,49 +1840,61 @@ class HSVMaskTool(ctk.CTkToplevel):
         self.edit_canvas.unbind("<Double-Button-1>")
         self.edit_canvas.bind("<Button-1>", self.on_canvas_single_click)
 
+
     def confirm_feature_cuts(self):
         """
-        Called when the user clicks the "Confirm Feature" button.
-        If there are enough points in the current edited shape, the shape is stored
-        as a feature (either polygon or polyline). If there are no points because an
-        auto-closing action already stored a polygon, then the UI simply returns to normal.
+        When the user clicks Confirm Feature:
+          - If edited points form a valid shape, replace the original feature being edited.
+          - If no points remain (user deleted), remove the original feature entirely.
         """
-
-        if len(self.edited_edge_points) < 2:
-            # ...but if we already have at least one feature stored, then assume the polygon was auto-closed.
-            if not self.features:
-                messagebox.showwarning(
-                    "Warning", "Not enough points to form a feature.")
-                return
-            else:
-                # Nothing to add; simply clear the editing UI.
-                pass
-        else:
-            # Unbind creation events if we are in creation mode.
-            if hasattr(self, 'creation_mode') and self.creation_mode:
-                self.edit_canvas.unbind("<Button-1>")
-                self.creation_mode = False
-
-            # Determine feature type based on editing mode.
-            feature_type = "polygon" if self.is_polygon_mode else "polyline"
-            new_points = self.edited_edge_points.copy()
-            self.features.append((feature_type, new_points))
-            # Also update self.edge_points (legacy reference).
-            self.edge_points = new_points
-
-        # Destroy the editing UI elements.
+        # Are we confirming a polygon or a polyline?
+        feature_type = "polygon" if getattr(self, "is_polygon_mode", False) else "polyline"
+        new_points   = self.edited_edge_points.copy()
+    
+        # Clean up the editor UI first
         if hasattr(self, 'edit_canvas'):
             self.edit_canvas.destroy()
         if hasattr(self, 'control_frame'):
             self.control_frame.destroy()
         if hasattr(self, 'edit_canvas_container'):
             self.edit_canvas_container.destroy()
-
-        # Restore the normal view in the center (mask display).
+    
+        # If there were no points left, treat as deletion
+        if len(new_points) < 2:
+            # If we had temporarily removed an original feature, just don't reinsert it
+            self._removed_feature = None
+            # Clear the legacy edge_points too
+            self.edge_points = []
+        else:
+            # Valid shape: close polygon if needed; polylines unchanged
+            if feature_type == "polygon" and new_points[0] != new_points[-1]:
+                new_points.append(new_points[0])
+    
+            # If we were editing an existing feature: put the replacement back at the same index
+            if self._editing_feature_idx is not None:
+                # Guard against index drift if features were mutated elsewhere
+                idx = min(self._editing_feature_idx, len(self.features))
+                self.features.insert(idx, (feature_type, new_points))
+            else:
+                # No prior feature (started from edge_points) → just store one
+                # Also clear any stale polylines so we don't end up with two lines
+                self.features = [(feature_type, new_points)]
+    
+            # keep legacy reference in sync
+            self.edge_points = new_points.copy()
+    
+        # reset edit bookkeeping
+        self._editing_feature_idx = None
+        self._removed_feature = None
+    
+        # Restore the normal mask view in the center
         self.mask_label = ctk.CTkLabel(self.top_center_frame, text="")
         self.mask_label.pack(fill="both", expand=True)
         self.top_center_frame.bind("<Configure>", self.update_mask_display)
+    
+        # Redraw the right panel (now only the edited/replaced feature should show)
         self.update_edge_display()
+
 
     # -------------- CANVAS INTERACTION (EDITING) --------------
 
@@ -1685,7 +2159,28 @@ class HSVMaskTool(ctk.CTkToplevel):
             self.full_image = original.copy()
             self.compute_full_masks(original)
             self.cv_image, self.alpha_mask, self.scale = self.prepare_cv_image_for_batch(original)
-            self.calculate_mask()
+
+            # If user opted to use ML masks in batch-like processing (mode 'batch' not used here,
+            # but safe to reuse behavior if they enabled the checkbox while in ml/individual),
+            # default to HSV if not using ML external mask.
+            if self.use_ml_pred_mask.get() and self.mode == "ml" and self.ml_mask_folder_path.get():
+                # derive mask for current file
+                base = os.path.splitext(os.path.basename(file_path))[0]
+                best_mask = self._best_match_in_folder(base, self.ml_mask_folder_path.get(),
+                                                       self.common_name_len_var.get())
+                if best_mask is not None:
+                    m = self._read_mask_image(best_mask)
+                    if m is not None:
+                        m = cv2.resize(m, (self.cv_image.shape[1], self.cv_image.shape[0]),
+                                       interpolation=cv2.INTER_NEAREST)
+                        self.current_mask = m
+                    else:
+                        self.calculate_mask()
+                else:
+                    self.calculate_mask()
+            else:
+                self.calculate_mask()
+
             self.calculate_edge()
     
             base = os.path.splitext(os.path.basename(file_path))[0]
@@ -1714,8 +2209,9 @@ class HSVMaskTool(ctk.CTkToplevel):
     
             # Write overlay PNG
             overlay = self.full_image.copy()
-            pts = np.array(self.edge_points, dtype=np.int32).reshape((-1, 1, 2))
-            cv2.polylines(overlay, [pts], False, (0, 255, 0), int(self.edge_thickness_slider.get()))
+            if self.edge_points:
+                pts = np.array(self.edge_points, dtype=np.int32).reshape((-1, 1, 2))
+                cv2.polylines(overlay, [pts], False, (0, 255, 0), int(self.edge_thickness_slider.get()))
             cv2.imwrite(out_ovl, overlay)
     
             processed_count += 1
@@ -1727,7 +2223,6 @@ class HSVMaskTool(ctk.CTkToplevel):
             f"GeoJSON => {geojson_folder}\n"
             f"Overlay => {overlay_folder}"
         )
-
 
     def prepare_cv_image_for_batch(self, original_image):
         if original_image.ndim == 3 and original_image.shape[2] == 4:
@@ -1761,27 +2256,36 @@ class HSVMaskTool(ctk.CTkToplevel):
         return small_bgr, small_alpha, scale
 
     # -------------- EXPORT METHODS --------------
+    
+    def _sanitize_feature_id(self, s: str) -> str:
+        """Make a filesystem-safe suffix from the feature ID."""
+        if not s:
+            return ""
+        s = s.strip().lower().replace(" ", "_")
+        # keep alnum, underscore, dash
+        return "".join(ch for ch in s if ch.isalnum() or ch in ("_", "-"))
+
+    
 
     def export_training_data(self):
         """
         Exports confirmed features into masks, overlays, GeoJSON, and COCO JSON.
-        If the image has no georeferencing, GeoJSON will use pixel coordinates
-        and a message is printed to the console.
+        Uses Feature ID as a filename suffix for all outputs.
         """
         import warnings
         from rasterio.errors import NotGeoreferencedWarning
         warnings.filterwarnings("ignore", category=NotGeoreferencedWarning)
         warnings.filterwarnings(
-                            "ignore",
-                            category=UserWarning,
-                            message=".*crs.*was not provided.*"
-                        )
+            "ignore", category=UserWarning, message=".*crs.*was not provided.*"
+        )
     
         # 1) Read user input
-        feature_name = self.feature_id_entry.get().strip()
-        if not feature_name:
+        feature_name_raw = self.feature_id_entry.get().strip()
+        if not feature_name_raw:
             messagebox.showerror("Error", "Feature ID is missing. Provide a label/name for your dataset.")
             return
+        feature_name = self._sanitize_feature_id(feature_name_raw)
+    
         try:
             image_id = int(self.image_id_entry.get().strip())
         except ValueError:
@@ -1802,43 +2306,51 @@ class HSVMaskTool(ctk.CTkToplevel):
             return
     
         # 3) Prepare output folders
-        export_path    = self.export_path_entry.get().strip()
+        export_path = self.export_path_entry.get().strip()
         if not export_path:
             messagebox.showerror("Error", "Please specify an export folder.")
             return
-        base_folder    = os.path.join(export_path, "training dataset")
-        images_folder  = os.path.join(base_folder, "images")
-        masks_folder   = os.path.join(base_folder, "masks")
-        overlays_folder= os.path.join(base_folder, "overlays")
-        geojson_folder = os.path.join(base_folder, "geojson")
-        coco_folder    = os.path.join(base_folder, "coco")
-        os.makedirs(images_folder,  exist_ok=True)
-        os.makedirs(masks_folder,   exist_ok=True)
-        os.makedirs(overlays_folder,exist_ok=True)
+        base_folder     = os.path.join(export_path, "training dataset")
+        images_folder   = os.path.join(base_folder, "images")
+        masks_folder    = os.path.join(base_folder, "masks")
+        overlays_folder = os.path.join(base_folder, "overlays")
+        geojson_folder  = os.path.join(base_folder, "geojson")
+        coco_folder     = os.path.join(base_folder, "coco")
+        os.makedirs(images_folder, exist_ok=True)
+        os.makedirs(masks_folder,  exist_ok=True)
+        os.makedirs(overlays_folder, exist_ok=True)
         os.makedirs(geojson_folder, exist_ok=True)
-        os.makedirs(coco_folder,    exist_ok=True)
+        os.makedirs(coco_folder, exist_ok=True)
     
-        base_name = os.path.basename(self.image_path)
+        base_name = os.path.basename(self.image_path)           # e.g. name.tif
+        stem, src_ext = os.path.splitext(base_name)             # stem, .tif
+        suffix = f"_{feature_name}" if feature_name else ""
+        out_stem = f"{stem}{suffix}"                            # e.g. name_shoreline
+    
         height, width = self.full_image.shape[:2]
     
-        # copy original
-        shutil.copy2(self.image_path, os.path.join(images_folder, base_name))
+        # 4) Copy original image but with feature suffix in filename
+        image_copy_name = f"{out_stem}{src_ext}"                # name_shoreline.tif
+        image_copy_path = os.path.join(images_folder, image_copy_name)
+        try:
+            shutil.copy2(self.image_path, image_copy_path)
+        except Exception:
+            # If copy fails, still proceed with annotations for robustness
+            pass
     
-        # 4) Read georeference if any
+        # 5) Read georeference if any
         try:
             with rasterio.open(self.image_path) as src:
                 transform = src.transform
-                crs       = src.crs
+                crs = src.crs
         except Exception:
             transform = None
-            crs       = None
-    
+            crs = None
         if crs is None:
-            # no pop-up, just console output
             print(f"[export_training_data] No georeference found on {base_name}; using pixel coords in GeoJSON.")
     
-        # 5) Build mask, overlay, COCO annotations, and GeoJSON shapes
-        mask    = np.zeros((height, width), dtype=np.uint8)
+        # 6) Build mask, overlay, COCO annotations, and GeoJSON shapes
+        mask = np.zeros((height, width), dtype=np.uint8)
         overlay = self.full_image.copy()
         thickness = int(self.edge_thickness_slider.get()) if hasattr(self, 'edge_thickness_slider') else 2
     
@@ -1850,21 +2362,20 @@ class HSVMaskTool(ctk.CTkToplevel):
             if len(pts) < 2:
                 continue
     
-            # draw on mask & overlay
             pts_np = np.array(pts, dtype=np.int32).reshape((-1, 1, 2))
             is_poly = (feature_type == "polygon")
             if is_poly:
                 closed = pts[:] + ([pts[0]] if pts[0] != pts[-1] else [])
-                cv2.fillPoly(mask, [np.array(closed, np.int32).reshape((-1,1,2))], 255)
-                cv2.polylines(overlay, [pts_np], True, (0,255,0), 2)
+                cv2.fillPoly(mask, [np.array(closed, np.int32).reshape((-1, 1, 2))], 255)
+                cv2.polylines(overlay, [pts_np], True, (0, 255, 0), 2)
             else:
                 cv2.polylines(mask, [pts_np], False, 255, thickness)
-                cv2.polylines(overlay, [pts_np], False, (0,255,0), thickness)
+                cv2.polylines(overlay, [pts_np], False, (0, 255, 0), thickness)
     
-            # COCO segmentation
-            seg = [coord for p in (pts[:] + ([pts[0]] if is_poly else [])) for coord in p]
-            xs, ys = zip(*(pts[:] + ([pts[0]] if is_poly else [])))
-            bbox = [min(xs), min(ys), max(xs)-min(xs), max(ys)-min(ys)]
+            seg_pts = pts[:] + ([pts[0]] if is_poly else [])
+            seg = [coord for p in seg_pts for coord in p]
+            xs, ys = zip(*seg_pts)
+            bbox = [min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys)]
             area = bbox[2] * bbox[3]
             coco_annotations.append({
                 "id": annotation_id,
@@ -1877,55 +2388,56 @@ class HSVMaskTool(ctk.CTkToplevel):
             })
             annotation_id += 1
     
-            # GeoJSON geometry
             if transform is not None and crs is not None:
                 world_pts = [(transform * (x, y))[0:2] for x, y in pts]
             else:
-                world_pts = pts  # pixel coords
+                world_pts = pts
             shape_list.append(Polygon(world_pts) if is_poly else LineString(world_pts))
     
-        # 6) Save mask & overlay
-        mask_path    = os.path.join(masks_folder,   os.path.splitext(base_name)[0] + "_mask.png")
-        overlay_path = os.path.join(overlays_folder,os.path.splitext(base_name)[0] + "_overlay.png")
+        # 7) Save mask & overlay with feature suffix
+        mask_path    = os.path.join(masks_folder,    f"{out_stem}_mask.png")
+        overlay_path = os.path.join(overlays_folder, f"{out_stem}_overlay.png")
         cv2.imwrite(mask_path, mask)
         cv2.imwrite(overlay_path, overlay)
     
-        # 7) Write GeoJSON (always)
-        geojson_path = os.path.join(geojson_folder, os.path.splitext(base_name)[0] + ".geojson")
+        # 8) Write GeoJSON (always) with feature suffix
+        geojson_path = os.path.join(geojson_folder, f"{out_stem}.geojson")
         gdf = gpd.GeoDataFrame(geometry=shape_list, crs=crs)
         gdf.to_file(geojson_path, driver="GeoJSON")
     
-        # 8) Write COCO JSON
+        # 9) Write COCO JSON; reference the **renamed** image file
         coco_dict = {
             "images": [{
                 "id": image_id,
-                "file_name": base_name,
+                "file_name": image_copy_name,  # name_shoreline.tif
                 "width": width,
                 "height": height
             }],
             "annotations": coco_annotations,
             "categories": [{
                 "id": category_id,
-                "name": feature_name
+                "name": feature_name_raw  # keep the original label text here
             }]
         }
-        coco_path = os.path.join(coco_folder, os.path.splitext(base_name)[0] + ".json")
+        coco_path = os.path.join(coco_folder, f"{out_stem}.json")
         with open(coco_path, "w") as f:
             json.dump(coco_dict, f, indent=2)
     
         # final pop-up + console summary
         print(f"[export_training_data] Export complete for {base_name}:")
-        print(f"    mask → {mask_path}")
-        print(f"    overlay → {overlay_path}")
-        print(f"    geojson → {geojson_path}")
-        print(f"    coco → {coco_path}")
+        print(f"    image copy → {image_copy_path}")
+        print(f"    mask       → {mask_path}")
+        print(f"    overlay    → {overlay_path}")
+        print(f"    geojson    → {geojson_path}")
+        print(f"    coco       → {coco_path}")
         messagebox.showinfo(
             "Export Training Data",
             f"Export complete:\n"
-            f"- Mask ⇒ {mask_path}\n"
+            f"- Image   ⇒ {image_copy_path}\n"
+            f"- Mask    ⇒ {mask_path}\n"
             f"- Overlay ⇒ {overlay_path}\n"
             f"- GeoJSON ⇒ {geojson_path}\n"
-            f"- COCO JSON ⇒ {coco_path}"
+            f"- COCO    ⇒ {coco_path}"
         )
 
 
@@ -2010,6 +2522,8 @@ class HSVMaskTool(ctk.CTkToplevel):
         messagebox.showinfo(
             "Export Overlay", f"Overlay saved to:\n{out_overlay}")
 
+    # -------------- SHORTCUT ACTIONS --------------
+
     def f5_action(self):
         if self.mode == "batch":
             return
@@ -2017,6 +2531,17 @@ class HSVMaskTool(ctk.CTkToplevel):
             messagebox.showwarning("Warning", "No image loaded!")
             return
         self.do_invert_mask.set(False)     # ← ensure checkbox is unchecked
+
+        # If ML predicted mask is enabled and available, use it
+        if self.use_ml_pred_mask.get():
+            if self.mode == "individual" and self.ml_mask_file_path.get():
+                self.calculate_edge_with_ml_mask()
+                return
+            if self.mode == "ml" and self.ml_mask_folder_path.get():
+                self.calculate_edge_with_ml_mask()
+                return
+
+        # otherwise, do normal HSV flow
         self.process_loaded_image(self.full_image)
         self.calculate_mask()
         self.calculate_edge()
@@ -2028,6 +2553,23 @@ class HSVMaskTool(ctk.CTkToplevel):
             messagebox.showwarning("Warning", "No image loaded!")
             return
         self.do_invert_mask.set(True)      # ← ensure checkbox is checked
+
+        # If ML predicted mask is enabled and available, use it then invert mask
+        if self.use_ml_pred_mask.get():
+            used_ml = False
+            if self.mode == "individual" and self.ml_mask_file_path.get():
+                self.calculate_edge_with_ml_mask()
+                used_ml = True
+            elif self.mode == "ml" and self.ml_mask_folder_path.get():
+                self.calculate_edge_with_ml_mask()
+                used_ml = True
+            if used_ml and self.current_mask is not None:
+                self.current_mask = cv2.bitwise_not(self.current_mask)
+                self.display_mask()
+                self.calculate_edge()
+                return
+
+        # otherwise, do normal HSV flow with invert
         self.process_loaded_image(self.full_image)
         self.calculate_mask()
         self.calculate_edge()
@@ -2100,6 +2642,11 @@ class HSVMaskTool(ctk.CTkToplevel):
             "advanced_settings_enabled": self.advanced_check_var.get(),
             "min_contour_size": self.min_contour_entry.get(),
             "max_contour_size": self.max_contour_entry.get(),
+            # New ML mask settings
+            "use_ml_pred_mask": bool(self.use_ml_pred_mask.get()),
+            "ml_mask_file_path": self.ml_mask_file_path.get(),
+            "ml_mask_folder_path": self.ml_mask_folder_path.get(),
+            "common_name_length": self.common_name_len_var.get(),
         }
         try:
             with open(file_path, "w") as f:
@@ -2130,44 +2677,33 @@ class HSVMaskTool(ctk.CTkToplevel):
 
         low_h = data.get("h_low", 0)
         self.h_low_slider.set(low_h)
-        self.h_low_var.set(low_h)
+        # note: value vars update via slider callbacks
         low_s = data.get("s_low", 0)
         self.s_low_slider.set(low_s)
-        self.s_low_var.set(low_s)
         low_v = data.get("v_low", 0)
         self.v_low_slider.set(low_v)
-        self.v_low_var.set(low_v)
 
         high_h = data.get("h_high", 255)
         self.h_high_slider.set(high_h)
-        self.h_high_var.set(high_h)
         high_s = data.get("s_high", 255)
         self.s_high_slider.set(high_s)
-        self.s_high_var.set(high_s)
         high_v = data.get("v_high", 255)
         self.v_high_slider.set(high_v)
-        self.v_high_var.set(high_v)
 
         self.use_dual_hsv.set(data.get("use_dual_hsv", False))
 
         low_h2 = data.get("h2_low", 0)
         self.h2_low_slider.set(low_h2)
-        self.h2_low_var.set(low_h2)
         low_s2 = data.get("s2_low", 0)
         self.s2_low_slider.set(low_s2)
-        self.s2_low_var.set(low_s2)
         low_v2 = data.get("v2_low", 0)
         self.v2_low_slider.set(low_v2)
-        self.v2_low_var.set(low_v2)
         high_h2 = data.get("h2_high", 255)
         self.h2_high_slider.set(high_h2)
-        self.h2_high_var.set(high_h2)
         high_s2 = data.get("s2_high", 255)
         self.s2_high_slider.set(high_s2)
-        self.s2_high_var.set(high_s2)
         high_v2 = data.get("v2_high", 255)
         self.v2_high_slider.set(high_v2)
-        self.v2_high_var.set(high_v2)
 
         edge_thickness = data.get("edge_thickness", 2)
         self.edge_thickness_slider.set(edge_thickness)
@@ -2187,9 +2723,24 @@ class HSVMaskTool(ctk.CTkToplevel):
         self.max_contour_entry.insert(0, data.get("max_contour_size", ""))
         self.toggle_advanced_settings()
 
+        # Load ML mask settings
+        self.use_ml_pred_mask.set(data.get("use_ml_pred_mask", False))
+        self.ml_mask_file_path.set(data.get("ml_mask_file_path", ""))
+        self.ml_mask_folder_path.set(data.get("ml_mask_folder_path", ""))
+        self.common_name_len_var.set(data.get("common_name_length", ""))
+
+        # refresh label display text
+        self.ml_mask_file_disp.set(self._shorten_path(self.ml_mask_file_path.get()))
+        self.ml_mask_folder_disp.set(self._shorten_path(self.ml_mask_folder_path.get()))
+
+
+        # reflect rows visibility
+        self.toggle_ml_mask_options()
+
         messagebox.showinfo(
             "Load Settings", f"Settings loaded from {file_path}")
 
+# -------------- ENTRY POINT --------------
 
 def main():
     root = ctk.CTk()

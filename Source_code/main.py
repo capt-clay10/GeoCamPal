@@ -115,9 +115,10 @@ def launcher_window():
         .pack(anchor="w", pady=(10,0))
     hsv_frame = ctk.CTkFrame(frame, fg_color="transparent")
     hsv_frame.pack(fill="x", pady=5)
-    ctk.CTkButton(hsv_frame, text="Individual Analysis", command=open_hsv_individual).pack(side="left", padx=5)
-    ctk.CTkButton(hsv_frame, text="Machine Learning",  command=open_hsv_ml).pack(side="left", padx=5)
-    ctk.CTkButton(hsv_frame, text="Batch Process",       command=open_hsv_batch).pack(side="left", padx=5)
+    # Renamed buttons (minimal change, modes unchanged)
+    ctk.CTkButton(hsv_frame, text="Single Image",       command=open_hsv_individual).pack(side="left", padx=5)
+    ctk.CTkButton(hsv_frame, text="Folder Processing",  command=open_hsv_ml).pack(side="left", padx=5)
+    ctk.CTkButton(hsv_frame, text="Batch Process",      command=open_hsv_batch).pack(side="left", padx=5)
 
     # (E) DEM Generator
     ctk.CTkLabel(frame, text="DEM Generator", font=("Arial", 14, "bold")) \
