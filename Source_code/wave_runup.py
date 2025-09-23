@@ -42,22 +42,39 @@ class StdoutRedirector:
 
 
 def extract_runup_from_mask(mask_path, resolution_x_m, time_interval_sec, flip_horizontal=False):
+    """
+    Returns:
+        time_array (s), distance_array (m), pixel_coords [(row, col), ...]
+    Time convention: 0 s at the BOTTOM row, increasing upward.
+    """
     mask_img = Image.open(mask_path).convert("L")
     mask_array = np.array(mask_img)
+    H, W = mask_array.shape[:2]
+
+    # Binary mask
     binary_mask = mask_array > 128
+
     rows, cols = np.where(binary_mask)
+    if rows.size == 0:
+        return np.array([]), np.array([]), []
+
     unique_rows = np.unique(rows)
 
     time_array = []
     distance_array = []
     pixel_coords = []
+
     for r in unique_rows:
         cols_in_row = cols[rows == r]
-        if len(cols_in_row) == 0:
+        if cols_in_row.size == 0:
             continue
+        # Land on left means shoreline at min col; otherwise at max col
         runup_col = np.min(cols_in_row) if flip_horizontal else np.max(cols_in_row)
-        time_val = r * time_interval_sec
+
+        # Bottom-origin time: bottom row (H-1) → t=0 ; top row (0) → t=max
+        time_val = (H - 1 - r) * time_interval_sec
         distance_val = runup_col * resolution_x_m
+
         time_array.append(time_val)
         distance_array.append(distance_val)
         pixel_coords.append((r, runup_col))
@@ -100,14 +117,14 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         # Runup contour panel
         self.plot_panel = ctk.CTkFrame(self.top_frame)
         self.plot_panel.pack(side="left", fill="both", expand=True, padx=5, pady=5)
-        self.fig, self.ax = plt.subplots(figsize=(5,4))
+        self.fig, self.ax = plt.subplots(figsize=(5, 4))
         self.canvas_plot = FigureCanvasTkAgg(self.fig, master=self.plot_panel)
         self.canvas_plot.get_tk_widget().pack(fill="both", expand=True)
 
         # Stats panel
         self.stats_panel = ctk.CTkFrame(self.top_frame)
         self.stats_panel.pack(side="left", fill="both", expand=True, padx=5, pady=5)
-        self.fig_stats, (self.ax_stats_psd, self.ax_stats_swash) = plt.subplots(2,1, figsize=(5,4))
+        self.fig_stats, (self.ax_stats_psd, self.ax_stats_swash) = plt.subplots(2, 1, figsize=(5, 4))
         self.canvas_stats = FigureCanvasTkAgg(self.fig_stats, master=self.stats_panel)
         self.canvas_stats.get_tk_widget().pack(fill="both", expand=True)
 
@@ -199,14 +216,17 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
             if self.raw_image:
                 raw_copy = self.raw_image.copy().convert("RGBA")
                 mask_resized = self.mask_image.resize(raw_copy.size)
-                overlay = Image.new("RGBA", raw_copy.size, (255,0,0,0))
-                overlay_data = overlay.load()
-                mask_data = mask_resized.load()
-                for i in range(raw_copy.width):
-                    for j in range(raw_copy.height):
-                        if mask_data[i,j] > 128:
-                            overlay_data[i,j] = (255,0,0,100)
+
+                # Vectorized overlay (faster than per-pixel loops)
+                overlay = Image.new("RGBA", raw_copy.size, (255, 0, 0, 0))
+                m = np.array(mask_resized) > 128
+                ov = np.zeros((raw_copy.size[1], raw_copy.size[0], 4), dtype=np.uint8)
+                ov[m] = np.array([255, 0, 0, 100], dtype=np.uint8)
+                overlay = Image.fromarray(ov, mode="RGBA")
+
                 combined = Image.alpha_composite(raw_copy, overlay)
+
+                # Resolution
                 if self.manual_res_var.get():
                     try:
                         resolution_x_m = float(self.manual_res_entry.get())
@@ -215,31 +235,42 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
                         print("Warning: Invalid manual resolution; defaulting to 0.25 m/pixel.")
                 else:
                     try:
-                        resolution_x_m = float(self.raw_image.info.get("pixel_resolution",0.25))
+                        resolution_x_m = float(self.raw_image.info.get("pixel_resolution", 0.25))
                     except:
                         resolution_x_m = 0.25
                         print("Warning: Invalid metadata resolution; defaulting to 0.25 m/pixel.")
                 self.pixel_res_label.configure(text=f"Identified Pixel Resolution: {resolution_x_m} m")
+
                 try:
-                    time_interval_sec = float(self.raw_image.info.get("time_interval",1))
+                    time_interval_sec = float(self.raw_image.info.get("time_interval", 1))
                 except:
                     time_interval_sec = 1
-                for child in self.image_panel.winfo_children(): child.destroy()
+
+                for child in self.image_panel.winfo_children(): 
+                    child.destroy()
                 self.display_image_with_axes(combined, resolution_x_m, time_interval_sec)
 
     def display_image_with_axes(self, combined_image, resolution_x_m, time_interval_sec):
         width, height = combined_image.size
         max_size, dpi = 200, 150
-        aspect_ratio = width/height
-        if aspect_ratio>1:
-            fig_w = max_size/dpi; fig_h=(max_size/aspect_ratio)/dpi
+        aspect_ratio = width / height
+        if aspect_ratio > 1:
+            fig_w = max_size / dpi
+            fig_h = (max_size / aspect_ratio) / dpi
         else:
-            fig_h = max_size/dpi; fig_w=(max_size*aspect_ratio)/dpi
-        extent = [0, width*resolution_x_m, 0, height*time_interval_sec]
-        fig, ax = plt.subplots(figsize=(fig_w,fig_h), dpi=dpi)
-        fig.subplots_adjust(left=0.15,right=0.95,top=0.95,bottom=0.15)
-        ax.imshow(np.array(combined_image),extent=extent,aspect='auto',origin='lower')
-        ax.set_xlabel("Distance (m)"); ax.set_ylabel("Time (s)"); ax.set_title("Raw Image with Mask Overlay"); ax.grid(True)
+            fig_h = max_size / dpi
+            fig_w = (max_size * aspect_ratio) / dpi
+
+        # Bottom-origin axes: x = distance (m), y = time (s)
+        extent = [0, width * resolution_x_m, 0, height * time_interval_sec]
+        fig, ax = plt.subplots(figsize=(fig_w, fig_h), dpi=dpi)
+        fig.subplots_adjust(left=0.15, right=0.95, top=0.95, bottom=0.15)
+        ax.imshow(np.array(combined_image), extent=extent, aspect='auto', origin='lower')
+        ax.set_xlabel("Distance (m)")
+        ax.set_ylabel("Time (s)")
+        ax.set_title("Raw Image with Mask Overlay")
+        ax.grid(True)
+
         self.canvas_img_fig = FigureCanvasTkAgg(fig, master=self.image_panel)
         self.canvas_img_fig.get_tk_widget().pack(fill="both", expand=True)
         self.canvas_img_fig.draw()
@@ -250,20 +281,32 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
             return
 
         # Get resolution and timing
-        resolution_x_m = float(self.manual_res_entry.get()) if self.manual_res_var.get() else float(self.raw_image.info.get("pixel_resolution", 0.25))
-        time_interval_sec = float(self.raw_image.info.get("time_interval", 1))
+        if self.manual_res_var.get():
+            try:
+                resolution_x_m = float(self.manual_res_entry.get())
+            except:
+                resolution_x_m = float(self.raw_image.info.get("pixel_resolution", 0.25))
+        else:
+            resolution_x_m = float(self.raw_image.info.get("pixel_resolution", 0.25))
+
+        try:
+            time_interval_sec = float(self.raw_image.info.get("time_interval", 1))
+        except:
+            time_interval_sec = 1
+
         flip_horizontal = self.land_left.get()
 
-        # Extract runup contour
+        # Extract runup contour (already bottom-origin time)
         t_arr, d_arr, _ = extract_runup_from_mask(
             self.mask_image_path, resolution_x_m, time_interval_sec, flip_horizontal
         )
-        total_time = self.raw_image.height * time_interval_sec
-        # Adjust time so zero at start and sort
-        t_adj = total_time - t_arr
-        # Sort by time ascending
-        sort_idx = np.argsort(t_adj)
-        t_sorted = t_adj[sort_idx]
+        if t_arr.size == 0:
+            messagebox.showerror("Error", "Mask contains no runup pixels.")
+            return
+
+        # Sort by time ascending and keep everywhere
+        sort_idx = np.argsort(t_arr)
+        t_sorted = t_arr[sort_idx]
         d_sorted = d_arr[sort_idx]
 
         # Store for export
@@ -275,42 +318,35 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         self.ax.set_xlabel("Cross-shore distance (m)")
         self.ax.set_ylabel("Time (s)")
         self.ax.set_title("Extracted Runup Contour")
+        self.ax.grid(True)
         self.ax.legend()
         self.canvas_plot.draw()
 
-        # --- Update stats for single image ---
-        # Detrend swash
+        # --- Stats (single image) ---
         detr = d_sorted - np.mean(d_sorted)
-        # Compute sampling frequency (positive)
         dt = np.diff(t_sorted)
         fs = 1.0 / np.mean(dt) if len(dt) > 0 else 1.0
 
-        # Compute PSD
+        # PSD (positive freqs)
         fxx, pxx = welch(detr, fs=fs, nperseg=min(256, len(detr)))
-        # Keep only positive frequencies
-        mask_pos = fxx > 0
-        fxx = fxx[mask_pos]
-        pxx = pxx[mask_pos]
-
-        # IG band mask & percentage
+        pos = fxx > 0
+        fxx, pxx = fxx[pos], pxx[pos]
         ig_mask = fxx < 0.05
         E_ig = np.trapz(pxx[ig_mask], fxx[ig_mask])
         E_tot = np.trapz(pxx, fxx)
         ig_pct = 100 * E_ig / E_tot if E_tot > 0 else 0
 
-        # Plot PSD
+        # PSD plot
         self.ax_stats_psd.clear()
         self.ax_stats_psd.plot(fxx, pxx, label='PSD')
-        self.ax_stats_psd.fill_between(
-            fxx, pxx, where=ig_mask, alpha=0.3,
-            label=f'IG (<0.05Hz) {ig_pct:.1f}%'
-        )
+        self.ax_stats_psd.fill_between(fxx, pxx, where=ig_mask, alpha=0.3,
+                                       label=f'IG (<0.05Hz) {ig_pct:.1f}%')
         self.ax_stats_psd.set_xscale('log')
         self.ax_stats_psd.set_title('Power Spectral Density')
         self.ax_stats_psd.set_ylabel('PSD')
         self.ax_stats_psd.legend()
 
-        # Plot detrended swash excursion
+        # Detrended swash
         self.ax_stats_swash.clear()
         self.ax_stats_swash.plot(t_sorted, detr, label="Detrended Swash")
         self.ax_stats_swash.set_title('Detrended Swash Excursion')
@@ -329,24 +365,25 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
 
     def export_runup(self):
         if self.runup_time is None or self.runup_distance is None:
-            messagebox.showerror("Error","No runup data to export.")
+            messagebox.showerror("Error", "No runup data to export.")
             return
         if not self.output_folder:
-            messagebox.showerror("Error","Select an output folder.")
+            messagebox.showerror("Error", "Select an output folder.")
             return
+
         base_name = os.path.basename(self.raw_image_path)
         match = re.search(r"(\d{4})[-_](\d{2})[-_](\d{2})[-_](\d{2})[-_](\d{2})", base_name)
         if not match:
-            messagebox.showerror("Error","Could not extract date.")
+            messagebox.showerror("Error", "Could not extract date.")
             return
         year, month, day, hour, minute = map(int, match.groups())
         base_dt = datetime.datetime(year, month, day, hour, minute)
-        out_name = os.path.splitext(base_name.replace("raw","runup"))[0] + ".csv"
+
+        out_name = os.path.splitext(base_name.replace("raw", "runup"))[0] + ".csv"
         out_path = os.path.join(self.output_folder, out_name)
         with open(out_path, 'w', newline='') as csvfile:
             writer = csv.writer(csvfile)
-            writer.writerow(["time","distance"]
-            )
+            writer.writerow(["time", "distance"])
             for sec, dist in zip(self.runup_time, self.runup_distance):
                 ts = (base_dt + datetime.timedelta(seconds=float(sec))).strftime("%Y-%m-%d-%H-%M-%S")
                 writer.writerow([ts, dist])
@@ -363,16 +400,14 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         if folder:
             self.batch_mask_folder = folder
             self.batch_mask_label.configure(text=folder)
-            
-            
-            
-            
+
     def run_batch_process(self):
         # 1) Validate folders
         if not self.batch_raw_folder or not self.batch_mask_folder:
             messagebox.showerror("Error", "Please select both batch raw and batch mask folders.")
             return
         print("Batch process has started")
+
         # 2) List all PNGs
         raw_files  = [f for f in os.listdir(self.batch_raw_folder)  if f.lower().endswith('.png')]
         mask_files = [f for f in os.listdir(self.batch_mask_folder) if f.lower().endswith('.png')]
@@ -382,26 +417,30 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         groups = defaultdict(lambda: {"raw": [], "mask": []})
         for f in raw_files:
             m = re.search(date_pattern, f)
-            if m: groups[m.group(1)]["raw"].append(f)
+            if m:
+                groups[m.group(1)]["raw"].append(f)
         for f in mask_files:
             m = re.search(date_pattern, f)
-            if m: groups[m.group(1)]["mask"].append(f)
+            if m:
+                groups[m.group(1)]["mask"].append(f)
 
-        # 4) Build valid pairs
-        valid_pairs = [(r, m) 
-                       for _, files in groups.items() 
-                       for r in files["raw"] 
-                       for m in files["mask"]]
+        # 4) Build valid pairs (Cartesian within matching key)
+        valid_pairs = [
+            (r, m)
+            for _, files in groups.items()
+            for r in files["raw"]
+            for m in files["mask"]
+        ]
         total_pairs = len(valid_pairs)
         if total_pairs == 0:
             messagebox.showerror("Error", "No valid pairs found for batch processing.")
             return
 
-        # default output if none
+        # Default output if none
         if not self.output_folder:
             self.output_folder = self.batch_raw_folder
 
-        # reset progress UI
+        # Reset progress UI
         self.batch_progress_bar.set(0)
         self.batch_progress_label.configure(text=f"0 / {total_pairs} pairs processed")
         self.update()
@@ -419,7 +458,7 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
             except:
                 continue
 
-            # resolution & timing
+            # Resolution & timing
             if self.manual_res_var.get():
                 try:
                     resolution_x_m = float(self.manual_res_entry.get())
@@ -435,23 +474,23 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
 
             flip_horizontal = self.land_left.get()
 
-            # extract runup
+            # Extract runup (already bottom-origin)
             t_arr, d_arr, _ = extract_runup_from_mask(
                 mask_path, resolution_x_m, time_interval_sec, flip_horizontal
             )
-            total_time = raw_img.height * time_interval_sec
-            t_adj = total_time - t_arr
+            if t_arr.size == 0:
+                continue
 
-            # sort times & distances ascending
-            sort_idx = np.argsort(t_adj)
-            t_sorted = t_adj[sort_idx]
+            # Sort by time asc
+            sort_idx = np.argsort(t_arr)
+            t_sorted = t_arr[sort_idx]
             d_sorted = d_arr[sort_idx]
 
-            # export CSV
+            # Export CSV
             m = re.search(date_pattern, raw_name)
             if m:
-                y,mo,da,hr,mi = map(int, re.split('[-_]', m.group(1)))
-                base_dt = datetime.datetime(y,mo,da,hr,mi)
+                y, mo, da, hr, mi = map(int, re.split('[-_]', m.group(1)))
+                base_dt = datetime.datetime(y, mo, da, hr, mi)
             else:
                 base_dt = datetime.datetime.now()
 
@@ -459,15 +498,14 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
             out_path = os.path.join(self.output_folder, out_name)
             with open(out_path, 'w', newline='') as csvfile:
                 writer = csv.writer(csvfile)
-                writer.writerow(["time","distance"])
+                writer.writerow(["time", "distance"])
                 for sec, dist in zip(t_sorted, d_sorted):
-                    ts = (base_dt + datetime.timedelta(seconds=float(sec)))\
-                             .strftime("%Y-%m-%d-%H-%M-%S")
+                    ts = (base_dt + datetime.timedelta(seconds=float(sec))).strftime("%Y-%m-%d-%H-%M-%S")
                     writer.writerow([ts, dist])
 
             all_runup_data.append((d_sorted, t_sorted))
             processed += 1
-            self.batch_progress_bar.set(processed/total_pairs)
+            self.batch_progress_bar.set(processed / total_pairs)
             self.batch_progress_label.configure(text=f"{processed} / {total_pairs} pairs processed")
             self.update()
 
@@ -483,37 +521,36 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
 
         # 7) Compute IG% vs Incident% and swash envelope
         ig_list, inc_list = [], []
+        self.ax_stats_psd.clear()
+        self.ax_stats_swash.clear()
+
         for d_arr, t_arr in all_runup_data:
             detr = d_arr - np.mean(d_arr)
             dt   = np.diff(t_arr)
-            fs   = 1.0 / np.mean(dt) if len(dt)>0 else 1.0
+            fs   = 1.0 / np.mean(dt) if len(dt) > 0 else 1.0
             fxx, pxx = welch(detr, fs=fs, nperseg=min(256, len(detr)))
-            # drop zero/non-positive freqs
             pos = fxx > 0
             fxx, pxx = fxx[pos], pxx[pos]
             ig_mask = fxx < 0.05
             E_ig = np.trapz(pxx[ig_mask], fxx[ig_mask])
             E_tot = np.trapz(pxx, fxx)
-            ig_pct = 100*E_ig/E_tot if E_tot>0 else 0
+            ig_pct = 100 * E_ig / E_tot if E_tot > 0 else 0
             ig_list.append(ig_pct)
-            inc_list.append(100-ig_pct)
+            inc_list.append(100 - ig_pct)
 
-        # bar plot for energy partitioning
-        self.ax_stats_psd.clear()
+            # Envelope plot
+            self.ax_stats_swash.plot(t_arr, detr, alpha=0.6)
+
+        # Energy partitioning bar plot
         idx = np.arange(len(ig_list))
         self.ax_stats_psd.bar(idx, ig_list, label='IG%')
         self.ax_stats_psd.bar(idx, inc_list, bottom=ig_list, label='Incident%')
         self.ax_stats_psd.set_xticks(idx)
-        self.ax_stats_psd.set_xticklabels([str(i+1) for i in idx])
+        self.ax_stats_psd.set_xticklabels([str(i + 1) for i in idx])
         self.ax_stats_psd.set_ylabel('%')
         self.ax_stats_psd.set_title('Energy Partitioning')
         self.ax_stats_psd.legend()
 
-        # swash excursion envelope
-        self.ax_stats_swash.clear()
-        for d_arr, t_arr in all_runup_data:
-            detr = d_arr - np.mean(d_arr)
-            self.ax_stats_swash.plot(t_arr, detr, alpha=0.6)
         self.ax_stats_swash.set_xlabel('Time (s)')
         self.ax_stats_swash.set_ylabel("d'(t) (m)")
         self.ax_stats_swash.set_title('Swash Excursions (Batch)')
@@ -522,6 +559,7 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         self.canvas_stats.draw()
 
         messagebox.showinfo("Batch Process", "Batch processing completed.")
+
 
 def main():
     root = ctk.CTk()

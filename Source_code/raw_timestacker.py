@@ -5,17 +5,17 @@ import time
 from datetime import datetime, timedelta
 import tkinter as tk
 from tkinter import filedialog, messagebox
-from PIL import Image, ImageTk
+from PIL import Image, ImageTk, ImageOps
 from PIL.PngImagePlugin import PngInfo
+import re
 import cv2
 import numpy as np
 import sys
 import tifffile
 import customtkinter as ctk
 import rasterio
-from scipy.interpolate import interp1d 
-import concurrent.futures           
-     
+from scipy.interpolate import interp1d
+import concurrent.futures
 
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("green")
@@ -33,6 +33,98 @@ class StdoutRedirector:
 
     def flush(self):
         pass
+
+# -------------------------------------------------------------------------------
+# Robust timestamp parsing (NEW)
+# -------------------------------------------------------------------------------
+# Patterns we’ll accept in filenames (we search anywhere in the basename)
+_PATTERNS = [
+    # YYYY_MM_DD_HH_MM_SS_mmm or with dashes
+    (re.compile(r'(?P<y>\d{4})[_-](?P<m>\d{2})[_-](?P<d>\d{2})[_-](?P<H>\d{2})[_-](?P<M>\d{2})[_-](?P<S>\d{2})[_-](?P<ms>\d{1,3})'),
+     ("y","m","d","H","M","S","ms")),
+    # YYYY_MM_DD_HH_MM_SS
+    (re.compile(r'(?P<y>\d{4})[_-](?P<m>\d{2})[_-](?P<d>\d{2})[_-](?P<H>\d{2})[_-](?P<M>\d{2})[_-](?P<S>\d{2})'),
+     ("y","m","d","H","M","S")),
+    # ISO-ish 2024-07-31T12-03-45(.123)?Z?
+    (re.compile(r'(?P<y>\d{4})-(?P<m>\d{2})-(?P<d>\d{2})[T_](?P<H>\d{2})[:\-](?P<M>\d{2})[:\-](?P<S>\d{2})(?:[.\-](?P<ms>\d{1,3}))?Z?'),
+     ("y","m","d","H","M","S","ms")),
+    # Compact YYYYMMDD_HHMMSS(.mmm)?
+    (re.compile(r'(?P<y>\d{4})(?P<m>\d{2})(?P<d>\d{2})[_-](?P<H>\d{2})(?P<M>\d{2})(?P<S>\d{2})(?:[.\-](?P<ms>\d{1,3}))?'),
+     ("y","m","d","H","M","S","ms")),
+]
+
+def _from_exif_or_tiff(path):
+    """Try EXIF/TIFF DateTime if filename parsing fails."""
+    try:
+        if path.lower().endswith((".jpg",".jpeg",".png")):
+            img = Image.open(path)
+            img = ImageOps.exif_transpose(img)
+            exif = img.getexif()
+            if exif:
+                for tag in (36867, 306):  # DateTimeOriginal, DateTime
+                    v = exif.get(tag)
+                    if v:
+                        try:
+                            return datetime.strptime(str(v), "%Y:%m:%d %H:%M:%S"), f"EXIF:{tag}"
+                        except:
+                            pass
+        elif path.lower().endswith((".tif",".tiff")):
+            with tifffile.TiffFile(path) as tf:
+                dt = tf.pages[0].tags.get('DateTime')
+                if dt:
+                    try:
+                        return datetime.strptime(dt.value, "%Y:%m:%d %H:%M:%S"), "TIFF:DateTime"
+                    except:
+                        pass
+    except Exception:
+        pass
+    return None
+
+def parse_dt_from_name(path):
+    """Return (datetime, src) parsed from filename, EXIF/TIFF, or file mtime."""
+    name = os.path.splitext(os.path.basename(path))[0]
+    for rx, fields in _PATTERNS:
+        m = rx.search(name)
+        if not m:
+            continue
+        g = m.groupdict()
+        y = int(g["y"]); mo = int(g["m"]); d = int(g["d"])
+        H = int(g["H"]); Mi = int(g["M"]); S = int(g["S"])
+        ms = int(g.get("ms") or 0)
+        # normalize ms like ".1"->100ms, ".12"->120ms
+        if 0 < ms < 100:
+            ms = int(f"{ms:0<3}")
+        try:
+            return datetime(y, mo, d, H, Mi, S, ms*1000), f"FN:{m.group(0)}"
+        except ValueError:
+            continue
+
+    md = _from_exif_or_tiff(path)
+    if md:
+        return md
+
+    try:
+        return datetime.fromtimestamp(os.path.getmtime(path)), "FS:mtime"
+    except Exception:
+        pass
+
+    raise ValueError(f"Could not parse/derive datetime for: {os.path.basename(path)}")
+
+def collect_dated_files(files):
+    """Return (sorted_files, sorted_datetimes). Skips files we can't date."""
+    parsed = []
+    for f in files:
+        try:
+            dt, src = parse_dt_from_name(f)
+            parsed.append((dt, f))
+        except Exception as e:
+            print(f"[warn] Skipping file w/o timestamp: {os.path.basename(f)} ({e})")
+    if not parsed:
+        raise ValueError("No parsable timestamps in the input set.")
+    parsed.sort(key=lambda t: t[0])
+    files_sorted = [f for _, f in parsed]
+    dts_sorted   = [dt for dt, _ in parsed]
+    return files_sorted, dts_sorted
 
 # -------------------------------------------------------------------------------
 # ROI Selector (small helper window)
@@ -82,8 +174,6 @@ class ScrollZoomBBoxSelector(tk.Frame):
         tk.Button(button_frame, text="Zoom Out", command=self.zoom_out).pack(side=tk.LEFT, padx=5)
         tk.Label(button_frame, text="Drag to select ROI; press Enter to confirm").pack(side=tk.LEFT, padx=5)
 
-    # (unchanged helper methods...)
-    # ---------------------------------------------------------------------------
     def load_image(self, file_path=None):
         if file_path is None:
             file_path = filedialog.askopenfilename(
@@ -165,42 +255,25 @@ class ScrollZoomBBoxSelector(tk.Frame):
         print("Final bounding box:", self.bbox)
 
 # -------------------------------------------------------------------------------
-# Core timestack generators (unchanged)
+# Core timestack generators (same logic; use robust parsing) 
 # -------------------------------------------------------------------------------
 def generate_with_fill(image_files, bbox, resolution_x_m, output_path,
                        freq_hz=1.0, duration_s=600.0, progress_callback=None):
-    # ... (same as before)
     x, y, w, h = bbox
     if w <= 0 or h <= 0:
         raise ValueError(f"Invalid bounding box {bbox}: width and height must be > 0")
 
-    # parse and sort timestamps
-    dt_files = []
-    for f in image_files:
-        name = os.path.splitext(os.path.basename(f))[0]
-        parts = name.split("_")
-        if len(parts) < 7:
-            continue
-        year, month, day, hour, minute, second, msec = parts[:7]
-        try:
-            dt = datetime(int(year), int(month), int(day),
-                          int(hour), int(minute), int(second),
-                          int(msec) * 1000)
-            dt_files.append((dt, f))
-        except ValueError:
-            continue
-    if not dt_files:
-        raise ValueError("No valid timestamps found in image names.")
-    dt_files.sort(key=lambda x: x[0])
+    # --- robust parse & sort ---
+    files_sorted, dts_sorted = collect_dated_files(image_files)
 
     # prepare buckets
     N = int(duration_s * freq_hz)
-    dt_start = dt_files[0][0]
+    dt_start = dts_sorted[0]
     tasks = [None] * N
     tasks_dt = [None] * N
 
-    # bucket-round images
-    for dt, fn in dt_files:
+    # bucket-round images (ties -> closest to ideal)
+    for dt, fn in zip(dts_sorted, files_sorted):
         offset = (dt - dt_start).total_seconds()
         raw_idx = offset * freq_hz
         idx = int(round(raw_idx))
@@ -236,7 +309,7 @@ def generate_with_fill(image_files, bbox, resolution_x_m, output_path,
 
     ts = np.stack(lines, axis=0)  # shape (N, w, 3) dtype=float with NaNs
 
-    # (interpolation & saving unchanged...)
+    # interpolation/extrapolation (unchanged)
     nan_rows_before = np.all(np.isnan(ts), axis=(1, 2))
 
     # detect tail nan-run
@@ -284,6 +357,7 @@ def generate_with_fill(image_files, bbox, resolution_x_m, output_path,
     if remaining > 0:
         print(f"Remaining {remaining} NaN rows (tail), left unfilled.")
 
+    # flip vertically so time=0 at bottom (unchanged behavior)
     ts = ts[::-1, :, :]
     ts = np.nan_to_num(ts, nan=0)
     ts = np.clip(ts, 0, 255).astype(np.uint8)
@@ -302,16 +376,12 @@ def generate_with_fill(image_files, bbox, resolution_x_m, output_path,
 def generate_no_fill(image_files, bbox, resolution_x_m, output_path, progress_callback=None):
     x, y, w, h = bbox
 
-    def parse_dt(f):
-        p = os.path.splitext(os.path.basename(f))[0].split("_")[:7]
-        return datetime(int(p[0]), int(p[1]), int(p[2]),
-                        int(p[3]), int(p[4]), int(p[5]),
-                        int(p[6]) * 1000)
+    # --- robust parse & sort ---
+    files_sorted, _ = collect_dated_files(image_files)
 
-    files = sorted(image_files, key=parse_dt)
-    total = len(files)
+    total = len(files_sorted)
     lines = []
-    for i, fn in enumerate(files, start=1):
+    for i, fn in enumerate(files_sorted, start=1):
         if progress_callback:
             progress_callback(i, total)
         img = tifffile.imread(fn) if fn.lower().endswith(".tif") else np.array(Image.open(fn).convert("RGB"))
@@ -328,7 +398,7 @@ def generate_no_fill(image_files, bbox, resolution_x_m, output_path, progress_ca
     if not lines:
         raise ValueError("No valid ROI slices—nothing to stack.")
 
-    ts = np.stack(lines, axis=0)[::-1, :, :]
+    ts = np.stack(lines, axis=0)[::-1, :, :]  # keep same vertical flip
     out = Image.fromarray(ts)
     if out.width != w:
         out = out.resize((w, ts.shape[0]), Image.NEAREST)
@@ -366,8 +436,15 @@ def _process_subfolder(sub_path: str, bbox: tuple, res_x: float,
         if not imgs:
             return sub_path, "no_imgs", "No supported images"
 
-        imgs.sort()
-        first_ts  = "_".join(os.path.basename(imgs[0]).split("_")[0:5])
+        # Use robust parser to decide first timestamp (for output name)
+        try:
+            files_sorted, dts_sorted = collect_dated_files(imgs)
+            first_ts = dts_sorted[0].strftime("%Y_%m_%d_%H_%M")
+        except Exception:
+            # fallback to old behavior if needed
+            imgs.sort()
+            first_ts = "_".join(os.path.basename(imgs[0]).split("_")[0:5])
+
         out_name  = f"{first_ts}_raw_timestack.png"
         out_path  = os.path.join(output_folder, out_name)
 
@@ -382,7 +459,6 @@ def _process_subfolder(sub_path: str, bbox: tuple, res_x: float,
         return sub_path, "processed", out_name
     except Exception as exc:
         return sub_path, "error", str(exc)
-
 
 # -------------------------------------------------------------------------------
 # Main GUI class – TimestackTool
@@ -529,7 +605,6 @@ class TimestackTool(ctk.CTkToplevel):
         if f:
             self.batch_folder.set(f)
 
-
     # Bounding-box selection
     def select_bbox(self):
         fld = self.input_folder.get().strip()
@@ -629,8 +704,15 @@ class TimestackTool(ctk.CTkToplevel):
         except:
             dur = 600.0
 
-        imgs.sort()
-        first_ts = "_".join(os.path.basename(imgs[0]).split("_")[0:5])
+        # Robustly find the first timestamp for naming
+        try:
+            files_sorted, dts_sorted = collect_dated_files(imgs)
+            first_ts = dts_sorted[0].strftime("%Y_%m_%d_%H_%M")
+        except Exception:
+            # fallback to original naming scheme
+            imgs.sort()
+            first_ts = "_".join(os.path.basename(imgs[0]).split("_")[0:5])
+
         out_name = f"{first_ts}_raw_timestack.png"
         out_path = os.path.join(outf, out_name)
 
@@ -662,6 +744,7 @@ class TimestackTool(ctk.CTkToplevel):
                 self.single_lbl.configure(text="")
 
         threading.Thread(target=worker, daemon=True).start()
+
     # ---------------------------------------------------------------------------
     # Batch processing – logic for skipping & multiprocessing
     # ---------------------------------------------------------------------------
@@ -722,8 +805,15 @@ class TimestackTool(ctk.CTkToplevel):
                 imgs.extend(glob.glob(os.path.join(sub, ext)))
             if not imgs:
                 continue
-            imgs.sort()
-            first_ts = "_".join(os.path.basename(imgs[0]).split("_")[0:5])
+
+            # Prefer robust way to name expected output
+            try:
+                files_sorted, dts_sorted = collect_dated_files(imgs)
+                first_ts = dts_sorted[0].strftime("%Y_%m_%d_%H_%M")
+            except Exception:
+                imgs.sort()
+                first_ts = "_".join(os.path.basename(imgs[0]).split("_")[0:5])
+
             expected_name = f"{first_ts}_raw_timestack.png"
             if os.path.exists(os.path.join(outf, expected_name)):
                 skipped += 1
@@ -745,17 +835,16 @@ class TimestackTool(ctk.CTkToplevel):
         def update_ui(done_cnt: int):
             frac = done_cnt / total
             self.batch_pb.set(frac)
-        
+
             elapsed = time.time() - start
             if done_cnt:
-                est_remaining = (total - done_cnt) / (done_cnt / elapsed)   # folders/s
+                est_remaining = (total - done_cnt) / (done_cnt / elapsed)   # seconds
             else:
                 est_remaining = 0
             m, s = divmod(int(est_remaining), 60)
             self.batch_lbl.configure(text=f"{m}m {s}s" if m else f"{s}s")
 
-
-        # ---------- Worker thread that controls the ProcessPool ----------
+        # ---------- Worker thread that controls the ThreadPool ----------
         def controller():
             done = 0
             max_workers = min(4, os.cpu_count() or 1, total)
