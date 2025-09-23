@@ -414,6 +414,21 @@ class HSVMaskTool(ctk.CTkToplevel):
         self.pan_start_y = 0
         self.zoomed_image = None
         self._restore_center_mask_panel()
+        
+        # --- performance caches / throttles ---
+        self._bg_cache = {}          # { zoom_key: ImageTk.PhotoImage }
+        self._bg_current_zoom = None
+        self._bg_item_id = None      # canvas item id for bg image
+        self._poly_id = None         # single polyline item id
+        self._vertex_ids = []        # per-vertex oval ids
+        self._redraw_job = None      # after() token for throttled redraw
+        self._preview_job = None     # after() token for debounced preview
+        self._drag_job = None        # after() token for throttled drag updates
+        # --- live preview throttling / caches ---
+        self._preview_after_id = None
+        self._pending_preview = False
+        self._zoom_cache = {"zoom": None, "img": None}  # PIL RGB image at current zoom
+
 
 
     def checkbox_invert_mask_toggle(self):
@@ -540,42 +555,32 @@ class HSVMaskTool(ctk.CTkToplevel):
         return max(mask_files, key=sim)
 
     # -------------- IMAGE DISPLAY METHODS --------------
-
     def update_image_display(self, event=None):
         if self.cv_image is None:
             return
-        # panel size
-        width = self.top_left_frame.winfo_width()
+        width  = self.top_left_frame.winfo_width()
         height = self.top_left_frame.winfo_height()
         if width < 1 or height < 1:
             return
+    
         disp = self.cv_image.copy()
-        # bbox
+        h0, w0 = disp.shape[:2]
+    
+        # bbox in CV coords
         if hasattr(self, 'bbox') and self.use_bbox.get():
-            x, y, w, h = self.bbox
-        else:
-            h0, w0 = disp.shape[:2]
-            x, y, w, h = 0, 0, w0, h0
-        # compute how the cv_image → panel resize scales it
-        sx = width / self.cv_image.shape[1]
-        sy = height / self.cv_image.shape[0]
-        # then
-        x1 = int(x * sx)
-        y1 = int(y * sy)
-        x2 = int((x + w) * sx)
-        y2 = int((y + h) * sy)
-
-        if self.use_bbox.get():
-            cv2.rectangle(disp, (x1, y1), (x2, y2), (0, 0, 255), 2)
-        # resize
-        resized = cv2.resize(disp, (width, height),
-                             interpolation=cv2.INTER_AREA)
+            x0, y0, w, h = self.bbox
+            x = int(x0 * self.scale); y = int(y0 * self.scale)
+            w = int(w  * self.scale); h = int(h  * self.scale)
+            cv2.rectangle(disp, (x, y), (x + w, y + h), (0, 0, 255), 2)
+    
+        # now resize once to panel size
+        resized = cv2.resize(disp, (width, height), interpolation=cv2.INTER_AREA)
         rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
         pil = Image.fromarray(rgb)
-        ctk_img = ctk.CTkImage(
-            light_image=pil, dark_image=pil, size=(width, height))
+        ctk_img = ctk.CTkImage(light_image=pil, dark_image=pil, size=(width, height))
         self.image_label.configure(image=ctk_img)
         self.image_label.image = ctk_img
+
 
     def update_mask_display(self, event=None):
         if not self.mask_label.winfo_exists():
@@ -1752,6 +1757,65 @@ class HSVMaskTool(ctk.CTkToplevel):
         self._refocus_canvas()
 
 
+    def _install_slider_handlers(self):
+        # Live (throttled) while dragging
+        for s in (self.slider_sat, self.slider_exp, self.slider_hil):
+            s.configure(command=self._on_adjust_change_live)
+            # single "commit" pass on mouse-up
+            s.bind("<ButtonRelease-1>", self._on_adjust_commit)
+    
+    def _on_adjust_change_live(self, _=None):
+        """Debounce to ~30fps while dragging."""
+        self._pending_preview = True
+        if self._preview_after_id is None:
+            self._preview_after_id = self.after(33, self._flush_preview)
+    
+    def _flush_preview(self):
+        self._preview_after_id = None
+        if not self._pending_preview:
+            return
+        self._pending_preview = False
+    
+        # fast path: operate on cached zoom-sized base, cheap math
+        base = self._ensure_scaled_base_for_zoom(high_quality=False)
+        preview = self._apply_edit_ops_fast(base, high_quality=False)
+        self._set_edit_preview(preview)
+    
+        if self._pending_preview:
+            self._preview_after_id = self.after(33, self._flush_preview)
+    
+    def _on_adjust_commit(self, _evt=None):
+        """Mouse released — do one nicer pass (still at current zoom)."""
+        base = self._ensure_scaled_base_for_zoom(high_quality=True)
+        preview = self._apply_edit_ops_fast(base, high_quality=True)
+        self._set_edit_preview(preview)
+        
+    def _invalidate_zoom_cache(self):
+        self._zoom_cache["zoom"] = None
+        self._zoom_cache["img"] = None
+    
+    def _ensure_scaled_base_for_zoom(self, high_quality=False):
+        """
+        Return a PIL RGB image already resized to the current zoom.
+        Cached so we don't resize per slider tick.
+        """
+        if self.full_image is None:
+            return None
+        z = max(0.1, min(10.0, float(getattr(self, "zoom_scale", 1.0))))
+        if self._zoom_cache["zoom"] == z and self._zoom_cache["img"] is not None:
+            return self._zoom_cache["img"]
+    
+        # BGR numpy -> PIL RGB exactly once
+        src_rgb = cv2.cvtColor(self.full_image, cv2.COLOR_BGR2RGB)
+        h, w = src_rgb.shape[:2]
+        sw, sh = max(1, int(w * z)), max(1, int(h * z))
+        resample = Image.LANCZOS if high_quality else Image.BILINEAR
+        pil = Image.fromarray(src_rgb).resize((sw, sh), resample)
+        self._zoom_cache["zoom"] = z
+        self._zoom_cache["img"] = pil
+        return pil
+
+
     def cut_detected_feature(self):
         """
         Allows editing of the last-detected shape (self.edge_points).
@@ -1910,6 +1974,8 @@ class HSVMaskTool(ctk.CTkToplevel):
     
         # Build the non-destructive preview adjust row (Saturation / Exposure / Highlights)
         self._build_adjust_row(self.control_frame)
+        self._install_slider_handlers()
+
     
         info_label = ctk.CTkLabel(
             self.control_frame,
@@ -2064,7 +2130,53 @@ class HSVMaskTool(ctk.CTkToplevel):
         row.grid_columnconfigure(5, weight=1)
     
         self._adjust_row = row  # keep handle so we can destroy on confirm
+     
     
+    def _apply_edit_ops_fast(self, pil_img, high_quality=False):
+        """
+        Cheap live adjustments on a PIL (zoom-sized) RGB image.
+        Does: exposure (gain), saturation (via mean), highlights (curve on brights).
+        """
+        if pil_img is None:
+            return None
+    
+        arr = np.asarray(pil_img).astype(np.float32) / 255.0  # HxWx3
+    
+        # read sliders once
+        sat_v = float(self.slider_sat.get())
+        exp_v = float(self.slider_exp.get())
+        hil_v = float(self.slider_hil.get())
+    
+        def midspan(v, span=2.0):
+            # 0..100 -> [1/span..span], neutral at 50
+            if v >= 50:  return 1.0 + (span - 1.0) * ((v - 50.0) / 50.0)
+            else:        return 1.0 - (1.0 - 1.0/span) * ((50.0 - v) / 50.0)
+    
+        satf = midspan(sat_v, 2.0)
+        expf = midspan(exp_v, 2.0)
+        lift = (hil_v - 50.0) / 50.0  # -1..+1
+    
+        # exposure (gain)
+        if abs(expf - 1.0) > 1e-3:
+            arr *= expf
+    
+        # saturation: push channels away from per-pixel mean
+        if abs(satf - 1.0) > 1e-3:
+            mean = arr.mean(axis=2, keepdims=True)
+            arr = mean + (arr - mean) * satf
+    
+        # highlights: gamma on bright areas only
+        if abs(lift) > 1e-3:
+            luma = 0.2126 * arr[...,0] + 0.7152 * arr[...,1] + 0.0722 * arr[...,2]
+            t = 0.6  # threshold to start affecting
+            w = np.clip((luma - t) / (1.0 - t + 1e-6), 0.0, 1.0)[..., None]
+            gamma = np.interp(lift, [-1, 1], [1.6, 0.7])  # compress..lift
+            curved = np.power(np.clip(arr, 0, 1), gamma)
+            arr = arr * (1.0 - w) + curved * w
+    
+        arr = np.clip(arr, 0, 1)
+        out = (arr * 255.0).astype(np.uint8)
+        return Image.fromarray(out)
     
     def _on_adjust_change(self):
         """Apply non-destructive preview from sliders to the edit pane."""
@@ -2142,37 +2254,25 @@ class HSVMaskTool(ctk.CTkToplevel):
     
     
     def _set_edit_preview(self, pil_img):
-        """
-        Replace ONLY the background image on the edit Canvas, respecting current zoom.
-        Keeps vertices/lines intact.
-        """
         if not hasattr(self, "edit_canvas") or self.edit_canvas is None:
             return
-    
-        img = getattr(self, "full_image", None)
-        if img is None:
+        if pil_img is None:
             return
     
-        # compute scaled size from current zoom
-        img_h, img_w = img.shape[:2]
-        zoom = getattr(self, "zoom_scale", 1.0) or 1.0
-        scaled_w = max(1, int(img_w * zoom))
-        scaled_h = max(1, int(img_h * zoom))
-    
-        scaled = pil_img.resize((scaled_w, scaled_h), Image.LANCZOS)
-    
-        self.zoomed_image = ImageTk.PhotoImage(scaled)
+        # pil_img is already zoom-sized from _ensure_scaled_base_for_zoom
+        self.zoomed_image = ImageTk.PhotoImage(pil_img)
     
         if getattr(self, "bg_image_id", None):
-            # update existing background item
             self.edit_canvas.itemconfigure(self.bg_image_id, image=self.zoomed_image)
         else:
-            # create background item and remember its id
             self.bg_image_id = self.edit_canvas.create_image(0, 0, anchor=tk.NW, image=self.zoomed_image)
     
-        # re-draw overlays on top (your existing method)
-        if hasattr(self, "draw_edge_on_canvas"):
-            self.draw_edge_on_canvas(0, 0)
+        # keep scrollregion in sync (cheap)
+        self.edit_canvas.config(scrollregion=(0, 0, self.zoomed_image.width(), self.zoomed_image.height()))
+    
+        # refresh overlays (lines/vertices)
+        self._refresh_overlays()
+
 
     
     def _get_current_edit_pil(self):
@@ -2189,62 +2289,127 @@ class HSVMaskTool(ctk.CTkToplevel):
 
 
     # -------------- CANVAS INTERACTION (EDITING) --------------
+    
+    def _apply_preview_to_bg(self):
+        """
+        Lightweight preview updater that respects the current zoom.
+        """
+        try:
+            base = self._ensure_scaled_base_for_zoom(high_quality=False)
+            if base is None:
+                return
+            preview = self._apply_edit_ops_fast(base, high_quality=False)
+            self._set_edit_preview(preview)  # writes to bg_image_id
+        except Exception:
+            # Fallback: at least keep overlays fresh if something goes wrong
+            if hasattr(self, "_refresh_overlays"):
+                self._refresh_overlays()
 
-    def redraw_canvas(self, event=None):
-        if not hasattr(self, 'edit_canvas') or self.full_image is None:
+
+
+    def _zoom_key(self):
+        # quantize zoom so small mousewheel steps reuse cache
+        return round(float(getattr(self, "zoom_scale", 1.0)), 1)
+    
+    def _ensure_bg_cached(self, high_quality=False):
+        if self.full_image is None or not hasattr(self, "edit_canvas"):
             return
-        self.edit_canvas.delete("all")
-        img_height, img_width = self.full_image.shape[:2]
-        scaled_width = int(img_width * self.zoom_scale)
-        scaled_height = int(img_height * self.zoom_scale)
+        key = self._zoom_key()
+        cache_key = (key, high_quality)
+        if self._bg_cache.get(cache_key) is None:
+            img_rgb = cv2.cvtColor(self.full_image, cv2.COLOR_BGR2RGB)
+            pil = Image.fromarray(img_rgb)
+            h, w = self.full_image.shape[:2]
+            sw, sh = max(1, int(w * key)), max(1, int(h * key))
+            resample = Image.LANCZOS if high_quality else Image.BILINEAR
+            scaled = pil.resize((sw, sh), resample)
+            self._bg_cache[cache_key] = ImageTk.PhotoImage(scaled)
+    
+        photo = self._bg_cache[cache_key]
+        if getattr(self, "bg_image_id", None):
+            self.edit_canvas.itemconfigure(self.bg_image_id, image=photo)
+        else:
+            self.bg_image_id = self.edit_canvas.create_image(0, 0, anchor=tk.NW, image=photo)
+        self.edit_canvas.config(scrollregion=(0, 0, photo.width(), photo.height()))
+        self._bg_current_zoom = key
 
-        img_rgb = cv2.cvtColor(self.full_image, cv2.COLOR_BGR2RGB)
-        pil_img = Image.fromarray(img_rgb)
-        resized_img = pil_img.resize(
-            (scaled_width, scaled_height), Image.LANCZOS)
-        self.zoomed_image = ImageTk.PhotoImage(resized_img)
+    
+    def redraw_canvas(self, event=None):
+        # Throttle rapid resize with after_idle
+        if self._redraw_job:
+            self.edit_canvas.after_cancel(self._redraw_job)
+        def _do():
+            if not hasattr(self, "edit_canvas"): return
+            self._ensure_bg_cached()
+            # (re)draw overlays in place
+            self._draw_poly_in_place()
+            self._draw_vertices_in_place()
+            # Re-apply preview (debounced separately) if sliders moved
+            if hasattr(self, "slider_sat"):
+                # Don't recompute PIL now; preview uses lightweight item image swap:
+                self._apply_preview_to_bg()  # see section 4
+        self._redraw_job = self.edit_canvas.after_idle(_do)
 
-        # store background image item id so we can update it without wiping overlays
-        self.bg_image_id = self.edit_canvas.create_image(0, 0, anchor=tk.NW, image=self.zoomed_image)
+    def _scaled(self, x, y):
+        z = float(getattr(self, "zoom_scale", 1.0))
+        return x * z, y * z
+    
+    def _draw_poly_in_place(self):
+        if not hasattr(self, "edit_canvas"): return
+        pts = getattr(self, "edited_edge_points", []) or []
+        if len(pts) < 2:
+            if getattr(self, "_poly_id", None):
+                self.edit_canvas.coords(self._poly_id, ())
+            return
+    
+        flat = []
+        for x, y in pts:
+            sx, sy = self._scaled(x, y)
+            flat.extend([sx, sy])
+    
+        if getattr(self, "_poly_id", None) is None:
+            self._poly_id = self.edit_canvas.create_line(
+                *flat, fill="cyan", width=2, tags="__poly__"
+            )
+        else:
+            self.edit_canvas.coords(self._poly_id, *flat)
+    
+    def _draw_vertices_in_place(self):
+        if not hasattr(self, "edit_canvas"): return
+        pts = getattr(self, "edited_edge_points", []) or []
+    
+        r = 5
+        if not hasattr(self, "_vertex_ids"):
+            self._vertex_ids = []
+    
+        # add missing
+        while len(self._vertex_ids) < len(pts):
+            vid = self.edit_canvas.create_oval(0, 0, 0, 0,
+                                               fill="red", outline="black",
+                                               tags="__vertex__")
+            self._vertex_ids.append(vid)
+        # remove extras
+        while len(self._vertex_ids) > len(pts):
+            vid = self._vertex_ids.pop()
+            try: self.edit_canvas.delete(vid)
+            except: pass
+    
+        # position all
+        for i, (x, y) in enumerate(pts):
+            sx, sy = self._scaled(x, y)
+            vid = self._vertex_ids[i]
+            self.edit_canvas.coords(vid, sx - r, sy - r, sx + r, sy + r)
+            
+    def _refresh_overlays(self):
+        if getattr(self, "_skip_overlay", False):
+            return
+        self._draw_poly_in_place()
+        self._draw_vertices_in_place()
 
-        # If sliders exist, re-apply the current preview at the new zoom so the look persists
-        if hasattr(self, "slider_sat"):
-            self._on_adjust_change()
-        
-        self.edit_canvas.config(scrollregion=(
-            0, 0, scaled_width, scaled_height))
-        
-        self.draw_edge_on_canvas(0, 0)
 
-    def draw_edge_on_canvas(self, x_offset=0, y_offset=0):
-        for obj in getattr(self, 'line_objects', []):
-            self.edit_canvas.delete(obj)
-        for obj in getattr(self, 'vertex_objects', []):
-            self.edit_canvas.delete(obj)
-
-        self.line_objects = []
-        self.vertex_objects = []
-
-        if len(self.edited_edge_points) > 1:
-            for i in range(len(self.edited_edge_points) - 1):
-                x1, y1 = self.edited_edge_points[i]
-                x2, y2 = self.edited_edge_points[i + 1]
-                tx1 = x_offset + x1 * self.zoom_scale
-                ty1 = y_offset + y1 * self.zoom_scale
-                tx2 = x_offset + x2 * self.zoom_scale
-                ty2 = y_offset + y2 * self.zoom_scale
-                line_id = self.edit_canvas.create_line(tx1, ty1, tx2, ty2,
-                                                       fill="cyan", width=2, tags="edge_line")
-                self.line_objects.append(line_id)
-
-        for idx, (x, y) in enumerate(self.edited_edge_points):
-            tx = x_offset + x * self.zoom_scale
-            ty = y_offset + y * self.zoom_scale
-            r = 5
-            vertex_id = self.edit_canvas.create_oval(tx - r, ty - r, tx + r, ty + r,
-                                                     fill="red", outline="black",
-                                                     tags=("vertex", f"vertex_{idx}"))
-            self.vertex_objects.append(vertex_id)
+    def draw_edge_on_canvas(self, *args, **kwargs):
+        # Backward-compatible wrapper
+        self._refresh_overlays()
 
     def _record_history(self):
         """Push a snapshot and clear redo (new branch)."""
@@ -2309,18 +2474,31 @@ class HSVMaskTool(ctk.CTkToplevel):
     def on_canvas_drag(self, event):
         if self.selected_vertex is None:
             return
+        if self.selected_vertex >= len(self._vertex_ids):
+            return
         x_canvas = self.edit_canvas.canvasx(event.x)
         y_canvas = self.edit_canvas.canvasy(event.y)
-        x_img = x_canvas / self.zoom_scale
-        y_img = y_canvas / self.zoom_scale
-
-        self.edited_edge_points[self.selected_vertex] = [x_img, y_img]
-        self.redraw_canvas()
+        z = float(getattr(self, "zoom_scale", 1.0))
+        self.edited_edge_points[self.selected_vertex] = [x_canvas / z, y_canvas / z]
+    
+        # Throttle coordinate pushes to the canvas (~60 fps)
+        if self._drag_job:
+            self.edit_canvas.after_cancel(self._drag_job)
+        def _do():
+            # move just this vertex oval
+            r = 5
+            sx, sy = x_canvas, y_canvas
+            vid = self._vertex_ids[self.selected_vertex]
+            self.edit_canvas.coords(vid, sx - r, sy - r, sx + r, sy + r)
+            # update polyline coords for all points (fast in Tk)
+            self._draw_poly_in_place()
+        self._drag_job = self.edit_canvas.after(16, _do)
 
     def on_canvas_release(self, event):
         if self.selected_vertex is not None:
             self._record_history()
         self.selected_vertex = None
+
 
     def on_canvas_double_click(self, event):
         x_canvas = self.edit_canvas.canvasx(event.x)
@@ -2440,17 +2618,20 @@ class HSVMaskTool(ctk.CTkToplevel):
         self.pan_x = event.x - x_img * self.zoom_scale
         self.pan_y = event.y - y_img * self.zoom_scale
         self.redraw_canvas()
-
+        self._invalidate_zoom_cache()
+    
     def adjust_zoom(self, factor):
         self.zoom_scale *= factor
         self.zoom_scale = max(0.1, min(self.zoom_scale, 10.0))
         self.redraw_canvas()
-
+        self._invalidate_zoom_cache()
+    
     def reset_view(self):
         self.zoom_scale = 1.0
-        self.pan_x = 0
-        self.pan_y = 0
+        self.pan_x = self.pan_y = 0
         self.redraw_canvas()
+        self._invalidate_zoom_cache()
+
 
     # -------------- BATCH PROCESS --------------
 
