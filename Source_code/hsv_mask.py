@@ -1333,17 +1333,47 @@ class HSVMaskTool(ctk.CTkToplevel):
         else:
             self.load_current_image()
 
+
+    def _reset_image_state(self):
+        # clear per-image drawing state
+        self.features = []
+        self.edge_points = []
+        self.edited_edge_points = []
+        self.initial_edge_points = []
+        self.selected_vertex = None
+        self.current_mask = None
+        self.inner_bbox_mask = None
+    
+        # clear editor / preview caches
+        self._bg_cache.clear()
+        self._bg_current_zoom = None
+        self._zoom_cache = {"zoom": None, "img": None}
+        self.bg_image_id = None
+        self._poly_id = None
+        self._vertex_ids = []
+        self._redraw_job = None
+        self._preview_after_id = None
+        self._pending_preview = False
+
+
     def load_current_image(self):
         if not self.image_files:
             return
 
         # 1) Clear old shapes
         self._restore_center_mask_panel()
+        self._reset_image_state()
 
         self.features = []
         self.edge_points = []
         self.edited_edge_points = []
 
+        try:
+            self.top_center_frame.unbind("<Configure>")
+        except Exception:
+            pass
+        self.top_center_frame.bind("<Configure>", self.update_mask_display)
+        
         self._clear_ctk_label(self.edge_label)   # <-- use helper
         self._clear_ctk_label(self.mask_label)   # <-- use helper
 
@@ -1870,7 +1900,8 @@ class HSVMaskTool(ctk.CTkToplevel):
     
         self.zoom_scale = 1.0
         self.pan_x = self.pan_y = 0
-    
+        
+   
         self.edit_canvas_container = tk.Frame(self.top_center_frame)
         self.edit_canvas_container.pack(fill="both", expand=True)
     
@@ -1989,7 +2020,11 @@ class HSVMaskTool(ctk.CTkToplevel):
         self._bind_edit_shortcuts()
     
         # Initial draw
+        base = self._ensure_scaled_base_for_zoom(high_quality=False)
+        if base is not None:
+            self._set_edit_preview(base)   # show something right away
         self.redraw_canvas()
+        # self.redraw_canvas()
 
 
     def create_new_edge(self):
