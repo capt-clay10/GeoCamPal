@@ -5,7 +5,7 @@ import sys
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext
 import customtkinter as ctk
-from PIL import Image, ImageTk
+from PIL import Image, ImageTk, ImageEnhance
 import cv2
 import numpy as np
 import geopandas as gpd
@@ -395,6 +395,7 @@ class HSVMaskTool(ctk.CTkToplevel):
         self.initial_edge_points = []
         self.edit_history = []
         self.selected_vertex = None
+        self.redo_history = []
 
         # More general shape storage:
         # list of (feature_type, [(x,y), (x,y), ...]) for polylines or polygons
@@ -403,7 +404,10 @@ class HSVMaskTool(ctk.CTkToplevel):
         self.creation_mode = False
 
         # For zoom and pan in the "cut/edit" mode
-        self.zoom_scale = 1.0
+        self.zoom_scale = getattr(self, "zoom_scale", 1.0)  # default zoom if not set elsewhere
+        self.bg_image_id = None
+        self.edit_original_pil = None
+        # self.zoom_scale = 1.0
         self.pan_x = 0
         self.pan_y = 0
         self.pan_start_x = 0
@@ -1671,6 +1675,83 @@ class HSVMaskTool(ctk.CTkToplevel):
         self.redraw_canvas()
 
 
+    def _bind_edit_shortcuts(self):
+        if not hasattr(self, "edit_canvas"):
+            return
+    
+        # modes/tools
+        self.edit_canvas.bind("d", self._btn_mode_delete)
+        self.edit_canvas.bind("m", self._btn_mode_add)
+        self.edit_canvas.bind("f", self._btn_freehand)
+        self.edit_canvas.bind("e", self._btn_create_edge)
+        self.edit_canvas.bind("p", self._btn_create_polygon)
+    
+        # make sure the canvas keeps focus so single-letter keys work
+        self.edit_canvas.bind("<Button-1>", lambda e: self.edit_canvas.focus_set(), add="+")
+        self.edit_canvas.bind("<Motion>",   lambda e: self.edit_canvas.focus_set(), add="+")
+        self.edit_canvas.focus_set()
+    
+        # Undo / Redo on U / R (both cases)
+        for seq in ("u", "U"):
+            self.edit_canvas.bind(seq, self._btn_undo)
+            self.bind(seq, self._btn_undo)   # backup on toplevel
+        for seq in ("r", "R"):
+            self.edit_canvas.bind(seq, self._btn_redo)
+            self.bind(seq, self._btn_redo)
+
+
+
+    def _unbind_edit_shortcuts(self):
+        if hasattr(self, "edit_canvas"):
+            for seq in ("d", "m", "f", "e", "p",
+                        "<Double-Button-1>", "<Double-1>",
+                        "u", "U", "r", "R"):
+                try:
+                    self.edit_canvas.unbind(seq)
+                except Exception:
+                    pass
+        # also remove toplevel backups
+        for seq in ("u", "U", "r", "R"):
+            try:
+                self.unbind(seq)
+            except Exception:
+                pass
+
+    def _refocus_canvas(self):
+        try:
+            self.edit_canvas.focus_set()
+        except Exception:
+            pass
+    
+    def _btn_undo(self, *_):
+        self.undo_last_action()
+        self._refocus_canvas()
+    
+    def _btn_redo(self, *_):
+        self.redo_last_action()
+        self._refocus_canvas()
+
+    def _btn_freehand(self, *_, **__):
+        self.start_freehand()
+        self._refocus_canvas()
+    
+    def _btn_create_edge(self, *_, **__):
+        self.create_new_edge()
+        self._refocus_canvas()
+    
+    def _btn_create_polygon(self, *_, **__):
+        self.create_new_polygon()
+        self._refocus_canvas()
+    
+    def _btn_mode_delete(self, *_, **__):
+        self.set_vertex_mode("delete")
+        self._refocus_canvas()
+    
+    def _btn_mode_add(self, *_, **__):
+        self.set_vertex_mode("add")
+        self._refocus_canvas()
+
+
     def cut_detected_feature(self):
         """
         Allows editing of the last-detected shape (self.edge_points).
@@ -1722,28 +1803,29 @@ class HSVMaskTool(ctk.CTkToplevel):
     
         # Since we removed the feature from the list, refresh the right pane to avoid showing it
         self.update_edge_display()
-
+    
         self.zoom_scale = 1.0
         self.pan_x = self.pan_y = 0
-
+    
         self.edit_canvas_container = tk.Frame(self.top_center_frame)
         self.edit_canvas_container.pack(fill="both", expand=True)
-
+    
         self.edit_canvas = tk.Canvas(self.edit_canvas_container)
         self.edit_canvas.grid(row=0, column=0, sticky="nsew")
-
+    
         v_scroll = tk.Scrollbar(
-            self.edit_canvas_container, orient="vertical", command=self.edit_canvas.yview)
+            self.edit_canvas_container, orient="vertical", command=self.edit_canvas.yview
+        )
         v_scroll.grid(row=0, column=1, sticky="ns")
         h_scroll = tk.Scrollbar(
-            self.edit_canvas_container, orient="horizontal", command=self.edit_canvas.xview)
+            self.edit_canvas_container, orient="horizontal", command=self.edit_canvas.xview
+        )
         h_scroll.grid(row=1, column=0, sticky="ew")
-
-        self.edit_canvas.configure(
-            yscrollcommand=v_scroll.set, xscrollcommand=h_scroll.set)
+    
+        self.edit_canvas.configure(yscrollcommand=v_scroll.set, xscrollcommand=h_scroll.set)
         self.edit_canvas_container.grid_rowconfigure(0, weight=1)
         self.edit_canvas_container.grid_columnconfigure(0, weight=1)
-
+    
         # Bindings for editing
         self.edit_canvas.bind("<Configure>", self.redraw_canvas)
         self.edit_canvas.bind("<MouseWheel>", self.on_mousewheel)
@@ -1754,71 +1836,95 @@ class HSVMaskTool(ctk.CTkToplevel):
         self.edit_canvas.bind("<ButtonRelease-1>", self.on_canvas_release)
         self.edit_canvas.bind("<Double-Button-1>", self.on_canvas_double_click)
         self.edit_canvas.bind("<BackSpace>", self.delete_selected_vertex)
-
+    
+        # Make sure single-letter keys work right away
+        try:
+            self.edit_canvas.focus_set()
+        except Exception:
+            pass
+    
         # Control buttons
         self.control_frame = ctk.CTkFrame(self.top_center_frame)
         self.control_frame.pack(side="bottom", fill="x", pady=5)
-
+    
         mode_frame = ctk.CTkFrame(self.control_frame)
         mode_frame.pack(side="top", pady=2)
-
-        # Delete / Add vertex buttons
-        self.btn_delete_mode = ctk.CTkButton(mode_frame, text="Delete Vertex Mode",
-                                             command=lambda: self.set_vertex_mode("delete"))
-        self.btn_delete_mode.pack(side="left", padx=5)
-        self.btn_add_mode = ctk.CTkButton(mode_frame, text="Add Vertex Mode",
-                                          command=lambda: self.set_vertex_mode("add"))
-        self.btn_add_mode.pack(side="left", padx=5)
-
-        # Freehand drawing button
-        btn_freehand = ctk.CTkButton(
-            mode_frame, text="Freehand", command=self.start_freehand)
-        btn_freehand.pack(side="left", padx=5)
-
-        btn_delete_all = ctk.CTkButton(mode_frame, text="Delete All Vertices",
-                                       command=self.delete_all_vertices, fg_color="red", text_color="white")
-        btn_delete_all.pack(side="left", padx=5)
-
+    
+        # Delete / Move vertex mode
+        self.btn_delete_mode = ctk.CTkButton(
+            mode_frame, text="Delete Vertex", command=self._btn_mode_delete
+        )
+        self.btn_delete_mode.pack(side="left", padx=3)
+        self.btn_add_mode = ctk.CTkButton(
+            mode_frame, text="Add/Move Vertex", command=self._btn_mode_add
+        )
+        self.btn_add_mode.pack(side="left", padx=3)
+    
+        # Freehand drawing
+        btn_freehand = ctk.CTkButton(mode_frame, text="Freehand", command=self._btn_freehand)
+        btn_freehand.pack(side="left", padx=3)
+    
+        btn_delete_all = ctk.CTkButton(
+            mode_frame, text="Delete All",
+            command=self.delete_all_vertices, fg_color="red", text_color="white"
+        )
+        btn_delete_all.pack(side="left", padx=3)
+    
         # Create new edge / polygon
         btn_create_edge = ctk.CTkButton(
-            mode_frame, text="Create New Edge", command=self.create_new_edge)
-        btn_create_edge.pack(side="left", padx=5)
+            mode_frame, text="Create New Edge", command=self._btn_create_edge
+        )
+        btn_create_edge.pack(side="left", padx=3)
         btn_create_polygon = ctk.CTkButton(
-            mode_frame, text="Create Polygon", command=self.create_new_polygon)
-        btn_create_polygon.pack(side="left", padx=5)
-
-        # Undo / Reset / Confirm
+            mode_frame, text="Create Polygon", command=self._btn_create_polygon
+        )
+        btn_create_polygon.pack(side="left", padx=3)
+    
+        self.reset_btn = ctk.CTkButton(mode_frame, text="Reset", command=self.reset_to_initial,fg_color="red", text_color="white")
+        self.reset_btn.pack(side="left", padx=3)
+    
+        # Undo / Reset / Confirm (+ Redo)
         btn_frame = ctk.CTkFrame(self.control_frame)
         btn_frame.pack(side="top", pady=5)
-
-        self.undo_btn = ctk.CTkButton(
-            btn_frame, text="Undo", command=self.undo_last_action)
+    
+        self.undo_btn = ctk.CTkButton(btn_frame, text="Undo", command=self._btn_undo)
         self.undo_btn.pack(side="left", padx=5)
-        self.reset_btn = ctk.CTkButton(
-            btn_frame, text="Reset", command=self.reset_to_initial)
-        self.reset_btn.pack(side="left", padx=5)
-        self.confirm_button = ctk.CTkButton(btn_frame, text="Confirm Feature",
-                                            command=self.confirm_feature_cuts,
-                                            fg_color="white", text_color="black")
+    
+    
+        redo_btn = ctk.CTkButton(btn_frame, text="Redo", command=self._btn_redo)
+        redo_btn.pack(side="left", padx=5)
+        
+        self.confirm_button = ctk.CTkButton(
+            btn_frame, text="Confirm Feature",
+            command=self.confirm_feature_cuts, fg_color="white", text_color="black"
+        )
         self.confirm_button.pack(side="left", padx=5)
-
+    
         # Zoom controls
-        ctk.CTkButton(btn_frame, text="Zoom In", command=lambda: self.adjust_zoom(
-            1.2)).pack(side="left", padx=2)
-        ctk.CTkButton(btn_frame, text="Zoom Out", command=lambda: self.adjust_zoom(
-            0.8)).pack(side="left", padx=2)
+        ctk.CTkButton(btn_frame, text="Zoom In",
+                      command=lambda: self.adjust_zoom(1.2)).pack(side="left", padx=2)
+        ctk.CTkButton(btn_frame, text="Zoom Out",
+                      command=lambda: self.adjust_zoom(0.8)).pack(side="left", padx=2)
         ctk.CTkButton(btn_frame, text="Reset View",
                       command=self.reset_view).pack(side="left", padx=2)
-
+    
+        # Build the non-destructive preview adjust row (Saturation / Exposure / Highlights)
+        self._build_adjust_row(self.control_frame)
+    
         info_label = ctk.CTkLabel(
             self.control_frame,
-            text="Scroll to zoom | Double-click (delete/add) depending on mode | Press Confirm when done",
+            text="Scroll to zoom | Double-click (delete/add) depending on mode | "
+                 "Keys: d=delete, m=move, f=freehand, e=new edge, p=new polygon, U=undo, R=redo",
             font=("Arial", 10)
         )
         info_label.pack(side="top", pady=2)
-
+    
+        # enable edit-mode shortcuts (binds d/m/f/e/p + U/R and keeps canvas focused)
+        self._bind_edit_shortcuts()
+    
         # Initial draw
         self.redraw_canvas()
+
 
     def create_new_edge(self):
         self.edited_edge_points = []
@@ -1843,15 +1949,48 @@ class HSVMaskTool(ctk.CTkToplevel):
 
     def confirm_feature_cuts(self):
         """
-        When the user clicks Confirm Feature:
-          - If edited points form a valid shape, replace the original feature being edited.
-          - If no points remain (user deleted), remove the original feature entirely.
+        Called when the user clicks the "Confirm Feature" button.
+        If there are enough points in the current edited shape, the shape is stored
+        as a feature (either polygon or polyline). If there are no points because an
+        auto-closing action already stored a polygon, then the UI simply returns to normal.
         """
-        # Are we confirming a polygon or a polyline?
-        feature_type = "polygon" if getattr(self, "is_polygon_mode", False) else "polyline"
-        new_points   = self.edited_edge_points.copy()
     
-        # Clean up the editor UI first
+        if len(self.edited_edge_points) < 2:
+            if not self.features:
+                messagebox.showwarning("Warning", "Not enough points to form a feature.")
+                return
+            else:
+                pass
+        else:
+            if hasattr(self, 'creation_mode') and self.creation_mode:
+                self.edit_canvas.unbind("<Button-1>")
+                self.creation_mode = False
+    
+            feature_type = "polygon" if self.is_polygon_mode else "polyline"
+            new_points = self.edited_edge_points.copy()
+            self.features.append((feature_type, new_points))
+            self.edge_points = new_points
+
+        # put original back & remove the adjust row (non-destructive preview reset)
+        try:
+            if getattr(self, "edit_original_pil", None) is not None:
+                self._set_edit_preview(self.edit_original_pil)
+        except Exception:
+            pass
+        
+        if hasattr(self, "_adjust_row") and self._adjust_row is not None:
+            try:
+                self._adjust_row.destroy()
+            except Exception:
+                pass
+            self._adjust_row = None
+        
+        self.edit_original_pil = None
+    
+        # disable edit-mode shortcuts
+        self._unbind_edit_shortcuts()
+
+        # Destroy the editing UI elements (your existing code)
         if hasattr(self, 'edit_canvas'):
             self.edit_canvas.destroy()
         if hasattr(self, 'control_frame'):
@@ -1859,41 +1998,194 @@ class HSVMaskTool(ctk.CTkToplevel):
         if hasattr(self, 'edit_canvas_container'):
             self.edit_canvas_container.destroy()
     
-        # If there were no points left, treat as deletion
-        if len(new_points) < 2:
-            # If we had temporarily removed an original feature, just don't reinsert it
-            self._removed_feature = None
-            # Clear the legacy edge_points too
-            self.edge_points = []
-        else:
-            # Valid shape: close polygon if needed; polylines unchanged
-            if feature_type == "polygon" and new_points[0] != new_points[-1]:
-                new_points.append(new_points[0])
-    
-            # If we were editing an existing feature: put the replacement back at the same index
-            if self._editing_feature_idx is not None:
-                # Guard against index drift if features were mutated elsewhere
-                idx = min(self._editing_feature_idx, len(self.features))
-                self.features.insert(idx, (feature_type, new_points))
-            else:
-                # No prior feature (started from edge_points) → just store one
-                # Also clear any stale polylines so we don't end up with two lines
-                self.features = [(feature_type, new_points)]
-    
-            # keep legacy reference in sync
-            self.edge_points = new_points.copy()
-    
-        # reset edit bookkeeping
-        self._editing_feature_idx = None
-        self._removed_feature = None
-    
-        # Restore the normal mask view in the center
+        # Restore the normal view in the center (mask display).
         self.mask_label = ctk.CTkLabel(self.top_center_frame, text="")
         self.mask_label.pack(fill="both", expand=True)
         self.top_center_frame.bind("<Configure>", self.update_mask_display)
-    
-        # Redraw the right panel (now only the edited/replaced feature should show)
         self.update_edge_display()
+
+
+
+    # ---------- PREVIEW ADJUST ROW (NEW) ----------
+    
+    def _build_adjust_row(self, parent):
+        """Create blue sliders (0..100) under the edit toolbar."""
+        # Keep a pristine copy for non-destructive preview
+        # Make sure self.edit_original_pil is set once when the edit window opens
+        if not hasattr(self, "edit_original_pil") or self.edit_original_pil is None:
+            # Fallback: duplicate whatever PIL image you're showing in the edit pane
+            base = self._get_current_edit_pil()
+            if base is None:
+                return  # no image to preview; bail out gracefully
+            self.edit_original_pil = base  # already a copy-safe PIL instance
+
+    
+        row = ctk.CTkFrame(parent)
+        row.pack(fill="x", padx=8, pady=(4, 2))
+    
+        # labels + sliders
+        lbl_sat = ctk.CTkLabel(row, text="Saturation", width=80, anchor="w")
+        lbl_exp = ctk.CTkLabel(row, text="Exposure",   width=80, anchor="w")
+        lbl_hil = ctk.CTkLabel(row, text="Highlights", width=80, anchor="w")
+    
+        # Blue color for CustomTkinter sliders
+        blue = "#1f6aa5"
+    
+        self.slider_sat = ctk.CTkSlider(row, from_=0, to=100,
+                                        command=lambda v: self._on_adjust_change(),
+                                        progress_color=blue, button_color=blue, fg_color="#0b2740")
+        self.slider_exp = ctk.CTkSlider(row, from_=0, to=100,
+                                        command=lambda v: self._on_adjust_change(),
+                                        progress_color=blue, button_color=blue, fg_color="#0b2740")
+        self.slider_hil = ctk.CTkSlider(row, from_=0, to=100,
+                                        command=lambda v: self._on_adjust_change(),
+                                        progress_color=blue, button_color=blue, fg_color="#0b2740")
+    
+        # Set neutral defaults:
+        # saturation: 50 = factor 1.0
+        # exposure:   50 = factor 1.0
+        # highlights: 50 = neutral curve
+        for s in (self.slider_sat, self.slider_exp, self.slider_hil):
+            s.set(50)
+    
+        # simple layout: 3 columns of label+slider
+        lbl_sat.grid(row=0, column=0, padx=(4, 8), pady=6, sticky="w")
+        self.slider_sat.grid(row=0, column=1, padx=(0, 20), pady=6, sticky="ew")
+    
+        lbl_exp.grid(row=0, column=2, padx=(4, 8), pady=6, sticky="w")
+        self.slider_exp.grid(row=0, column=3, padx=(0, 20), pady=6, sticky="ew")
+    
+        lbl_hil.grid(row=0, column=4, padx=(4, 8), pady=6, sticky="w")
+        self.slider_hil.grid(row=0, column=5, padx=(0, 4),  pady=6, sticky="ew")
+    
+        # allow sliders to expand
+        row.grid_columnconfigure(1, weight=1)
+        row.grid_columnconfigure(3, weight=1)
+        row.grid_columnconfigure(5, weight=1)
+    
+        self._adjust_row = row  # keep handle so we can destroy on confirm
+    
+    
+    def _on_adjust_change(self):
+        """Apply non-destructive preview from sliders to the edit pane."""
+        if not hasattr(self, "edit_original_pil") or self.edit_original_pil is None:
+            return
+    
+        sat_v = float(self.slider_sat.get())  # 0..100
+        exp_v = float(self.slider_exp.get())  # 0..100
+        hil_v = float(self.slider_hil.get())  # 0..100
+    
+        # Map sliders -> factors:
+        # 50 == neutral (1.0). Below 50 reduces, above 50 increases.
+        def _factor_from_mid(v, span=2.0):
+            # v in [0,100] -> factor in [1/span .. span], symmetric around 50
+            # span=2 => factor range 0.5..2.0
+            if v >= 50:
+                return 1.0 + (span - 1.0) * ((v - 50.0) / 50.0)
+            else:
+                return 1.0 - (1.0 - 1.0/span) * ((50.0 - v) / 50.0)
+    
+        sat_factor = _factor_from_mid(sat_v, span=2.0)  # saturation factor
+        exp_factor = _factor_from_mid(exp_v, span=2.0)  # brightness/exposure factor
+        hil_strength = (hil_v - 50.0) / 50.0            # -1..+1
+    
+        # Start from the pristine original each time (non-destructive)
+        out = self.edit_original_pil
+    
+        # Exposure preview (brightness)
+        if abs(exp_factor - 1.0) > 1e-3:
+            out = ImageEnhance.Brightness(out).enhance(exp_factor)
+    
+        # Saturation preview
+        if abs(sat_factor - 1.0) > 1e-3:
+            out = ImageEnhance.Color(out).enhance(sat_factor)
+    
+        # Highlights: gentle lift (> mid) or roll-off
+        if abs(hil_strength) > 1e-3:
+            out = self._apply_highlights_preview(out, hil_strength)
+    
+        # Push to the edit display widget (label/canvas)
+        self._set_edit_preview(out)
+    
+    
+    def _apply_highlights_preview(self, pil_img, strength):
+        """
+        strength in [-1, 1]:
+          >0 : lift highlights, <0 : compress highlights
+        This is a light-weight tone curve that only affects bright values.
+        """
+        arr = np.asarray(pil_img).astype(np.float32)  # H x W x C
+        if arr.ndim == 2:  # gray
+            arr = np.stack([arr, arr, arr], axis=-1)
+    
+        # work in 0..1
+        arr /= 255.0
+    
+        # Luma proxy to find bright regions
+        luma = 0.2126 * arr[...,0] + 0.7152 * arr[...,1] + 0.0722 * arr[...,2]
+    
+        # mask for highlights (above ~0.6), soft transition
+        t = 0.6
+        w = np.clip((luma - t) / (1.0 - t + 1e-6), 0.0, 1.0)  # 0..1 weight in highlights
+    
+        # build a simple curve: y = x^(gamma)  (gamma<1 lifts; >1 darkens)
+        # strength +1.0 -> gamma ~0.7 lift; -1.0 -> gamma ~1.6 compress
+        gamma = np.interp(strength, [-1, 1], [1.6, 0.7])
+    
+        # Apply curve only to highlight region, blend by weight w
+        curved = np.power(arr, gamma)
+        w = w[..., None]  # broadcast to channels
+        arr = arr * (1.0 - w) + curved * w
+    
+        arr = np.clip(arr * 255.0, 0, 255).astype(np.uint8)
+        return Image.fromarray(arr)
+    
+    
+    def _set_edit_preview(self, pil_img):
+        """
+        Replace ONLY the background image on the edit Canvas, respecting current zoom.
+        Keeps vertices/lines intact.
+        """
+        if not hasattr(self, "edit_canvas") or self.edit_canvas is None:
+            return
+    
+        img = getattr(self, "full_image", None)
+        if img is None:
+            return
+    
+        # compute scaled size from current zoom
+        img_h, img_w = img.shape[:2]
+        zoom = getattr(self, "zoom_scale", 1.0) or 1.0
+        scaled_w = max(1, int(img_w * zoom))
+        scaled_h = max(1, int(img_h * zoom))
+    
+        scaled = pil_img.resize((scaled_w, scaled_h), Image.LANCZOS)
+    
+        self.zoomed_image = ImageTk.PhotoImage(scaled)
+    
+        if getattr(self, "bg_image_id", None):
+            # update existing background item
+            self.edit_canvas.itemconfigure(self.bg_image_id, image=self.zoomed_image)
+        else:
+            # create background item and remember its id
+            self.bg_image_id = self.edit_canvas.create_image(0, 0, anchor=tk.NW, image=self.zoomed_image)
+    
+        # re-draw overlays on top (your existing method)
+        if hasattr(self, "draw_edge_on_canvas"):
+            self.draw_edge_on_canvas(0, 0)
+
+    
+    def _get_current_edit_pil(self):
+        """
+        Return a PIL.Image for the current base image shown in the edit view.
+        We derive it directly from self.full_image (BGR numpy array).
+        """
+        img = getattr(self, "full_image", None)
+        if img is None:
+            return None
+        # full_image is BGR -> convert to RGB and PIL
+        return Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+
 
 
     # -------------- CANVAS INTERACTION (EDITING) --------------
@@ -1912,10 +2204,16 @@ class HSVMaskTool(ctk.CTkToplevel):
             (scaled_width, scaled_height), Image.LANCZOS)
         self.zoomed_image = ImageTk.PhotoImage(resized_img)
 
-        self.edit_canvas.create_image(
-            0, 0, anchor=tk.NW, image=self.zoomed_image)
+        # store background image item id so we can update it without wiping overlays
+        self.bg_image_id = self.edit_canvas.create_image(0, 0, anchor=tk.NW, image=self.zoomed_image)
+
+        # If sliders exist, re-apply the current preview at the new zoom so the look persists
+        if hasattr(self, "slider_sat"):
+            self._on_adjust_change()
+        
         self.edit_canvas.config(scrollregion=(
             0, 0, scaled_width, scaled_height))
+        
         self.draw_edge_on_canvas(0, 0)
 
     def draw_edge_on_canvas(self, x_offset=0, y_offset=0):
@@ -1949,10 +2247,14 @@ class HSVMaskTool(ctk.CTkToplevel):
             self.vertex_objects.append(vertex_id)
 
     def _record_history(self):
-        # keep only the last, say, 50 steps so it doesn’t explode
+        """Push a snapshot and clear redo (new branch)."""
         self.edit_history.append(self.edited_edge_points.copy())
-        if len(self.edit_history) > 10:
+        # optional cap to keep memory sane
+        if len(self.edit_history) > 50:
             self.edit_history.pop(0)
+        # any new action invalidates redo chain
+        self.redo_history.clear()
+
 
     def on_canvas_single_click(self, event):
         """
@@ -2080,17 +2382,43 @@ class HSVMaskTool(ctk.CTkToplevel):
 
     def set_vertex_mode(self, mode):
         self.vertex_mode = mode
+    
+        # If we were in creation mode (single-click adds points),
+        # turn it off and restore the normal edit bindings.
+        if getattr(self, "creation_mode", False):
+            try:
+                self.edit_canvas.unbind("<Button-1>")
+            except Exception:
+                pass
+            self.creation_mode = False
+            # re-bind the standard edit handlers
+            self.edit_canvas.bind("<ButtonPress-1>",    self.on_canvas_press)
+            self.edit_canvas.bind("<B1-Motion>",        self.on_canvas_drag)
+            self.edit_canvas.bind("<ButtonRelease-1>",  self.on_canvas_release)
+            self.edit_canvas.bind("<Double-Button-1>",  self.on_canvas_double_click)
+
 
     def delete_all_vertices(self):
         self.edited_edge_points = []
         self._record_history()
         self.redraw_canvas()
 
-    def undo_last_action(self):
+    def undo_last_action(self, event=None):
+        """Ctrl+Z: move one step back and push current into redo."""
         if len(self.edit_history) > 1:
-            self.edit_history.pop()
+            current = self.edit_history.pop()              # the state we’re leaving
+            self.redo_history.append(current)              # enable redo
             self.edited_edge_points = self.edit_history[-1].copy()
             self.redraw_canvas()
+
+    def redo_last_action(self, event=None):
+        """Ctrl+R: re-apply the next state from redo."""
+        if self.redo_history:
+            nxt = self.redo_history.pop()
+            self.edit_history.append(nxt)
+            self.edited_edge_points = nxt.copy()
+            self.redraw_canvas()
+
 
     def reset_to_initial(self):
         self.edited_edge_points = self.initial_edge_points.copy()
