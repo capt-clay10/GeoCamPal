@@ -1,0 +1,36 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it using the metadata from this file."
+title: "GeoCamPal"
+type: software
+authors:
+  - family-names: "Soares"
+    given-names: "Clayton"
+    email: "clayton.soares@ifg.uni-kiel.de"
+    affiliation: "Institute of Geosciences, Kiel University (CAU), Kiel, Germany"
+repository-code: "https://github.com/capt-clay10/GeoCamPal.git"
+url: "https://github.com/capt-clay10/GeoCamPal"
+abstract: >-
+  GeoCamPal is a Python GUI application (CustomTkinter) for coastal camera workflows,
+  including pixel-to-GCP mapping, homography estimation, image georeferencing,
+  HSV-based feature identification, DEM generation from shoreline GeoJSON and water-level
+  CSV inputs, raw timestack generation, and wave run-up analysis.
+keywords:
+  - georeferencing
+  - photogrammetry
+  - coastal monitoring
+  - DEM
+  - shoreline
+  - time series
+  - timestack
+  - wave run-up
+  - customtkinter
+preferred-citation:
+  type: software
+  title: "GeoCamPal"
+  authors:
+    - family-names: "Soares"
+      given-names: "Clayton"
+      email: "clayton.soares@ifg.uni-kiel.de"
+      affiliation: "Institute of Geosciences, Kiel University (CAU), Kiel, Germany"
+  repository-code: "https://github.com/capt-clay10/GeoCamPal.git"
+  url: "https://github.com/capt-clay10/GeoCamPal"
