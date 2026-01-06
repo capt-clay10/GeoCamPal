@@ -10,9 +10,9 @@ authors:
 repository-code: "https://github.com/capt-clay10/GeoCamPal.git"
 url: "https://github.com/capt-clay10/GeoCamPal"
 abstract: >-
-  GeoCamPal is a Python GUI application (CustomTkinter) for coastal camera workflows,
+  GeoCamPal is a Python GUI application for camera workflows,
   including pixel-to-GCP mapping, homography estimation, image georeferencing,
-  HSV-based feature identification, DEM generation from shoreline GeoJSON and water-level
+  HSV-based feature identification,Manual feature identification, DEM generation from shoreline GeoJSON and water-level
   CSV inputs, raw timestack generation, and wave run-up analysis.
 keywords:
   - georeferencing
