@@ -490,29 +490,60 @@ class HSVMaskTool(ctk.CTkToplevel):
         """Read a mask as grayscale uint8 {0,255}. Returns None on failure."""
         if not path or not os.path.exists(path):
             return None
+    
         m = cv2.imread(path, cv2.IMREAD_UNCHANGED)
         if m is None:
             return None
-        if m.ndim == 3:
-            # if RGB/RGBA, convert to grayscale
-            if m.shape[2] == 4:
-                b, g, r, a = cv2.split(m)
-                m = a  # prefer alpha if provided
+    
+        # If RGBA: use alpha ONLY if it actually encodes the mask (not uniformly opaque)
+        if m.ndim == 3 and m.shape[2] == 4:
+            b, g, r, a = cv2.split(m)
+    
+            # alpha is "useful" if it contains real transparency/background
+            alpha_useful = (a.min() == 0) and (a.max() == 255) and (np.count_nonzero(a == 0) > 0)
+    
+            if alpha_useful:
+                gray = a
             else:
-                m = cv2.cvtColor(m, cv2.COLOR_BGR2GRAY)
-        # binarize
-        _, mbin = cv2.threshold(m, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+                # alpha is just 255 everywhere → mask is in RGB
+                gray = cv2.cvtColor(m[:, :, :3], cv2.COLOR_BGR2GRAY)
+    
+        elif m.ndim == 3:
+            gray = cv2.cvtColor(m, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = m
+    
+        # Make strictly binary 0/255
+        # If already binary-ish, keep it simple; else Otsu
+        u = np.unique(gray)
+        if len(u) <= 3 and set(u.tolist()).issubset({0, 1, 255}):
+            mbin = (gray > 0).astype(np.uint8) * 255
+        else:
+            _, mbin = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+    
         return mbin
+
 
     def _resize_mask_to_cv(self, m):
         """Resize a binary mask to current cv_image size with nearest-neighbor."""
         if self.cv_image is None or m is None:
             return None
+    
         m = self._ensure_binary_u8(m)
+    
+        # First, if we have the full image, snap mask to full-image size (keeps alignment consistent)
+        if self.full_image is not None:
+            Hf, Wf = self.full_image.shape[:2]
+            if m.shape[:2] != (Hf, Wf):
+                m = cv2.resize(m, (Wf, Hf), interpolation=cv2.INTER_NEAREST)
+    
+        # Then downscale to cv_image size
         h, w = self.cv_image.shape[:2]
-        if m.shape != (h, w):
+        if m.shape[:2] != (h, w):
             m = cv2.resize(m, (w, h), interpolation=cv2.INTER_NEAREST)
+    
         return m
+
 
 
     def _best_match_in_folder(self, img_base, folder, common_len_text):
@@ -600,11 +631,21 @@ class HSVMaskTool(ctk.CTkToplevel):
         """Display all stored features in the right panel."""
         if self.full_image is None:
             return
+        
+        # Force geometry update before getting dimensions
+        try:
+            self.top_right_frame.update_idletasks()
+        except Exception:
+            pass
+        
         width = self.top_right_frame.winfo_width()
         height = self.top_right_frame.winfo_height()
-        if width < 1 or height < 1:
+        
+        # If frame is still too small, schedule a retry
+        if width < 50 or height < 50:
+            self.after(100, self.update_edge_display)
             return
-
+    
         overlay = self.full_image.copy()
         for (feature_type, points) in self.features:
             if len(points) < 2:
@@ -620,7 +661,7 @@ class HSVMaskTool(ctk.CTkToplevel):
                     self, 'edge_thickness_slider') else 2
                 cv2.polylines(overlay, [pts_np], isClosed=False, color=(
                     0, 255, 0), thickness=thickness)
-
+    
         resized = cv2.resize(overlay, (width, height),
                              interpolation=cv2.INTER_AREA)
         overlay_rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
@@ -1011,17 +1052,28 @@ class HSVMaskTool(ctk.CTkToplevel):
             self.ml_mask_folder_disp.set(self._shorten_path(folder))  # show short path
     
     def _ensure_binary_u8(self, img):
-        """Return a strictly binary uint8 mask (0/255). Accepts BGR/GRAY/float/bool."""
+        """Return a strictly binary uint8 mask (0/255). Accepts BGR/GRAY/float/bool/0-1."""
         if img is None:
             return None
+    
         if img.ndim == 3:
             img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        img = (img > 0).astype(np.uint8) * 255 if img.dtype == bool else img
-        # Normalize dynamic range then hard threshold
+    
+        # bool -> 0/255
+        if img.dtype == bool:
+            return (img.astype(np.uint8) * 255)
+    
+        # float -> normalize then binarize
         if img.dtype != np.uint8:
             img = cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-        _, bin8 = cv2.threshold(img, 127, 255, cv2.THRESH_BINARY)
-        return bin8
+    
+        # handle 0/1 masks safely
+        if img.max() <= 1:
+            img = (img > 0).astype(np.uint8) * 255
+            return img
+    
+        # general case: any non-zero is foreground
+        return (img > 0).astype(np.uint8) * 255
 
     def _centerline_polyline_from_skeleton(self, skel_bin):
         """
@@ -1087,7 +1139,6 @@ class HSVMaskTool(ctk.CTkToplevel):
         return poly if len(poly) >= 2 else []
 
 
-
     def _detect_edge_from_current_mask_robust(self):
         """
         Make a single editable polyline from current_mask by skeletonizing and
@@ -1130,45 +1181,49 @@ class HSVMaskTool(ctk.CTkToplevel):
             self.edge_points, self.features = [], []
             self.update_edge_display()
             return False
-    
+        
+        # filter in CV space (inner_bbox_mask is in CV space)
+        if self.use_bbox.get() and self.use_inner_mask.get() and self.inner_bbox_mask is not None:
+            kept_cv = []
+            H, W = self.inner_bbox_mask.shape[:2]
+            for x, y in pts_cv:
+                if 0 <= x < W and 0 <= y < H and self.inner_bbox_mask[y, x] > 0:
+                    kept_cv.append([x, y])
+            if len(kept_cv) >= 2:
+                pts_cv = kept_cv
+        
         # scale to full_image coords (we render/export there)
         sx = self.full_image.shape[1] / self.cv_image.shape[1]
         sy = self.full_image.shape[0] / self.cv_image.shape[0]
         pts_full = [[int(x * sx), int(y * sy)] for x, y in pts_cv]
     
-        # optional inner-bbox filtering (non-destructive)
-        if self.use_bbox.get() and self.use_inner_mask.get() and self.inner_bbox_mask is not None:
-            kept = []
-            H, W = self.inner_bbox_mask.shape[:2]
-            for x, y in pts_full:
-                if 0 <= x < W and 0 <= y < H and self.inner_bbox_mask[y, x] > 0:
-                    kept.append([x, y])
-            if len(kept) >= 2:
-                pts_full = kept
-    
-        # store exactly ONE polyline → editor shows one line
+        # Store the results
         self.edge_points = pts_full
-        self.features = [("polyline", pts_full.copy())]
-        self.update_edge_display()
+        self.features = [("polyline", pts_full)]
+        
+        # Force geometry update and delay display refresh to ensure frame is properly sized
+        try:
+            self.update_idletasks()
+        except Exception:
+            pass
+        self.after(50, self.update_edge_display)
+        
         return True
-
-
 
 
     def calculate_edge_with_ml_mask(self):
         """
-        Load/choose the ML mask for the current image, set it as current_mask,
-        and extract an edge that populates self.features (so the editor works).
+        ML mask workflow:
+          1) Load the ML mask
+          2) Resize it to FULL image size (for extraction) and optionally clip by bbox
+          3) Create a cv-sized copy only for display
+          4) Extract shoreline from FULL-res mask (avoids thin-line loss)
         """
-        if self.cv_image is None:
-            # Attempt to get an image ready in ml mode
-            if self.mode == "ml" and self.image_files:
-                self.load_current_image()
-            if self.cv_image is None:
-                messagebox.showwarning("Image", "Please load an image first.")
-                return
+        if self.full_image is None:
+            messagebox.showwarning("Image", "Please load an image first.")
+            return
     
-        # Resolve a mask path based on mode
+        # Resolve mask path
         mask_path = None
         if self.mode == "individual":
             mask_path = self.ml_mask_file_path.get().strip()
@@ -1183,7 +1238,6 @@ class HSVMaskTool(ctk.CTkToplevel):
             if not folder:
                 messagebox.showwarning("Mask folder", "Please load the associated mask folder.")
                 return
-            # pick best match for current image
             cur_img = self.image_files[self.current_index]
             base = os.path.splitext(os.path.basename(cur_img))[0]
             mask_path = self._best_match_in_folder(base, folder, self.common_name_len_var.get())
@@ -1194,40 +1248,71 @@ class HSVMaskTool(ctk.CTkToplevel):
             messagebox.showwarning("Mode", "Calculate Edge with Mask is not available in batch mode.")
             return
     
-        # Read mask and prepare
+        # Read mask (your _read_mask_image already returns binary-ish)
         m = self._read_mask_image(mask_path)
         if m is None:
             messagebox.showerror("Mask", f"Failed to read mask:\n{mask_path}")
             return
     
-        m = self._resize_mask_to_cv(m)
-        if m is None:
-            messagebox.showerror("Mask", "Could not resize mask to the working image size.")
-            return
+        # --- FULL resolution mask for extraction ---
+        Hf, Wf = self.full_image.shape[:2]
+        m_full = self._ensure_binary_u8(m)
+        if m_full.shape[:2] != (Hf, Wf):
+            m_full = cv2.resize(m_full, (Wf, Hf), interpolation=cv2.INTER_NEAREST)
     
-        # Optional: intersect with bbox if user enabled
+        # Optional bbox clip (bbox entry is in ORIGINAL coords -> use directly, no self.scale here)
         if self.use_bbox.get():
             try:
                 x, y, w, h = map(int, self.bbox_entry.get().strip("()").split(","))
-                x = int(x * self.scale); y = int(y * self.scale)
-                w = int(w * self.scale); h = int(h * self.scale)
-                bbox_mask = np.zeros(self.cv_image.shape[:2], dtype=np.uint8)
-                bbox_mask[y:y+h, x:x+w] = 255
-                m = cv2.bitwise_and(m, bbox_mask)
-                if self.use_inner_mask.get():
-                    kernel_inner = np.ones((20, 20), np.uint8)
-                    self.inner_bbox_mask = cv2.erode(bbox_mask, kernel_inner, iterations=1)
+                x = max(0, x); y = max(0, y)
+                w = max(1, w); h = max(1, h)
+                bbox_full = np.zeros((Hf, Wf), dtype=np.uint8)
+                bbox_full[y:y+h, x:x+w] = 255
+                m_full = cv2.bitwise_and(m_full, bbox_full)
             except Exception:
-                pass  # ignore malformed bbox
+                pass
     
-        # Store & show
-        self.current_mask = self._ensure_binary_u8(m)
-        self.display_mask()
+        # If after clipping/binarizing nothing remains -> popup reason is clear
+        if cv2.countNonZero(m_full) == 0:
+            self.current_mask = np.zeros(self.cv_image.shape[:2], dtype=np.uint8) if self.cv_image is not None else None
+            if self.current_mask is not None:
+                self.display_mask()
+            messagebox.showwarning("Edge", "Mask became empty after binarization/bbox clipping.")
+            return
     
-        # Now do the robust edge extraction
-        ok = self._detect_edge_from_current_mask_robust()
-        if not ok:
+        # --- CV resolution mask only for display ---
+        if self.cv_image is not None:
+            hc, wc = self.cv_image.shape[:2]
+            m_cv = cv2.resize(m_full, (wc, hc), interpolation=cv2.INTER_NEAREST)
+            self.current_mask = self._ensure_binary_u8(m_cv)
+            self.display_mask()
+    
+        # --- Extract edge from FULL-res mask (avoid thin-line downscale failure) ---
+        # Reuse your robust skeleton approach, but run it in full coords:
+        try:
+            from skimage.morphology import skeletonize
+            skel = skeletonize((m_full > 0)).astype(np.uint8) * 255
+        except Exception:
+            try:
+                import cv2.ximgproc as xip
+                skel = xip.thinning(m_full, thinningType=xip.THINNING_ZHANGSUEN)
+            except Exception:
+                dt = cv2.distanceTransform((m_full > 0).astype(np.uint8), cv2.DIST_L2, 3)
+                dt = cv2.normalize(dt, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+                _, skel = cv2.threshold(dt, max(1, int(dt.max() * 0.6)), 255, cv2.THRESH_BINARY)
+    
+        ker = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        skel = cv2.morphologyEx(skel, cv2.MORPH_CLOSE, ker, iterations=1)
+    
+        pts_full = self._centerline_polyline_from_skeleton(skel)
+        if len(pts_full) < 2:
             messagebox.showwarning("Edge", "No contour/edge could be extracted from the mask.")
+            return
+    
+        # Store ONE polyline feature in FULL coords
+        self.edge_points = pts_full
+        self.features = [("polyline", pts_full.copy())]
+        self.update_edge_display()
 
 
     # -------------- BBOX TOGGLE --------------
