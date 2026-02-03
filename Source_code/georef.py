@@ -16,7 +16,7 @@ osr.DontUseExceptions()
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("green")
 
-# %% ─────────────────────────── helpers ──────────────────────────────────────────
+# %% ------------------------------------------------------------------------------------------------------------ helpers ------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 def resource_path(relative_path: str) -> str:
     """Return absolute path to bundled resources (handles PyInstaller)."""
     try:                       # PyInstaller puts files in a temp folder
@@ -39,13 +39,133 @@ class StdoutRedirector:
         pass
 
 
-MAX_BATCH_WORKERS = max(1, min(4, os.cpu_count() or 1))  # ≤ 4 workers
+MAX_BATCH_WORKERS = max(1, min(4, os.cpu_count() or 1))
+
+# Minimum valid GeoTIFF size threshold (in bytes) - files smaller than this are considered corrupted
+MIN_VALID_GEOTIFF_SIZE = 10_000  # 10 KB - absolute minimum floor
+
+# Maximum retries per individual file before giving up
+MAX_RETRIES_PER_FILE = 10
 
 
-# %% ─────────────────────── main window class ────────────────────────────────────
+def validate_geotiff(filepath: str, min_size: int = MIN_VALID_GEOTIFF_SIZE) -> tuple[bool, str]:
+    """
+    Validate a GeoTIFF file for corruption.
+    
+    Returns:
+        tuple: (is_valid: bool, reason: str)
+    """
+    if not os.path.exists(filepath):
+        return False, "File does not exist"
+    
+    file_size = os.path.getsize(filepath)
+    if file_size < min_size:
+        return False, f"File too small ({file_size:,} bytes < {min_size:,} bytes threshold)"
+    
+    # Try to open with GDAL for deeper validation
+    try:
+        ds = gdal.Open(filepath)
+        if ds is None:
+            return False, "GDAL could not open file"
+        
+        width = ds.RasterXSize
+        height = ds.RasterYSize
+        bands = ds.RasterCount
+        
+        # Check for obviously corrupt dimensions
+        if width <= 1 or height <= 1:
+            ds = None
+            return False, f"Invalid dimensions: {width}x{height}"
+        
+        if bands < 1:
+            ds = None
+            return False, f"Invalid band count: {bands}"
+        
+        ds = None
+        return True, "Valid"
+    
+    except Exception as e:
+        return False, f"GDAL validation error: {str(e)}"
+
+
+def calculate_adaptive_threshold(file_sizes: list[int], median_fraction: float = 0.5) -> int:
+    """
+    Calculate an adaptive minimum file size threshold based on the median file size.
+    
+    Files significantly smaller than the median are likely corrupted.
+    
+    Args:
+        file_sizes: List of file sizes in bytes
+        median_fraction: Fraction of median to use as threshold (default 0.5 = 50% of median)
+    
+    Returns:
+        Adaptive threshold in bytes
+    """
+    if not file_sizes:
+        return MIN_VALID_GEOTIFF_SIZE
+    
+    sorted_sizes = sorted(file_sizes)
+    n = len(sorted_sizes)
+    
+    # Calculate median
+    if n % 2 == 0:
+        median_size = (sorted_sizes[n // 2 - 1] + sorted_sizes[n // 2]) / 2
+    else:
+        median_size = sorted_sizes[n // 2]
+    
+    # Threshold is 50% of median (files less than half the typical size are suspect)
+    # But never less than the absolute minimum floor
+    adaptive_threshold = max(MIN_VALID_GEOTIFF_SIZE, int(median_size * median_fraction))
+    
+    return adaptive_threshold
+
+
+def sweep_and_validate_batch(output_folder: str, 
+                              use_adaptive_threshold: bool = True) -> list[tuple[str, str]]:
+    """
+    Sweep through all TIF files in a folder and identify corrupted ones.
+    
+    Args:
+        output_folder: Path to the output folder containing TIF files
+        use_adaptive_threshold: If True, calculate threshold from median file size
+    
+    Returns:
+        List of tuples: (filepath, reason) for each corrupted file
+    """
+    tif_files = glob.glob(os.path.join(output_folder, "*.tif"))
+    
+    if not tif_files:
+        return []
+    
+    # Collect file sizes for adaptive thresholding
+    file_sizes = []
+    for f in tif_files:
+        try:
+            file_sizes.append(os.path.getsize(f))
+        except:
+            pass
+    
+    if use_adaptive_threshold and file_sizes:
+        threshold = calculate_adaptive_threshold(file_sizes)
+        median_size = sorted(file_sizes)[len(file_sizes) // 2]
+        print(f"[Validation] Median file size: {median_size / 1024 / 1024:.2f} MB | "
+              f"Threshold (50% of median): {threshold / 1024 / 1024:.2f} MB")
+    else:
+        threshold = MIN_VALID_GEOTIFF_SIZE
+    
+    corrupted_files = []
+    for filepath in tif_files:
+        is_valid, reason = validate_geotiff(filepath, min_size=threshold)
+        if not is_valid:
+            corrupted_files.append((filepath, reason))
+    
+    return corrupted_files  # â‰¤ 4 workers
+
+
+# %% main window class 
 class GeoReferenceModule(ctk.CTkToplevel):
 
-    # ───────────────────── init / UI scaffolding ──────────────────────────────
+    # ------------------------------------------------------------------------------------ init / UI scaffolding ------------------------------------------------------------------------------------------------------------------------
     def __init__(self, master=None, *args, **kwargs):
         super().__init__(master=master, *args, **kwargs)
         self.title("Georeferencing Tool")
@@ -63,8 +183,9 @@ class GeoReferenceModule(ctk.CTkToplevel):
         self.output_folder = ""
         self.batch_main_folder = ""
         self.scale_factor = 4
-        self.user_epsg: int | None = None    # ← NEW
-        self.executor: concurrent.futures.ThreadPoolExecutor | None = None  # ← NEW
+        self.user_epsg: int | None = None    # â† NEW
+        self.executor: concurrent.futures.ThreadPoolExecutor | None = None  # â† NEW
+        self._gdal_write_lock = threading.Lock()  # Lock for GDAL write operations
 
         # ---------------- UI -------------------
         self.initialize_components()
@@ -80,7 +201,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
         print("Here you may see console outputs\n--------------------------------\n")
 
         # graceful close
-        self.protocol("WM_DELETE_WINDOW", self._on_close)      # ← NEW
+        self.protocol("WM_DELETE_WINDOW", self._on_close)      # â† NEW
 
     # ---------------- graceful shutdown  ----------------
     def _on_close(self):
@@ -88,11 +209,11 @@ class GeoReferenceModule(ctk.CTkToplevel):
             self.executor.shutdown(wait=False, cancel_futures=True)
         self.destroy()
 
-    # ───────────────── ETA string ────────────────────────────
+    # ------------------------------------------------------------ ETA string ------------------------------------------------------------------------------------------------------------â”€
     @staticmethod
     def _eta_string(start_ts: float, frac_done: float) -> str:
         if frac_done <= 0:
-            return "ETA: –"
+            return "ETA: â€“"
         elapsed = time.time() - start_ts
         remaining = elapsed * (1 / frac_done - 1)
         if remaining >= 3600:
@@ -103,8 +224,8 @@ class GeoReferenceModule(ctk.CTkToplevel):
 
     # ---------------------------------------------------------------
     def initialize_components(self):
-        # grid rows: 0‑top images | 1‑file | 2‑AOI | 3‑crop | 4‑final(single)
-        #            5‑batch(main‑folder) | 6‑console
+        # grid rows: 0â€‘top images | 1â€‘file | 2â€‘AOI | 3â€‘crop | 4â€‘final(single)
+        #            5â€‘batch(mainâ€‘folder) | 6â€‘console
         self.grid_columnconfigure(0, weight=1)
         for r in range(5):
             self.grid_rowconfigure(r, weight=1)
@@ -192,7 +313,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
         col += 1
         ctk.CTkButton(self.crop_panel, text="Show Crop", command=self.show_crop).grid(row=0, column=col, padx=5)
 
-        # ---- 4  SINGLE‑FOLDER FINAL  ------
+        # ---- 4  SINGLEâ€‘FOLDER FINAL  ------
         self.final_panel = ctk.CTkFrame(self)
         self.final_panel.grid(row=4, column=0, sticky="nsew", padx=5, pady=5)
 
@@ -210,13 +331,13 @@ class GeoReferenceModule(ctk.CTkToplevel):
         ctk.CTkButton(self.final_panel, text="Final Georeferencing",
                       command=self.process_all_images).pack(side="left", padx=5)
 
-        self.progress = ctk.CTkProgressBar(self.final_panel, width=220)  # ← NEW (was ttk)
+        self.progress = ctk.CTkProgressBar(self.final_panel, width=220)  # â† NEW (was ttk)
         self.progress.set(0)
         self.progress.pack(side="left", padx=8)
-        self.progress_eta = ctk.CTkLabel(self.final_panel, text="ETA: –")  # ← NEW
+        self.progress_eta = ctk.CTkLabel(self.final_panel, text="ETA: â€“")  # â† NEW
         self.progress_eta.pack(side="left", padx=5)
 
-        # ---- 5  BATCH‑MAIN‑FOLDER PANEL (single bar + ETA) -------
+        # ---- 5  BATCHâ€‘MAINâ€‘FOLDER PANEL (single bar + ETA) -------
         self.batch_panel = ctk.CTkFrame(self)
         self.batch_panel.grid(row=5, column=0, sticky="nsew", padx=5, pady=5)
 
@@ -227,17 +348,83 @@ class GeoReferenceModule(ctk.CTkToplevel):
         ctk.CTkButton(self.batch_panel, text="Start Batch Process",
                       command=self.start_batch_process).pack(side="left", padx=5)
 
-        self.batch_progress = ctk.CTkProgressBar(self.batch_panel, width=220)  # ← NEW (single bar)
+        self.batch_progress = ctk.CTkProgressBar(self.batch_panel, width=220)  # â† NEW (single bar)
         self.batch_progress.set(0)
         self.batch_progress.pack(side="left", padx=8)
-        self.batch_eta_label = ctk.CTkLabel(self.batch_panel, text="ETA: –")  # ← NEW
+        self.batch_eta_label = ctk.CTkLabel(self.batch_panel, text="ETA: â€“")  # â† NEW
         self.batch_eta_label.pack(side="left", padx=5)
+        
+        # ---- RESET BUTTON (red, bottom right) ----
+        self.reset_button = ctk.CTkButton(
+            self.batch_panel, 
+            text="⟲ Reset", 
+            command=self.reset_module,
+            width=80,
+            fg_color="#8B0000",      # Dark red
+            hover_color="#B22222",   # Firebrick red on hover
+            text_color="white"
+        )
+        self.reset_button.pack(side="right", padx=10)
 
     def toggle_manual_entry(self, *args):
         if self.aoi_var.get() == "manual":
             self.manual_entry.grid()
         else:
             self.manual_entry.grid_remove()
+
+    def reset_module(self):
+        """Reset the module to initial state - clear all images, settings, and entries."""
+        # Confirm reset with user
+        if not messagebox.askyesno("Confirm Reset", 
+                                    "Are you sure you want to reset?\n\n"
+                                    "This will clear all images, settings, and entries."):
+            return
+        
+        # ---- Reset state variables ----
+        self.H = None
+        self.image_list = []
+        self.input_folder = ""
+        self.output_folder = ""
+        self.batch_main_folder = ""
+        self.user_epsg = None
+        
+        # ---- Clear image panels ----
+        self.orig_label.configure(image=None, text="Original Image")
+        self.orig_label.image = None
+        self.geo_label.configure(image=None, text="Initial Georeferenced Image")
+        self.geo_label.image = None
+        self.cropped_label.configure(image=None, text="Cropped Georeferenced Image")
+        self.cropped_label.image = None
+        
+        # ---- Clear entry fields ----
+        self.image_entry.delete(0, "end")
+        self.homo_entry.delete(0, "end")
+        self.manual_entry.delete(0, "end")
+        self.epsg_entry.delete(0, "end")
+        self.scale_entry.delete(0, "end")
+        
+        # Clear crop entries
+        for entry in self.crop_entries:
+            entry.delete(0, "end")
+        
+        # ---- Reset labels ----
+        self.input_folder_label.configure(text="Input Folder: Not selected")
+        self.output_folder_label.configure(text="Output Folder: Not selected")
+        self.batch_main_label.configure(text="Main Folder: Not selected")
+        
+        # ---- Reset progress bars and ETA ----
+        self.progress.set(0)
+        self.progress_eta.configure(text="ETA: —")
+        self.batch_progress.set(0)
+        self.batch_eta_label.configure(text="ETA: —")
+        
+        # ---- Reset AOI selection to default ----
+        self.aoi_var.set("bottom_left")
+        self.manual_entry.grid_remove()
+        
+        print("\n" + "="*50)
+        print("Module has been reset to initial state")
+        print("="*50 + "\n")
 
     def load_image(self):
         path = filedialog.askopenfilename(
@@ -464,7 +651,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
             self.output_folder = folder
             self.output_folder_label.configure(text=f"Output Folder: {folder}")
 
-    # ──────────────────── georeference_and_save_image ─────────────────────────
+    # ------------------------------------------------------------------------ georeference_and_save_image ------------------------------------------------------------------------------------------------â”€
     def georeference_and_save_image(self, img_path: str, output_path: str) -> bool:
         """Same as before but uses self.user_epsg (validated once)."""
         img = cv2.imread(img_path)
@@ -521,7 +708,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
         else:
             x_crop = y_crop = 0
 
-        # ---- write GeoTIFF ---------------------------------------------------
+        # ---- write GeoTIFF (protected by lock for thread safety) ----------------
         gcps = []
         adj_corners = cv2.perspectiveTransform(original_corners, H_final).reshape(-1, 2)
         for (px, py), (utm_x, utm_y) in zip(adj_corners, transformed.reshape(-1, 2)):
@@ -531,22 +718,31 @@ class GeoReferenceModule(ctk.CTkToplevel):
             gcps.append(g)
 
         srs = osr.SpatialReference();  srs.ImportFromEPSG(self.user_epsg)
-        driver = gdal.GetDriverByName("GTiff")
-        dst_ds = driver.Create(output_path, warped.shape[1], warped.shape[0],
-                               4, gdal.GDT_Byte, options=["ALPHA=YES"])
-        dst_ds.SetGCPs(gcps, srs.ExportToWkt())
-        gt = gdal.GCPsToGeoTransform(gcps)
-        if gt: dst_ds.SetGeoTransform(gt)
+        
+        # Use lock to serialize GDAL file creation (prevents race conditions)
+        with self._gdal_write_lock:
+            driver = gdal.GetDriverByName("GTiff")
+            dst_ds = driver.Create(output_path, warped.shape[1], warped.shape[0],
+                                   4, gdal.GDT_Byte, options=["ALPHA=YES"])
+            if dst_ds is None:
+                print(f"GDAL failed to create file: {output_path}")
+                return False
+            
+            dst_ds.SetGCPs(gcps, srs.ExportToWkt())
+            gt = gdal.GCPsToGeoTransform(gcps)
+            if gt: dst_ds.SetGeoTransform(gt)
 
-        rgb = cv2.cvtColor(warped, cv2.COLOR_BGR2RGB)
-        for i in range(3):
-            dst_ds.GetRasterBand(i+1).WriteArray(rgb[..., i])
-        alpha = np.where(np.all(rgb == [0,0,0], axis=-1), 0, 255).astype(np.uint8)
-        dst_ds.GetRasterBand(4).WriteArray(alpha)
-        dst_ds.FlushCache();  dst_ds = None
+            rgb = cv2.cvtColor(warped, cv2.COLOR_BGR2RGB)
+            for i in range(3):
+                dst_ds.GetRasterBand(i+1).WriteArray(rgb[..., i])
+            alpha = np.where(np.all(rgb == [0,0,0], axis=-1), 0, 255).astype(np.uint8)
+            dst_ds.GetRasterBand(4).WriteArray(alpha)
+            dst_ds.FlushCache()
+            dst_ds = None
+        
         return True
 
-    # ─────────────────── single-folder processing (validate EPSG once) ────────
+
     def process_all_images(self):
         if not self.image_list or self.H is None:
             messagebox.showerror("Error", "Load a folder and homography first")
@@ -559,22 +755,110 @@ class GeoReferenceModule(ctk.CTkToplevel):
 
         def _worker():
             total, start_ts = len(self.image_list), time.time()
+            # Track input->output mapping for validation
+            img_to_input = {}
+            
             for idx, path in enumerate(self.image_list, 1):
                 try:
                     base = os.path.splitext(os.path.basename(path))[0]
                     out  = os.path.join(self.output_folder, f"{base}.tif")
                     self.georeference_and_save_image(path, out)
+                    img_to_input[out] = path
                 except Exception as e:
                     print(f"Error processing {path}: {e}")
                 self.progress.set(idx/total)
                 self.progress_eta.configure(text=self._eta_string(start_ts, idx/total))
                 self.update_idletasks()
+            
+            # ========== VALIDATION AND REPROCESSING ==========
+            print("\n[Validation] Starting validation sweep...")
+            self.progress_eta.configure(text="Validating...")
+            self.update_idletasks()
+            
+            # Track retry count per file
+            file_retry_counts = {}  # output_path -> retry_count
+            permanently_failed = []  # Files that failed after MAX_RETRIES_PER_FILE attempts
+            
+            validation_round = 0
+            max_validation_rounds = 20  # Safety limit
+            
+            while validation_round < max_validation_rounds:
+                validation_round += 1
+                corrupted_files = sweep_and_validate_batch(self.output_folder, use_adaptive_threshold=True)
+                
+                # Filter out permanently failed files
+                corrupted_files = [(p, r) for p, r in corrupted_files 
+                                   if p not in [f[0] for f in permanently_failed]]
+                
+                if not corrupted_files:
+                    print("[Validation] All files validated successfully!")
+                    break
+                
+                print(f"\n[Validation] Round {validation_round}: Found {len(corrupted_files)} corrupted file(s)")
+                
+                files_to_retry = []
+                for corrupted_path, reason in corrupted_files:
+                    current_retries = file_retry_counts.get(corrupted_path, 0)
+                    
+                    if current_retries >= MAX_RETRIES_PER_FILE:
+                        if corrupted_path not in [f[0] for f in permanently_failed]:
+                            permanently_failed.append((corrupted_path, reason))
+                            print(f"  [GAVE UP] {os.path.basename(corrupted_path)} - "
+                                  f"failed after {MAX_RETRIES_PER_FILE} attempts")
+                    else:
+                        files_to_retry.append((corrupted_path, reason))
+                        print(f"  - {os.path.basename(corrupted_path)}: {reason} "
+                              f"(attempt {current_retries + 1}/{MAX_RETRIES_PER_FILE})")
+                
+                if not files_to_retry:
+                    print(f"\n[Validation] No more files to retry.")
+                    break
+                
+                # Reprocess files
+                for corrupted_path, reason in files_to_retry:
+                    input_path = img_to_input.get(corrupted_path)
+                    if input_path and os.path.exists(input_path):
+                        try:
+                            print(f"[Reprocess] {os.path.basename(corrupted_path)}...")
+                            if os.path.exists(corrupted_path):
+                                os.remove(corrupted_path)
+                            self.georeference_and_save_image(input_path, corrupted_path)
+                            file_retry_counts[corrupted_path] = file_retry_counts.get(corrupted_path, 0) + 1
+                        except Exception as e:
+                            print(f"[Reprocess] Failed: {e}")
+                            file_retry_counts[corrupted_path] = file_retry_counts.get(corrupted_path, 0) + 1
+                    else:
+                        permanently_failed.append((corrupted_path, "Input file not found"))
+                
+                self.update_idletasks()
+            
+            # Final summary
+            if permanently_failed:
+                print(f"\n" + "="*60)
+                print(f"[WARNING] {len(permanently_failed)} FILE(S) COULD NOT BE PROCESSED:")
+                print("="*60)
+                for path, reason in permanently_failed:
+                    print(f"  ✗ {os.path.basename(path)}: {reason}")
+                print("="*60 + "\n")
+                
+                failed_names = "\n".join([os.path.basename(p) for p, _ in permanently_failed[:10]])
+                if len(permanently_failed) > 10:
+                    failed_names += f"\n... and {len(permanently_failed) - 10} more"
+                messagebox.showwarning(
+                    "Some Files Failed", 
+                    f"{len(permanently_failed)} file(s) could not be processed after "
+                    f"{MAX_RETRIES_PER_FILE} attempts each:\n\n{failed_names}"
+                )
+            
+            # ========== END VALIDATION ==========
+            
             self.progress_eta.configure(text="Done")
-            messagebox.showinfo("Complete", "Processing finished!")
+            if not permanently_failed:
+                messagebox.showinfo("Complete", "Processing finished and validated!")
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    # ─────────────────── parallel + resumable batch processing ────────────────
+
     
     def select_batch_main_folder(self):
         folder = filedialog.askdirectory()
@@ -619,14 +903,19 @@ class GeoReferenceModule(ctk.CTkToplevel):
 
             total, start_ts = len(todo), time.time()
             self.batch_progress.set(0)
+            
+            # Track input->output mapping for validation/reprocessing
+            img_to_input = {}  # output_path -> input_path
 
             def _process_sub(sub):
+                """Process a subfolder and return list of (input_path, output_path) tuples."""
+                processed_files = []
                 imgs = sorted(glob.glob(os.path.join(sub, "*.[jp][pn]*g")) +
                               glob.glob(os.path.join(sub, "*.tif")) +
                               glob.glob(os.path.join(sub, "*.bmp")))
                 if not imgs:
                     print(f"[Batch] Skipping empty folder: {sub}")
-                    return
+                    return processed_files
                 out_sub = os.path.join(self.output_folder, os.path.basename(sub))
                 os.makedirs(out_sub, exist_ok=True)
                 for img in imgs:
@@ -634,7 +923,10 @@ class GeoReferenceModule(ctk.CTkToplevel):
                         out = os.path.join(out_sub,
                                            os.path.splitext(os.path.basename(img))[0] + ".tif")
                         self.georeference_and_save_image(img, out)
-                    except Exception as e: print(f"[Batch] Error in {img}: {e}")
+                        processed_files.append((img, out))
+                    except Exception as e: 
+                        print(f"[Batch] Error in {img}: {e}")
+                return processed_files
 
             # pool inside the background thread
             self.executor = concurrent.futures.ThreadPoolExecutor(
@@ -644,10 +936,14 @@ class GeoReferenceModule(ctk.CTkToplevel):
                 for idx, fut in enumerate(concurrent.futures.as_completed(fut2sub), 1):
                     if fut.exception():
                         print(f"[Batch] Exception in {fut2sub[fut]}: {fut.exception()}")
+                    else:
+                        # Collect processed file mappings
+                        for inp, out in (fut.result() or []):
+                            img_to_input[out] = inp
                     frac = idx / total
                     self.batch_progress.set(frac)
                     if idx:
-                        remaining = (total - idx) / (idx / (time.time() - start_ts))   # folders left / folders per second
+                        remaining = (total - idx) / (idx / (time.time() - start_ts))
                     else:
                         remaining = 0
                     m, s = divmod(int(remaining), 60)
@@ -657,21 +953,131 @@ class GeoReferenceModule(ctk.CTkToplevel):
             
             elapsed = time.time() - start_ts
             m, s = divmod(elapsed, 60)
-            print(f"\nBatch process complete in {int(m)} min {s:.1f} s.")
+            print(f"\nInitial batch process complete in {int(m)} min {s:.1f} s.")
+            
+            # ========== VALIDATION AND REPROCESSING SWEEP ==========
+            print("\n[Validation] Starting post-processing validation sweep...")
+            self.batch_eta_label.configure(text="Validating...")
+            self.update_idletasks()
+            
+            # Track retry count per file
+            file_retry_counts = {}  # output_path -> retry_count
+            permanently_failed = []  # Files that failed after MAX_RETRIES_PER_FILE attempts
+            
+            validation_round = 0
+            max_validation_rounds = 20  # Safety limit to prevent infinite loops
+            
+            while validation_round < max_validation_rounds:
+                validation_round += 1
+                
+                # Sweep all output subfolders
+                corrupted_files = []
+                out_subs = [f.path for f in os.scandir(self.output_folder) if f.is_dir()]
+                
+                for out_sub in out_subs:
+                    sub_corrupted = sweep_and_validate_batch(out_sub, use_adaptive_threshold=True)
+                    corrupted_files.extend(sub_corrupted)
+                
+                # Filter out files that have already permanently failed
+                corrupted_files = [(p, r) for p, r in corrupted_files 
+                                   if p not in [f[0] for f in permanently_failed]]
+                
+                if not corrupted_files:
+                    print(f"[Validation] All files validated successfully!")
+                    break
+                
+                print(f"\n[Validation] Round {validation_round}: Found {len(corrupted_files)} corrupted file(s)")
+                
+                # Reprocess corrupted files (sequentially to avoid race conditions)
+                files_to_retry = []
+                for corrupted_path, reason in corrupted_files:
+                    # Check retry count for this file
+                    current_retries = file_retry_counts.get(corrupted_path, 0)
+                    
+                    if current_retries >= MAX_RETRIES_PER_FILE:
+                        # This file has exceeded max retries - mark as permanently failed
+                        if corrupted_path not in [f[0] for f in permanently_failed]:
+                            permanently_failed.append((corrupted_path, reason))
+                            print(f"  [GAVE UP] {os.path.basename(corrupted_path)} - "
+                                  f"failed after {MAX_RETRIES_PER_FILE} attempts")
+                    else:
+                        files_to_retry.append((corrupted_path, reason))
+                        print(f"  - {os.path.basename(corrupted_path)}: {reason} "
+                              f"(attempt {current_retries + 1}/{MAX_RETRIES_PER_FILE})")
+                
+                if not files_to_retry:
+                    # All remaining corrupted files have exceeded retry limit
+                    print(f"\n[Validation] No more files to retry.")
+                    break
+                
+                # Reprocess files that haven't exceeded retry limit
+                reprocessed = 0
+                for corrupted_path, reason in files_to_retry:
+                    input_path = img_to_input.get(corrupted_path)
+                    if input_path and os.path.exists(input_path):
+                        try:
+                            print(f"[Reprocess] {os.path.basename(corrupted_path)}...")
+                            # Delete corrupted file first
+                            if os.path.exists(corrupted_path):
+                                os.remove(corrupted_path)
+                            # Reprocess
+                            self.georeference_and_save_image(input_path, corrupted_path)
+                            reprocessed += 1
+                            # Increment retry count
+                            file_retry_counts[corrupted_path] = file_retry_counts.get(corrupted_path, 0) + 1
+                        except Exception as e:
+                            print(f"[Reprocess] Failed to reprocess {corrupted_path}: {e}")
+                            file_retry_counts[corrupted_path] = file_retry_counts.get(corrupted_path, 0) + 1
+                    else:
+                        print(f"[Reprocess] Cannot find input for {corrupted_path}")
+                        permanently_failed.append((corrupted_path, "Input file not found"))
+                
+                print(f"[Validation] Reprocessed {reprocessed} file(s)")
+                self.update_idletasks()
+            
+            # Final summary
+            if permanently_failed:
+                print(f"\n" + "="*60)
+                print(f"[WARNING] {len(permanently_failed)} FILE(S) COULD NOT BE PROCESSED:")
+                print("="*60)
+                for path, reason in permanently_failed:
+                    print(f"  ✗ {os.path.basename(path)}")
+                    print(f"    Reason: {reason}")
+                    print(f"    Full path: {path}")
+                print("="*60)
+                print("These files may have issues with the source image or parameters.")
+                print("Consider checking them manually.\n")
+                
+                # Show message box with failed files
+                failed_names = "\n".join([os.path.basename(p) for p, _ in permanently_failed[:10]])
+                if len(permanently_failed) > 10:
+                    failed_names += f"\n... and {len(permanently_failed) - 10} more"
+                messagebox.showwarning(
+                    "Some Files Failed", 
+                    f"{len(permanently_failed)} file(s) could not be processed after "
+                    f"{MAX_RETRIES_PER_FILE} attempts each:\n\n{failed_names}\n\n"
+                    "Check the console for details."
+                )
+            
+            if validation_round >= max_validation_rounds:
+                print(f"\n[WARNING] Reached maximum validation rounds ({max_validation_rounds}). Stopping.")
+            
+            # ========== END VALIDATION ==========
           
             self.batch_progress.set(1.0)
             self.batch_eta_label.configure(text="Done")
-            messagebox.showinfo("Batch Complete", "Selected sub-folders processed.")
+            
+            if not permanently_failed:
+                messagebox.showinfo("Batch Complete", "All files processed and validated successfully!")
             
             print("\nBatch process complete\n")
 
         threading.Thread(target=_batch_thread, daemon=True).start()
 
-    # initialise_components and other helper methods … keep original code here
+    # initialise_components and other helper methods â€¦ keep original code here
     # ---------------------------------------------------------------------
 
 
-# ──────────────────────────────── main loop ─────────────────────────────────
 def main():
     root = ctk.CTk()
     root.withdraw()
