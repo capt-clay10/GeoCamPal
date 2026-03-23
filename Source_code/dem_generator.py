@@ -1,9 +1,11 @@
 """
-GeoCamPal – Create DEMs from shoreline GeoJSON files and water‑level CSV.
+GeoCamPal — Create DEMs from shoreline GeoJSON files and water‑level CSV.
 
+Uses PCA‑aligned cross‑shore transect interpolation (waterline method)
+to avoid Delaunay triangulation artefacts.
 """
 
-# %% ───────────────────────────── imports ─────────────────────────────
+# %% ————————————————————————————— imports —————————————————————————————
 from rasterio.transform import from_origin
 import rasterio
 from rasterio import features
@@ -15,10 +17,13 @@ import sys
 import os
 import pandas as pd
 import geopandas as gpd
-from scipy.interpolate import griddata
+from scipy.interpolate import interp1d
+from scipy.ndimage import gaussian_filter
+from scipy.spatial import ConvexHull
 import numpy as np
 from PIL import Image
 import matplotlib.pyplot as plt
+from matplotlib.path import Path as MPath
 import customtkinter as ctk
 import tkinter as tk
 from tkinter import filedialog, messagebox
@@ -30,7 +35,7 @@ matplotlib.use("Agg")
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("green")
 
-# %% ───────────────────────── util helpers ────────────────────────────
+# %% ————————————————————————————— util helpers ————————————————————————
 def resource_path(relative_path: str) -> str:
     try:
         base_path = sys._MEIPASS  # type: ignore
@@ -51,13 +56,16 @@ class StdoutRedirector:
         pass
 
 
-# %% ──────────────────────── main window ──────────────────────────────
+# %% ————————————————————————————— main window ——————————————————————————
 class CreateDemWindow(ctk.CTkToplevel):
     """
     GUI window that creates Digital Elevation Models (DEMs)
     from shoreline GeoJSON files and a water‑level CSV.
+
+    Interpolation uses PCA‑aligned cross‑shore transects to
+    avoid Delaunay triangulation artefacts at contour edges.
     """
-    # ────────────────────────── init & UI ──────────────────────────
+    # —————————————————————————— init & UI ——————————————————————————
     def __init__(self, master=None, *args, **kwargs):
         super().__init__(master=master, *args, **kwargs)
         self.title("Create DEM")
@@ -74,6 +82,11 @@ class CreateDemWindow(ctk.CTkToplevel):
         self.shorelines_gdf: gpd.GeoDataFrame | None = None
         self.daily_dates: list = []
         self.current_day_index: int = 0
+
+        # PCA cache (computed once per dataset)
+        self._pca_center: np.ndarray | None = None
+        self._pca_along: np.ndarray | None = None
+        self._pca_cross: np.ndarray | None = None
 
         # UI state variables
         self.export_xyz_var = tk.BooleanVar(value=False)
@@ -98,7 +111,7 @@ class CreateDemWindow(ctk.CTkToplevel):
         sys.stderr = sys.stdout
         print("Here you may see console outputs\n--------------------------------\n")
 
-    # ───────────────────── UI helpers ───────────────────────────────
+    # ————————————————————————— UI helpers ——————————————————————————————
     def _create_top_panel(self):
         self.top_frame = ctk.CTkFrame(self)
         self.top_frame.pack(side="top", fill="both", expand=True)
@@ -132,7 +145,7 @@ class CreateDemWindow(ctk.CTkToplevel):
         self.bottom_frame = ctk.CTkFrame(self)
         self.bottom_frame.pack(side="bottom", fill="x", expand=False, padx=5, pady=25, ipady=10)
 
-        # ───────────── inputs row ─────────────
+        # ————————————— inputs row —————————————
         inputs = ctk.CTkFrame(self.bottom_frame)
         inputs.pack(side="top", fill="x", padx=5, pady=5)
 
@@ -157,7 +170,7 @@ class CreateDemWindow(ctk.CTkToplevel):
         self.out_dir_display_label = ctk.CTkLabel(inputs, text="", width=240)
         self.out_dir_display_label.pack(side="left", padx=5)
 
-        # ───────────── DEM settings row ─────────────
+        # ————————————— DEM settings row —————————————
         dem = ctk.CTkFrame(self.bottom_frame)
         dem.pack(side="top", fill="x", padx=5, pady=5)
 
@@ -165,17 +178,18 @@ class CreateDemWindow(ctk.CTkToplevel):
         self.resolution_var = tk.StringVar(value="1")
         ctk.CTkEntry(dem, textvariable=self.resolution_var, width=60).pack(side="left", padx=5)
 
-        ctk.CTkLabel(dem, text="Vertex spacing (m):").pack(side="left", padx=10)  # NEW
-        self.spacing_var = tk.StringVar(value="1")                                 # NEW
-        ctk.CTkEntry(dem, textvariable=self.spacing_var, width=60).pack(side="left", padx=5)  # NEW
+        ctk.CTkLabel(dem, text="Vertex spacing (m):").pack(side="left", padx=10)
+        self.spacing_var = tk.StringVar(value="1")
+        ctk.CTkEntry(dem, textvariable=self.spacing_var, width=60).pack(side="left", padx=5)
 
-        ctk.CTkLabel(dem, text="Interpolation:").pack(side="left", padx=10)
-        self.interp_var = tk.StringVar(value="nearest")
-        ctk.CTkOptionMenu(dem, variable=self.interp_var, values=["linear", "cubic","nearest"]).pack(side="left", padx=5)
+        ctk.CTkLabel(dem, text="Smoothing σ:").pack(side="left", padx=10)
+        self.sigma_var = tk.StringVar(value="1.5")
+        ctk.CTkEntry(dem, textvariable=self.sigma_var, width=60).pack(side="left", padx=5)
 
-        ctk.CTkButton(dem, text="Generate next DEM", command=self.on_generate_next_dem).pack(side="left", padx=15)
+        ctk.CTkButton(dem, text="Generate next DEM",
+                       command=self.on_generate_next_dem).pack(side="left", padx=15)
 
-        # ───────────── output row ─────────────
+        # ————————————— output row —————————————
         out = ctk.CTkFrame(self.bottom_frame)
         out.pack(side="top", fill="x", padx=5, pady=5)
 
@@ -188,9 +202,13 @@ class CreateDemWindow(ctk.CTkToplevel):
         self.xyz_display.pack(side="left", padx=5)
         self.xyz_btn.configure(state="disabled")
 
-        ctk.CTkButton(out, text="Batch process", command=self.on_batch_process).pack(side="left", padx=25)
+        ctk.CTkButton(out, text="Batch process",
+                       command=self.on_batch_process).pack(side="left", padx=25)
 
-    # ───────────────────── file‑dialog callbacks ─────────────────────
+        ctk.CTkButton(out, text="Reset", command=self.reset_to_initial,
+                       fg_color="red", text_color="white").pack(side="left", padx=10)
+
+    # ————————————————————————— file‑dialog callbacks ——————————————————
     def browse_wl_csv(self):
         path = filedialog.askopenfilename(filetypes=[("CSV files", "*.csv")])
         if path:
@@ -200,10 +218,7 @@ class CreateDemWindow(ctk.CTkToplevel):
         path = filedialog.askdirectory()
         if path:
             self.geojson_dir_var.set(path)
-            # reset caches
-            self.shorelines_gdf = None
-            self.daily_dates = []
-            self.current_day_index = 0
+            self._invalidate_caches()
 
     def browse_out_dir(self):
         path = filedialog.askdirectory()
@@ -223,7 +238,41 @@ class CreateDemWindow(ctk.CTkToplevel):
         if state == "disabled":
             self.xyz_display.configure(text="")
 
-    # ───────────────────── data loading & plotting ───────────────────
+    # ————————————————————————— reset ———————————————————————————————————
+    def _invalidate_caches(self):
+        """Clear all cached data so the next run reloads everything."""
+        self.shorelines_gdf = None
+        self.daily_dates = []
+        self.current_day_index = 0
+        self.df_wl_1min = None
+        self._pca_center = None
+        self._pca_along = None
+        self._pca_cross = None
+
+    def reset_to_initial(self):
+        """Full reset: clear caches, restore plots to placeholders."""
+        self._invalidate_caches()
+
+        # restore plot labels to defaults
+        self.top_left_up_label.configure(
+            image=None,
+            text="Water‑level timeseries + shoreline availability")
+        self.top_left_down_label.configure(
+            image=None,
+            text="Daily water‑level and shoreline availability")
+        self.top_right_label.configure(
+            image=None,
+            text="Daily DEM")
+
+        # clear path displays
+        self.out_dir_display_label.configure(text="")
+        self.xyz_display.configure(text="")
+        self.export_xyz_var.set(False)
+        self.xyz_btn.configure(state="disabled")
+
+        print("\n--- Session reset. All caches cleared. ---\n")
+
+    # ————————————————————————— data loading & plotting ————————————————
     def load_data_if_needed(self):
         if self.shorelines_gdf is not None:
             return  # already loaded
@@ -285,9 +334,50 @@ class CreateDemWindow(ctk.CTkToplevel):
         self.shorelines_gdf = combined
         self.daily_dates = sorted(combined["date"].unique())
         self.current_day_index = 0
+
+        # compute PCA directions from the full dataset
+        self._compute_pca_directions()
+
         self.plot_waterlevel_overlay()
 
-    # ---------- plotting helpers ----------
+    # ————————————————— PCA shore orientation ——————————————————————————
+    def _compute_pca_directions(self):
+        """
+        Determine the along‑shore / cross‑shore principal directions
+        from all shoreline vertices using PCA.  Computed once per dataset.
+        """
+        all_xy = []
+        for _, row in self.shorelines_gdf.iterrows():
+            geom = row.geometry
+            if geom is None:
+                continue
+            if geom.geom_type == "LineString":
+                all_xy.extend(geom.coords)
+            elif geom.geom_type == "MultiLineString":
+                for part in geom.geoms:
+                    all_xy.extend(part.coords)
+        if len(all_xy) < 3:
+            print("Warning: too few shoreline points for PCA, "
+                  "falling back to X = cross‑shore, Y = along‑shore.")
+            self._pca_center = np.array([0.0, 0.0])
+            self._pca_along = np.array([0.0, 1.0])
+            self._pca_cross = np.array([1.0, 0.0])
+            return
+
+        xy = np.array(all_xy)[:, :2]
+        self._pca_center = xy.mean(axis=0)
+
+        cov = np.cov(xy.T)
+        eigvals, eigvecs = np.linalg.eig(cov)
+        idx_sort = np.argsort(eigvals)[::-1]
+        # along‑shore = direction of largest variance
+        self._pca_along = eigvecs[:, idx_sort[0]]
+        # cross‑shore = perpendicular
+        self._pca_cross = eigvecs[:, idx_sort[1]]
+        print(f"PCA along‑shore direction: {self._pca_along}")
+        print(f"PCA cross‑shore direction: {self._pca_cross}")
+
+    # ————————————————— plotting helpers ———————————————————————————————
     def update_figure_in_label(self, label: ctk.CTkLabel, fig):
         import io
         buf = io.BytesIO()
@@ -326,7 +416,7 @@ class CreateDemWindow(ctk.CTkToplevel):
                    [wl["wl"].asof(t) for t in gdf_day["time"]],
                    c="m", s=15, label="Shorelines")
         idx = self.daily_dates.index(date_val)
-        ax.set_title(f"Day {idx+1} of {len(self.daily_dates)} – {date_val}")
+        ax.set_title(f"Day {idx+1} of {len(self.daily_dates)} — {date_val}")
         ax.set_xlabel("Hour"); ax.set_ylabel("WL (m)")
         ax.legend(); ax.xaxis.set_major_formatter(mdates.DateFormatter("%H"))
         ax.xaxis.set_major_locator(mdates.HourLocator(interval=1))
@@ -339,12 +429,12 @@ class CreateDemWindow(ctk.CTkToplevel):
             return
         fig, ax = plt.subplots(figsize=(6, 8))
         im = ax.imshow(grid_z, cmap="viridis", aspect="auto")
-        fig.colorbar(im, ax=ax, label="WL (m)")
+        fig.colorbar(im, ax=ax, label="Elevation (m)")
         ax.set_title("Created DEM"); fig.tight_layout()
         self.update_figure_in_label(self.top_right_label, fig)
         plt.close(fig)
 
-    # ─────────────────── densification helper ──────────────────
+    # ————————————————————— densification helper ———————————————————————
     def densify_geometry(self, geom, spacing: float):
         """Return equally spaced coordinates along a geometry."""
         coords = []
@@ -366,7 +456,135 @@ class CreateDemWindow(ctk.CTkToplevel):
             coords.extend(_densify_line(LineString(geom.exterior.coords)))
         return coords
 
-    # ───────────────────── DEM generation ────────────────────────────
+    # ————————————————————— transect interpolation —————————————————————
+    def _interpolate_transects(self, dense_shorelines, grid_x, grid_y,
+                               grid_x_vals, grid_y_vals, res):
+        """
+        Cross‑shore transect interpolation aligned to PCA directions.
+
+        For each along‑shore position, a perpendicular transect is cast
+        through the shoreline contours.  Elevation is interpolated
+        linearly between the contour crossings along each transect,
+        producing a physically meaningful monotonic profile.
+
+        Parameters
+        ----------
+        dense_shorelines : list[dict]
+            Each entry has keys 'wl' (float) and 'coords' (np.ndarray Nx2).
+        grid_x, grid_y : np.ndarray
+            Meshgrid arrays for the output DEM.
+        grid_x_vals, grid_y_vals : np.ndarray
+            1‑D arrays of the grid coordinates.
+        res : float
+            Grid resolution in metres.
+
+        Returns
+        -------
+        dem : np.ndarray
+            Interpolated DEM on the output grid (NaN outside data).
+        """
+        center = self._pca_center
+        along_dir = self._pca_along
+        cross_dir = self._pca_cross
+
+        # project all dense shoreline coordinates into rotated frame
+        all_along = []
+        for sl in dense_shorelines:
+            proj = (sl["coords"] - center) @ along_dir
+            all_along.append(proj)
+        all_along_flat = np.concatenate(all_along)
+        a_min, a_max = all_along_flat.min(), all_along_flat.max()
+
+        # step along‑shore at the grid resolution
+        along_vals = np.arange(a_min, a_max + res, res)
+
+        # pre‑project each shoreline into along/cross coords
+        sl_projections = []
+        for sl in dense_shorelines:
+            diff = sl["coords"] - center
+            sl_along = diff @ along_dir
+            sl_cross = diff @ cross_dir
+            sl_projections.append((sl_along, sl_cross, sl["wl"]))
+
+        # determine cross‑shore extent
+        all_cross = np.concatenate([p[1] for p in sl_projections])
+        c_min, c_max = all_cross.min() - 2, all_cross.max() + 2
+        cross_vals = np.arange(c_min, c_max + res, res)
+
+        dem_rotated = np.full((len(along_vals), len(cross_vals)), np.nan)
+
+        for ia, a_target in enumerate(along_vals):
+            # find where each shoreline crosses this along‑shore position
+            xz_pairs = []
+            for sl_along, sl_cross, wl in sl_projections:
+                for k in range(len(sl_along) - 1):
+                    a0, a1 = sl_along[k], sl_along[k + 1]
+                    if (a0 <= a_target <= a1) or (a1 <= a_target <= a0):
+                        denom = a1 - a0
+                        if abs(denom) < 1e-10:
+                            c_interp = (sl_cross[k] + sl_cross[k + 1]) / 2
+                        else:
+                            t = (a_target - a0) / denom
+                            c_interp = sl_cross[k] + t * (sl_cross[k + 1] - sl_cross[k])
+                        xz_pairs.append((c_interp, wl))
+
+            if len(xz_pairs) < 2:
+                continue
+
+            xz_pairs.sort(key=lambda p: p[0])
+            cs = np.array([p[0] for p in xz_pairs])
+            zs = np.array([p[1] for p in xz_pairs])
+
+            # remove exact duplicates at the same cross‑shore position
+            _, uidx = np.unique(cs, return_index=True)
+            cs, zs = cs[uidx], zs[uidx]
+            if len(cs) < 2:
+                continue
+
+            f = interp1d(cs, zs, kind="linear",
+                         bounds_error=False, fill_value=np.nan)
+            dem_rotated[ia, :] = f(cross_vals)
+
+        # map rotated DEM back to geographic grid
+        # pre‑compute grid projections
+        grid_diff_x = grid_x - center[0]
+        grid_diff_y = grid_y - center[1]
+        grid_a = grid_diff_x * along_dir[0] + grid_diff_y * along_dir[1]
+        grid_c = grid_diff_x * cross_dir[0] + grid_diff_y * cross_dir[1]
+
+        # nearest‑index lookup into the rotated grid
+        ia_idx = np.round((grid_a - along_vals[0]) / res).astype(int)
+        ic_idx = np.round((grid_c - cross_vals[0]) / res).astype(int)
+
+        valid = ((ia_idx >= 0) & (ia_idx < len(along_vals)) &
+                 (ic_idx >= 0) & (ic_idx < len(cross_vals)))
+
+        dem = np.full(grid_x.shape, np.nan)
+        dem[valid] = dem_rotated[ia_idx[valid], ic_idx[valid]]
+
+        return dem
+
+    def _smooth_dem(self, dem, sigma):
+        """
+        Gaussian smooth the DEM while respecting NaN gaps.
+
+        Uses a normalised‑convolution approach so that NaN cells
+        do not bleed into valid data.
+        """
+        if sigma <= 0:
+            return dem
+
+        valid_mask = ~np.isnan(dem)
+        dem_filled = np.where(valid_mask, dem, 0.0)
+        smoothed = gaussian_filter(dem_filled, sigma=sigma)
+        weight = gaussian_filter(valid_mask.astype(float), sigma=sigma)
+        weight[weight < 0.05] = np.nan
+        result = smoothed / weight
+        # keep original NaN footprint
+        result[~valid_mask & np.isnan(dem)] = np.nan
+        return result
+
+    # ————————————————————— DEM generation —————————————————————————————
     def create_dem_for_day(self, date_val):
         out_dir = self.out_dir_var.get().strip()
         if not out_dir:
@@ -376,8 +594,7 @@ class CreateDemWindow(ctk.CTkToplevel):
         gdf_day = self.shorelines_gdf[self.shorelines_gdf["date"] == date_val].copy()
         gdf_day["z"] = gdf_day["time"].apply(lambda t: self.df_wl_1min["wl"].asof(t))
 
-        # --- gather XYZ from densified shorelines ---
-        xyz = []
+        # --- gather densified shoreline data ---
         try:
             spacing = float(self.spacing_var.get())
             if spacing <= 0:
@@ -386,75 +603,78 @@ class CreateDemWindow(ctk.CTkToplevel):
             spacing = float(self.resolution_var.get() or 1)
             print(f"Invalid spacing, using {spacing} m.")
 
+        dense_shorelines = []
+        xyz_all = []
         for _, row in gdf_day.iterrows():
             geom = row.geometry
             zval = row.z
             if pd.isna(zval) or geom is None:
                 continue
-            for x, y in self.densify_geometry(geom, spacing):
-                xyz.append((x, y, zval))
+            pts = self.densify_geometry(geom, spacing)
+            if not pts:
+                continue
+            coords = np.array(pts)[:, :2]
+            dense_shorelines.append({"wl": zval, "coords": coords})
+            for x, y in coords:
+                xyz_all.append((x, y, zval))
 
-        if not xyz:
+        if not xyz_all:
             print(f"No valid shoreline points for {date_val}")
             return None
 
-        # DEM interpolation set‑up
+        # DEM grid set‑up
         try:
             res = float(self.resolution_var.get())
         except Exception:
             res = 1.0
-        method = self.interp_var.get().strip().lower()
-        if method not in ("linear", "cubic"):
-            method = "linear"
 
-        xyz_df = pd.DataFrame(xyz, columns=["x", "y", "z"])
-        x_min, x_max = xyz_df["x"].min(), xyz_df["x"].max()
-        y_min, y_max = xyz_df["y"].min(), xyz_df["y"].max()
+        try:
+            sigma = float(self.sigma_var.get())
+        except Exception:
+            sigma = 1.5
+
+        xyz_arr = np.array(xyz_all)
+        x_min, x_max = xyz_arr[:, 0].min(), xyz_arr[:, 0].max()
+        y_min, y_max = xyz_arr[:, 1].min(), xyz_arr[:, 1].max()
         grid_x_vals = np.arange(x_min, x_max + res, res)
         grid_y_vals = np.arange(y_max, y_min - res, -res)
         if len(grid_x_vals) < 2 or len(grid_y_vals) < 2:
             print(f"Skipping day {date_val}: bbox too small.")
             return None
         grid_x, grid_y = np.meshgrid(grid_x_vals, grid_y_vals)
-        grid_z = griddata(xyz_df[["x", "y"]].values, xyz_df["z"].values,
-                          (grid_x, grid_y), method=method)
+
+        # --- transect interpolation ---
+        grid_z = self._interpolate_transects(
+            dense_shorelines, grid_x, grid_y, grid_x_vals, grid_y_vals, res)
 
         if grid_z is None or np.all(np.isnan(grid_z)):
             print(f"Interpolation failed for {date_val}")
             return None
 
+        # --- along‑shore smoothing ---
+        grid_z = self._smooth_dem(grid_z, sigma)
+
+        # --- mask to convex hull of data points ---
+        if len(xyz_all) >= 3:
+            try:
+                hull = ConvexHull(xyz_arr[:, :2])
+                hull_path = MPath(xyz_arr[hull.vertices, :2])
+                grid_pts = np.column_stack([grid_x.ravel(), grid_y.ravel()])
+                inside = hull_path.contains_points(grid_pts).reshape(grid_x.shape)
+                grid_z = np.where(inside, grid_z, np.nan)
+            except Exception:
+                pass  # degenerate hull, skip masking
+
         transform = from_origin(x_min, y_max, res, res)
 
-        # --- concave mask from densified coords ---
-        try:
-            import alphashape
-        except ImportError:
-            messagebox.showerror("Error", "Install alphashape: pip install alphashape")
-            return None
-
-        all_points = [(x, y) for x, y, _ in xyz]  # densified already
-        if len(all_points) < 3:
-            shoreline_poly = unary_union(gdf_day.geometry).convex_hull
-        else:
-            alpha_val = 0.02
-            shoreline_poly = alphashape.alphashape(all_points, alpha_val)
-            if shoreline_poly.geom_type != "Polygon":
-                shoreline_poly = shoreline_poly.convex_hull
-
-        mask = features.geometry_mask(
-            [shoreline_poly.__geo_interface__],
-            out_shape=grid_z.shape,
-            transform=transform,
-            invert=True)
-
-        dem_masked = np.where(mask, grid_z, np.nan)
+        dem_masked = grid_z
 
         # save GeoTIFF
-        out_path = Path(out_dir) / f"DEM_{date_val}_{method}.tif"
+        out_path = Path(out_dir) / f"DEM_{date_val}_transect.tif"
         with rasterio.open(
             out_path, "w", driver="GTiff",
             height=dem_masked.shape[0], width=dem_masked.shape[1],
-            count=1, dtype=dem_masked.dtype,
+            count=1, dtype="float64",
             crs=self.shorelines_gdf.crs,
             transform=transform) as dst:
             dst.write(dem_masked, 1)
@@ -463,12 +683,13 @@ class CreateDemWindow(ctk.CTkToplevel):
         if self.export_xyz_var.get():
             folder = self.xyz_folder_var.get().strip()
             if folder:
+                xyz_df = pd.DataFrame(xyz_all, columns=["x", "y", "z"])
                 csv_path = Path(folder) / f"shoreline_xyz_{date_val}.csv"
                 xyz_df.to_csv(csv_path, index=False)
                 print(f"Exported XYZ → {csv_path}")
         return dem_masked
 
-    # ───────────────────── UI actions ───────────────────────────────
+    # ————————————————————— UI actions —————————————————————————————————
     def on_generate_next_dem(self):
         try:
             self.load_data_if_needed()
@@ -524,7 +745,7 @@ class CreateDemWindow(ctk.CTkToplevel):
         self.top_right_frame.pack(side="left", fill="both", expand=True, padx=5, pady=5)
 
 
-# ────────────────────────── entry point ───────────────────────────
+# —————————————————————————————— entry point ———————————————————————————
 def main():
     root = ctk.CTk()
     root.withdraw()

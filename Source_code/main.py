@@ -3,14 +3,20 @@ import os
 import customtkinter as ctk
 from PIL import Image
 
-# Import your refactored submodule classes:
 from pixel_to_gcp import PixelToGCPWindow
-from hsv_mask import HSVMaskTool
+from feature_identifier import FeatureIdentifier
 from dem_generator import CreateDemWindow
 from georef import GeoReferenceModule
 from homography import CreateHomographyMatrixWindow
 from raw_timestacker import TimestackTool
 from wave_runup import WaveRunUpCalculator
+
+from fov_generator import FOVGeneratorWindow
+from lens_correction import LensCorrectionWindow
+from harmonise_images import HarmoniseImagesWindow
+
+from exploration import TimeSeriesExplorerWindow
+from profile_tool import ProfileHovmullerWindow
 
 # 1) Resource helper for PyInstaller or direct script
 def resource_path(relative_path: str) -> str:
@@ -38,7 +44,7 @@ def show_splash(duration_ms=1000):
         ctk_img = ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=(400, 280))
         ctk.CTkLabel(splash, image=ctk_img, text="").pack()
     except Exception:
-        ctk.CTkLabel(splash, text="Loading...", font=("Arial", 18, "bold")).pack(expand=True)
+        ctk.CTkLabel(splash, text="Loading...", font=("Serif", 18, "bold")).pack(expand=True)
 
     splash.after(duration_ms, splash.destroy)
     splash.mainloop()
@@ -49,17 +55,28 @@ ctk.set_default_color_theme("green")
 
 # 4) Launcher window
 def launcher_window():
+    # --- Pre-prep tools ---
+    def open_fov():
+        FOVGeneratorWindow(master=dialog)
+
+    def open_lens():
+        LensCorrectionWindow(master=dialog)
+
+    def open_harmonise():
+        HarmoniseImagesWindow(master=dialog)
+
+    # --- Georeferencing ---
     def open_pixel_to_gcp():
         PixelToGCPWindow(master=dialog)
 
-    def open_hsv_individual():
-        HSVMaskTool(master=dialog, mode="individual")
+    def open_feature_individual():
+        FeatureIdentifier(master=dialog, mode="individual")
 
-    def open_hsv_ml():
-        HSVMaskTool(master=dialog, mode="ml")
+    def open_feature_ml():
+        FeatureIdentifier(master=dialog, mode="ml")
 
-    def open_hsv_batch():
-        HSVMaskTool(master=dialog, mode="batch")
+    def open_feature_batch():
+        FeatureIdentifier(master=dialog, mode="batch")
 
     def open_dem():
         CreateDemWindow(master=dialog)
@@ -76,13 +93,20 @@ def launcher_window():
     def open_wave_run():
         WaveRunUpCalculator(master=dialog)
 
+    # --- Data exploration ---
+    def open_timeseries():
+        TimeSeriesExplorerWindow(master=dialog)
+
+    def open_profile():
+        ProfileHovmullerWindow(master=dialog)
+
     def on_close():
         dialog.destroy()
         sys.exit(0)
 
     dialog = ctk.CTk()
     dialog.title("GeoCamPal")
-    dialog.geometry("600x600")
+    dialog.geometry("600x700")
     dialog.resizable(False, False)
     dialog.protocol("WM_DELETE_WINDOW", on_close)
     dialog.iconbitmap(resource_path("launch_logo.ico"))
@@ -98,43 +122,62 @@ def launcher_window():
     except Exception:
         pass
 
-    ctk.CTkLabel(frame, text="Select a tool", font=("Arial", 18, "bold")) \
+    ctk.CTkLabel(frame, text="Select a tool", font=("Serif", 18, "bold")) \
         .pack(pady=(0,15))
 
-    # (C) Georeferencing
-    ctk.CTkLabel(frame, text="Georeferencing", font=("Arial", 14, "bold")) \
+    # (A) Pre-prep Tools
+    ctk.CTkLabel(frame, text="Pre-prep Tools", font=("Serif", 14, "bold")) \
         .pack(anchor="w")
+    prep_frame = ctk.CTkFrame(frame, fg_color="transparent")
+    prep_frame.pack(fill="x", pady=5)
+    ctk.CTkButton(prep_frame, text="FOV Generator",    command=open_fov).pack(side="left", padx=5)
+    ctk.CTkButton(prep_frame, text="Lens Correction",  command=open_lens).pack(side="left", padx=5)
+    ctk.CTkButton(prep_frame, text="Harmonise Images", command=open_harmonise).pack(side="left", padx=5)
+
+    # (B) Georeferencing
+    ctk.CTkLabel(frame, text="Georeferencing", font=("Serif", 14, "bold")) \
+        .pack(anchor="w", pady=(10,0))
     geo_frame = ctk.CTkFrame(frame, fg_color="transparent")
     geo_frame.pack(fill="x", pady=5)
     ctk.CTkButton(geo_frame, text="Pixel to GCP", command=open_pixel_to_gcp).pack(side="left", padx=5)
     ctk.CTkButton(geo_frame, text="Homography", command=open_homography).pack(side="left", padx=5)
     ctk.CTkButton(geo_frame, text="Georef Images", command=open_georef).pack(side="left", padx=5)
 
-    # (D) HSV Tool
-    ctk.CTkLabel(frame, text="Feature Identifier tool", font=("Arial", 14, "bold")) \
+    # (C) Feature Identifier Tool
+    ctk.CTkLabel(frame, text="Feature Identifier Tool", font=("Serif", 14, "bold")) \
         .pack(anchor="w", pady=(10,0))
-    hsv_frame = ctk.CTkFrame(frame, fg_color="transparent")
-    hsv_frame.pack(fill="x", pady=5)
-    # Renamed buttons (minimal change, modes unchanged)
-    ctk.CTkButton(hsv_frame, text="Single Image",       command=open_hsv_individual).pack(side="left", padx=5)
-    ctk.CTkButton(hsv_frame, text="Folder Processing",  command=open_hsv_ml).pack(side="left", padx=5)
-    ctk.CTkButton(hsv_frame, text="Batch Process",      command=open_hsv_batch).pack(side="left", padx=5)
+    fi_frame = ctk.CTkFrame(frame, fg_color="transparent")
+    fi_frame.pack(fill="x", pady=5)
+    ctk.CTkButton(fi_frame, text="Single Image",       command=open_feature_individual).pack(side="left", padx=5)
+    ctk.CTkButton(fi_frame, text="Folder Processing",  command=open_feature_ml).pack(side="left", padx=5)
+    ctk.CTkButton(fi_frame, text="Batch Process",      command=open_feature_batch).pack(side="left", padx=5)
 
-    # (E) DEM Generator
-    ctk.CTkLabel(frame, text="DEM Generator", font=("Arial", 14, "bold")) \
+    # (F) Data Exploration
+    ctk.CTkLabel(frame, text="Data Exploration", font=("Serif", 14, "bold")) \
+        .pack(anchor="w", pady=(10,0))
+    exp_frame = ctk.CTkFrame(frame, fg_color="transparent")
+    exp_frame.pack(fill="x", pady=5)
+    ctk.CTkButton(exp_frame, text="Time Series Analysis", command=open_timeseries).pack(side="left", padx=5)
+
+
+    # (D) DEM Generator
+    ctk.CTkLabel(frame, text="DEM Generator", font=("Serif", 14, "bold")) \
         .pack(anchor="w", pady=(10,0))
     dem_frame = ctk.CTkFrame(frame, fg_color="transparent")
     dem_frame.pack(fill="x", pady=5)
     ctk.CTkButton(dem_frame, text="Create DEM", command=open_dem) \
         .pack(side="left", padx=5)
 
-    # (F) Time-stacking
-    ctk.CTkLabel(frame, text="Time-stacking", font=("Arial", 14, "bold")) \
+    # (E) Time-stacking
+    ctk.CTkLabel(frame, text="Time-stacking", font=("Serif", 14, "bold")) \
         .pack(anchor="w", pady=(10,0))
     ts_frame = ctk.CTkFrame(frame, fg_color="transparent")
     ts_frame.pack(fill="x", pady=5)
+    ctk.CTkButton(ts_frame, text="Profile & Hovmöller",  command=open_profile).pack(side="left", padx=5)
     ctk.CTkButton(ts_frame, text="Raw Timestack Image", command=open_timestack).pack(side="left", padx=5)
     ctk.CTkButton(ts_frame, text="Wave Run Up",          command=open_wave_run).pack(side="left", padx=5)
+
+
 
     # ——— Footer ———
     footer_text = (

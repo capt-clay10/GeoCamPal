@@ -159,7 +159,7 @@ def sweep_and_validate_batch(output_folder: str,
         if not is_valid:
             corrupted_files.append((filepath, reason))
     
-    return corrupted_files  # â‰¤ 4 workers
+    return corrupted_files  # ≤ 4 workers
 
 
 # %% main window class 
@@ -183,8 +183,8 @@ class GeoReferenceModule(ctk.CTkToplevel):
         self.output_folder = ""
         self.batch_main_folder = ""
         self.scale_factor = 4
-        self.user_epsg: int | None = None    # â† NEW
-        self.executor: concurrent.futures.ThreadPoolExecutor | None = None  # â† NEW
+        self.user_epsg: int | None = None
+        self.executor: concurrent.futures.ThreadPoolExecutor | None = None
         self._gdal_write_lock = threading.Lock()  # Lock for GDAL write operations
 
         # ---------------- UI -------------------
@@ -201,7 +201,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
         print("Here you may see console outputs\n--------------------------------\n")
 
         # graceful close
-        self.protocol("WM_DELETE_WINDOW", self._on_close)      # â† NEW
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # ---------------- graceful shutdown  ----------------
     def _on_close(self):
@@ -209,11 +209,11 @@ class GeoReferenceModule(ctk.CTkToplevel):
             self.executor.shutdown(wait=False, cancel_futures=True)
         self.destroy()
 
-    # ------------------------------------------------------------ ETA string ------------------------------------------------------------------------------------------------------------â”€
+    # ------------------------------------------------------------ ETA string ------------------------------------------------------------------------------------------------------------—
     @staticmethod
     def _eta_string(start_ts: float, frac_done: float) -> str:
         if frac_done <= 0:
-            return "ETA: â€“"
+            return "ETA: —"
         elapsed = time.time() - start_ts
         remaining = elapsed * (1 / frac_done - 1)
         if remaining >= 3600:
@@ -224,8 +224,8 @@ class GeoReferenceModule(ctk.CTkToplevel):
 
     # ---------------------------------------------------------------
     def initialize_components(self):
-        # grid rows: 0â€‘top images | 1â€‘file | 2â€‘AOI | 3â€‘crop | 4â€‘final(single)
-        #            5â€‘batch(mainâ€‘folder) | 6â€‘console
+        # grid rows: 0–top images | 1–file | 2–AOI | 3–crop | 4–final(single)
+        #            5–batch(main–folder) | 6–console
         self.grid_columnconfigure(0, weight=1)
         for r in range(5):
             self.grid_rowconfigure(r, weight=1)
@@ -313,7 +313,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
         col += 1
         ctk.CTkButton(self.crop_panel, text="Show Crop", command=self.show_crop).grid(row=0, column=col, padx=5)
 
-        # ---- 4  SINGLEâ€‘FOLDER FINAL  ------
+        # ---- 4  SINGLE–FOLDER FINAL  ------
         self.final_panel = ctk.CTkFrame(self)
         self.final_panel.grid(row=4, column=0, sticky="nsew", padx=5, pady=5)
 
@@ -331,13 +331,13 @@ class GeoReferenceModule(ctk.CTkToplevel):
         ctk.CTkButton(self.final_panel, text="Final Georeferencing",
                       command=self.process_all_images).pack(side="left", padx=5)
 
-        self.progress = ctk.CTkProgressBar(self.final_panel, width=220)  # â† NEW (was ttk)
+        self.progress = ctk.CTkProgressBar(self.final_panel, width=220)
         self.progress.set(0)
         self.progress.pack(side="left", padx=8)
-        self.progress_eta = ctk.CTkLabel(self.final_panel, text="ETA: â€“")  # â† NEW
+        self.progress_eta = ctk.CTkLabel(self.final_panel, text="ETA: —")
         self.progress_eta.pack(side="left", padx=5)
 
-        # ---- 5  BATCHâ€‘MAINâ€‘FOLDER PANEL (single bar + ETA) -------
+        # ---- 5  BATCH–MAIN–FOLDER PANEL (single bar + ETA) -------
         self.batch_panel = ctk.CTkFrame(self)
         self.batch_panel.grid(row=5, column=0, sticky="nsew", padx=5, pady=5)
 
@@ -348,10 +348,10 @@ class GeoReferenceModule(ctk.CTkToplevel):
         ctk.CTkButton(self.batch_panel, text="Start Batch Process",
                       command=self.start_batch_process).pack(side="left", padx=5)
 
-        self.batch_progress = ctk.CTkProgressBar(self.batch_panel, width=220)  # â† NEW (single bar)
+        self.batch_progress = ctk.CTkProgressBar(self.batch_panel, width=220)
         self.batch_progress.set(0)
         self.batch_progress.pack(side="left", padx=8)
-        self.batch_eta_label = ctk.CTkLabel(self.batch_panel, text="ETA: â€“")  # â† NEW
+        self.batch_eta_label = ctk.CTkLabel(self.batch_panel, text="ETA: —")
         self.batch_eta_label.pack(side="left", padx=5)
         
         # ---- RESET BUTTON (red, bottom right) ----
@@ -536,8 +536,31 @@ class GeoReferenceModule(ctk.CTkToplevel):
             scale = float(self.scale_entry.get())
         except:
             scale = self.scale_factor
+
+        # --- Scale factor diagnostic ---
+        geo_width  = max_coords[0] - min_coords[0]
+        geo_height = max_coords[1] - min_coords[1]
+        if geo_width > 0 and geo_height > 0:
+            native_scale = max(w / geo_width, h / geo_height)
+            print(f"[Info] Recommended scale factor ≈ {native_scale:.1f} (preserves full input resolution)")
+            if scale >= native_scale:
+                print(f"[Info] Current scale {scale:.1f} — full detail preserved ✓")
+            elif scale >= native_scale * 0.5:
+                detail_pct = (scale / native_scale) * 100
+                print(f"[Info] Current scale {scale:.1f} — ~{detail_pct:.0f}% of native detail")
+            else:
+                detail_pct = (scale / native_scale) * 100
+                print(f"[Warning] Current scale {scale:.1f} is well below native ({native_scale:.1f}). "
+                      f"Output retains ~{detail_pct:.0f}% of input detail.")
+
         output_width = int((max_coords[0] - min_coords[0]) * scale)
         output_height = int((max_coords[1] - min_coords[1]) * scale)
+
+        # --- Dimension validation ---
+        if output_width <= 0 or output_height <= 0:
+            raise ValueError(f"Invalid output dimensions {output_width}x{output_height}. "
+                             f"Check scale factor and homography matrix.")
+
         translation = np.array([
             [1, 0, -min_coords[0] * scale],
             [0, 1, -min_coords[1] * scale],
@@ -587,8 +610,31 @@ class GeoReferenceModule(ctk.CTkToplevel):
             scale = float(self.scale_entry.get())
         except:
             scale = self.scale_factor
+
+        # --- Scale factor diagnostic ---
+        geo_width  = max_x - min_x
+        geo_height = max_y - min_y
+        if geo_width > 0 and geo_height > 0:
+            native_scale = max(w / geo_width, h / geo_height)
+            print(f"[Info] Recommended scale factor ≈ {native_scale:.1f} (preserves full input resolution)")
+            if scale >= native_scale:
+                print(f"[Info] Current scale {scale:.1f} — full detail preserved ✓")
+            elif scale >= native_scale * 0.5:
+                detail_pct = (scale / native_scale) * 100
+                print(f"[Info] Current scale {scale:.1f} — ~{detail_pct:.0f}% of native detail")
+            else:
+                detail_pct = (scale / native_scale) * 100
+                print(f"[Warning] Current scale {scale:.1f} is well below native ({native_scale:.1f}). "
+                      f"Output retains ~{detail_pct:.0f}% of input detail.")
+
         output_width = int((max_x - min_x) * scale)
         output_height = int((max_y - min_y) * scale)
+
+        # --- Dimension validation ---
+        if output_width <= 0 or output_height <= 0:
+            raise ValueError(f"Invalid output dimensions {output_width}x{output_height}. "
+                             f"Check crop values and scale factor.")
+
         translation = np.array([
             [1, 0, -min_x * scale],
             [0, 1, -min_y * scale],
@@ -651,7 +697,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
             self.output_folder = folder
             self.output_folder_label.configure(text=f"Output Folder: {folder}")
 
-    # ------------------------------------------------------------------------ georeference_and_save_image ------------------------------------------------------------------------------------------------â”€
+    # ------------------------------------------------------------------------ georeference_and_save_image ------------------------------------------------------------------------------------------------—
     def georeference_and_save_image(self, img_path: str, output_path: str) -> bool:
         """Same as before but uses self.user_epsg (validated once)."""
         img = cv2.imread(img_path)
@@ -686,6 +732,14 @@ class GeoReferenceModule(ctk.CTkToplevel):
 
         output_width  = int((max_x - min_x) * scale)
         output_height = int((max_y - min_y) * scale)
+
+        # --- Dimension validation (prevents OpenCV crash) ---
+        if output_width <= 0 or output_height <= 0:
+            print(f"[Skip] Invalid output dimensions {output_width}x{output_height} for {img_path}")
+            return False
+        if output_width * output_height > 400_000_000:  # ~400 MP sanity cap
+            print(f"[Skip] Output too large ({output_width}x{output_height}) for {img_path}")
+            return False
 
         translation = np.array([[1, 0, -min_x * scale],
                                 [0, 1, -min_y * scale],
@@ -728,9 +782,15 @@ class GeoReferenceModule(ctk.CTkToplevel):
                 print(f"GDAL failed to create file: {output_path}")
                 return False
             
-            dst_ds.SetGCPs(gcps, srs.ExportToWkt())
+            # Use GeoTransform if derivable (preferred by GIS software),
+            # otherwise fall back to GCPs. Never set both — GDAL discards
+            # GCPs when a GeoTransform is present.
             gt = gdal.GCPsToGeoTransform(gcps)
-            if gt: dst_ds.SetGeoTransform(gt)
+            if gt:
+                dst_ds.SetGeoTransform(gt)
+                dst_ds.SetProjection(srs.ExportToWkt())
+            else:
+                dst_ds.SetGCPs(gcps, srs.ExportToWkt())
 
             rgb = cv2.cvtColor(warped, cv2.COLOR_BGR2RGB)
             for i in range(3):
@@ -766,18 +826,18 @@ class GeoReferenceModule(ctk.CTkToplevel):
                     img_to_input[out] = path
                 except Exception as e:
                     print(f"Error processing {path}: {e}")
-                self.progress.set(idx/total)
-                self.progress_eta.configure(text=self._eta_string(start_ts, idx/total))
-                self.update_idletasks()
+                frac = idx / total
+                self.after(0, lambda f=frac: self.progress.set(f))
+                self.after(0, lambda t=self._eta_string(start_ts, frac): self.progress_eta.configure(text=t))
             
             # ========== VALIDATION AND REPROCESSING ==========
             print("\n[Validation] Starting validation sweep...")
-            self.progress_eta.configure(text="Validating...")
-            self.update_idletasks()
+            self.after(0, lambda: self.progress_eta.configure(text="Validating..."))
             
             # Track retry count per file
             file_retry_counts = {}  # output_path -> retry_count
             permanently_failed = []  # Files that failed after MAX_RETRIES_PER_FILE attempts
+            permanently_failed_paths = set()  # Fast lookup set
             
             validation_round = 0
             max_validation_rounds = 20  # Safety limit
@@ -788,7 +848,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
                 
                 # Filter out permanently failed files
                 corrupted_files = [(p, r) for p, r in corrupted_files 
-                                   if p not in [f[0] for f in permanently_failed]]
+                                   if p not in permanently_failed_paths]
                 
                 if not corrupted_files:
                     print("[Validation] All files validated successfully!")
@@ -801,8 +861,9 @@ class GeoReferenceModule(ctk.CTkToplevel):
                     current_retries = file_retry_counts.get(corrupted_path, 0)
                     
                     if current_retries >= MAX_RETRIES_PER_FILE:
-                        if corrupted_path not in [f[0] for f in permanently_failed]:
+                        if corrupted_path not in permanently_failed_paths:
                             permanently_failed.append((corrupted_path, reason))
+                            permanently_failed_paths.add(corrupted_path)
                             print(f"  [GAVE UP] {os.path.basename(corrupted_path)} - "
                                   f"failed after {MAX_RETRIES_PER_FILE} attempts")
                     else:
@@ -829,8 +890,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
                             file_retry_counts[corrupted_path] = file_retry_counts.get(corrupted_path, 0) + 1
                     else:
                         permanently_failed.append((corrupted_path, "Input file not found"))
-                
-                self.update_idletasks()
+                        permanently_failed_paths.add(corrupted_path)
             
             # Final summary
             if permanently_failed:
@@ -844,17 +904,17 @@ class GeoReferenceModule(ctk.CTkToplevel):
                 failed_names = "\n".join([os.path.basename(p) for p, _ in permanently_failed[:10]])
                 if len(permanently_failed) > 10:
                     failed_names += f"\n... and {len(permanently_failed) - 10} more"
-                messagebox.showwarning(
+                self.after(0, lambda: messagebox.showwarning(
                     "Some Files Failed", 
                     f"{len(permanently_failed)} file(s) could not be processed after "
                     f"{MAX_RETRIES_PER_FILE} attempts each:\n\n{failed_names}"
-                )
+                ))
             
             # ========== END VALIDATION ==========
             
-            self.progress_eta.configure(text="Done")
+            self.after(0, lambda: self.progress_eta.configure(text="Done"))
             if not permanently_failed:
-                messagebox.showinfo("Complete", "Processing finished and validated!")
+                self.after(0, lambda: messagebox.showinfo("Complete", "Processing finished and validated!"))
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -887,7 +947,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
         def _batch_thread():
             all_subs = [f.path for f in os.scandir(self.batch_main_folder) if f.is_dir()]
             if not all_subs:
-                messagebox.showerror("Error", "No sub-folders found.")
+                self.after(0, lambda: messagebox.showerror("Error", "No sub-folders found."))
                 return
 
             processed = {d for d in os.listdir(self.output_folder)
@@ -897,12 +957,13 @@ class GeoReferenceModule(ctk.CTkToplevel):
             if (skipped := len(all_subs) - len(todo)):
                 print(f"[Batch] Skipping {skipped} sub-folder(s) already done.\n")
             if not todo:
-                self.batch_progress.set(1.0); self.batch_eta_label.configure(text="Done")
-                messagebox.showinfo("Batch Complete", "All sub-folders already processed.")
+                self.after(0, lambda: self.batch_progress.set(1.0))
+                self.after(0, lambda: self.batch_eta_label.configure(text="Done"))
+                self.after(0, lambda: messagebox.showinfo("Batch Complete", "All sub-folders already processed."))
                 return
 
             total, start_ts = len(todo), time.time()
-            self.batch_progress.set(0)
+            self.after(0, lambda: self.batch_progress.set(0))
             
             # Track input->output mapping for validation/reprocessing
             img_to_input = {}  # output_path -> input_path
@@ -941,14 +1002,14 @@ class GeoReferenceModule(ctk.CTkToplevel):
                         for inp, out in (fut.result() or []):
                             img_to_input[out] = inp
                     frac = idx / total
-                    self.batch_progress.set(frac)
+                    self.after(0, lambda f=frac: self.batch_progress.set(f))
                     if idx:
                         remaining = (total - idx) / (idx / (time.time() - start_ts))
                     else:
                         remaining = 0
                     m, s = divmod(int(remaining), 60)
-                    self.batch_eta_label.configure(text=f"ETA: {m}m {s}s" if m else f"ETA: {s}s")
-                    self.update_idletasks()
+                    eta_text = f"ETA: {m}m {s}s" if m else f"ETA: {s}s"
+                    self.after(0, lambda t=eta_text: self.batch_eta_label.configure(text=t))
             self.executor = None
             
             elapsed = time.time() - start_ts
@@ -957,12 +1018,12 @@ class GeoReferenceModule(ctk.CTkToplevel):
             
             # ========== VALIDATION AND REPROCESSING SWEEP ==========
             print("\n[Validation] Starting post-processing validation sweep...")
-            self.batch_eta_label.configure(text="Validating...")
-            self.update_idletasks()
+            self.after(0, lambda: self.batch_eta_label.configure(text="Validating..."))
             
             # Track retry count per file
             file_retry_counts = {}  # output_path -> retry_count
             permanently_failed = []  # Files that failed after MAX_RETRIES_PER_FILE attempts
+            permanently_failed_paths = set()  # Fast lookup set
             
             validation_round = 0
             max_validation_rounds = 20  # Safety limit to prevent infinite loops
@@ -980,7 +1041,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
                 
                 # Filter out files that have already permanently failed
                 corrupted_files = [(p, r) for p, r in corrupted_files 
-                                   if p not in [f[0] for f in permanently_failed]]
+                                   if p not in permanently_failed_paths]
                 
                 if not corrupted_files:
                     print(f"[Validation] All files validated successfully!")
@@ -996,8 +1057,9 @@ class GeoReferenceModule(ctk.CTkToplevel):
                     
                     if current_retries >= MAX_RETRIES_PER_FILE:
                         # This file has exceeded max retries - mark as permanently failed
-                        if corrupted_path not in [f[0] for f in permanently_failed]:
+                        if corrupted_path not in permanently_failed_paths:
                             permanently_failed.append((corrupted_path, reason))
+                            permanently_failed_paths.add(corrupted_path)
                             print(f"  [GAVE UP] {os.path.basename(corrupted_path)} - "
                                   f"failed after {MAX_RETRIES_PER_FILE} attempts")
                     else:
@@ -1031,9 +1093,9 @@ class GeoReferenceModule(ctk.CTkToplevel):
                     else:
                         print(f"[Reprocess] Cannot find input for {corrupted_path}")
                         permanently_failed.append((corrupted_path, "Input file not found"))
+                        permanently_failed_paths.add(corrupted_path)
                 
                 print(f"[Validation] Reprocessed {reprocessed} file(s)")
-                self.update_idletasks()
             
             # Final summary
             if permanently_failed:
@@ -1052,29 +1114,29 @@ class GeoReferenceModule(ctk.CTkToplevel):
                 failed_names = "\n".join([os.path.basename(p) for p, _ in permanently_failed[:10]])
                 if len(permanently_failed) > 10:
                     failed_names += f"\n... and {len(permanently_failed) - 10} more"
-                messagebox.showwarning(
+                self.after(0, lambda: messagebox.showwarning(
                     "Some Files Failed", 
                     f"{len(permanently_failed)} file(s) could not be processed after "
                     f"{MAX_RETRIES_PER_FILE} attempts each:\n\n{failed_names}\n\n"
                     "Check the console for details."
-                )
+                ))
             
             if validation_round >= max_validation_rounds:
                 print(f"\n[WARNING] Reached maximum validation rounds ({max_validation_rounds}). Stopping.")
             
             # ========== END VALIDATION ==========
           
-            self.batch_progress.set(1.0)
-            self.batch_eta_label.configure(text="Done")
+            self.after(0, lambda: self.batch_progress.set(1.0))
+            self.after(0, lambda: self.batch_eta_label.configure(text="Done"))
             
             if not permanently_failed:
-                messagebox.showinfo("Batch Complete", "All files processed and validated successfully!")
+                self.after(0, lambda: messagebox.showinfo("Batch Complete", "All files processed and validated successfully!"))
             
             print("\nBatch process complete\n")
 
         threading.Thread(target=_batch_thread, daemon=True).start()
 
-    # initialise_components and other helper methods â€¦ keep original code here
+    # initialise_components and other helper methods … keep original code here
     # ---------------------------------------------------------------------
 
 
