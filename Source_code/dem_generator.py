@@ -187,7 +187,7 @@ class CreateDemWindow(ctk.CTkToplevel):
         ctk.CTkEntry(dem, textvariable=self.sigma_var, width=60).pack(side="left", padx=5)
 
         ctk.CTkButton(dem, text="Generate next DEM",
-                       command=self.on_generate_next_dem).pack(side="left", padx=15)
+                       command=self.on_generate_next_dem, fg_color="#0F52BA").pack(side="left", padx=15)
 
         # ————————————— output row —————————————
         out = ctk.CTkFrame(self.bottom_frame)
@@ -203,7 +203,7 @@ class CreateDemWindow(ctk.CTkToplevel):
         self.xyz_btn.configure(state="disabled")
 
         ctk.CTkButton(out, text="Batch process",
-                       command=self.on_batch_process).pack(side="left", padx=25)
+                       command=self.on_batch_process, fg_color="#0F52BA").pack(side="left", padx=25)
 
         ctk.CTkButton(out, text="Reset", command=self.reset_to_initial,
                        fg_color="red", text_color="white").pack(side="left", padx=10)

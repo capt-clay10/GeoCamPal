@@ -552,7 +552,7 @@ class TimestackTool(ctk.CTkToplevel):
             .grid(row=0, column=0, padx=5, pady=5, sticky="w")
         ctk.CTkLabel(op, textvariable=self.output_folder)\
             .grid(row=0, column=1, padx=5, pady=5, sticky="w")
-        ctk.CTkButton(op, text="Create Raw Timestack", command=self.create_timestack)\
+        ctk.CTkButton(op, text="Create Raw Timestack", command=self.create_timestack, fg_color="#0F52BA")\
             .grid(row=0, column=2, padx=5, pady=5)
         self.single_pb = ctk.CTkProgressBar(op)
         self.single_pb.grid(row=0, column=3, padx=5, pady=5)
@@ -567,7 +567,7 @@ class TimestackTool(ctk.CTkToplevel):
             .grid(row=0, column=0, padx=5, pady=5, sticky="w")
         ctk.CTkLabel(bp, textvariable=self.batch_folder)\
             .grid(row=0, column=1, padx=5, pady=5, sticky="w")
-        ctk.CTkButton(bp, text="Batch Process", command=self.batch_process)\
+        ctk.CTkButton(bp, text="Batch Process", command=self.batch_process, fg_color="#0F52BA")\
             .grid(row=0, column=2, padx=5, pady=5)
         self.batch_pb = ctk.CTkProgressBar(bp)
         self.batch_pb.grid(row=0, column=3, padx=5, pady=5)

@@ -360,12 +360,6 @@ class HSVMaskEditingMixin:
         btn_freehand = ctk.CTkButton(mode_frame, text="Freehand", command=self._btn_freehand)
         btn_freehand.pack(side="left", padx=3)
 
-        btn_delete_all = ctk.CTkButton(
-            mode_frame, text="Delete All",
-            command=self.delete_all_vertices, fg_color="red", text_color="white"
-        )
-        btn_delete_all.pack(side="left", padx=3)
-
         # Create new edge / polygon
         btn_create_edge = ctk.CTkButton(
             mode_frame, text="Create New Edge", command=self._btn_create_edge
@@ -378,6 +372,12 @@ class HSVMaskEditingMixin:
 
         self.reset_btn = ctk.CTkButton(mode_frame, text="Reset", command=self.reset_to_initial,fg_color="red", text_color="white")
         self.reset_btn.pack(side="left", padx=3)
+        
+        btn_delete_all = ctk.CTkButton(
+            mode_frame, text="Delete All",
+            command=self.delete_all_vertices, fg_color="red", text_color="white"
+        )
+        btn_delete_all.pack(side="left", padx=3)
 
         # Undo / Reset / Confirm (+ Redo)
         btn_frame = ctk.CTkFrame(self.control_frame)
@@ -392,7 +392,7 @@ class HSVMaskEditingMixin:
 
         self.confirm_button = ctk.CTkButton(
             btn_frame, text="Confirm Feature",
-            command=self.confirm_feature_cuts, fg_color="white", text_color="black"
+            command=self.confirm_feature_cuts, fg_color="#0F52BA", text_color="white"
         )
         self.confirm_button.pack(side="left", padx=5)
 
@@ -401,12 +401,12 @@ class HSVMaskEditingMixin:
         nav_frame.pack(side="top", pady=2)
 
         ctk.CTkButton(nav_frame, text="◀ Prev Polygon", width=120,
-                      command=self._edit_prev_polygon).pack(side="left", padx=3)
+                      command=self._edit_prev_polygon, fg_color="white", text_color='black').pack(side="left", padx=3)
         self._poly_nav_label = ctk.CTkLabel(
             nav_frame, text="", font=("Arial", 10), width=200)
         self._poly_nav_label.pack(side="left", padx=5)
         ctk.CTkButton(nav_frame, text="Next Polygon ▶", width=120,
-                      command=self._edit_next_polygon).pack(side="left", padx=3)
+                      command=self._edit_next_polygon, fg_color="white", text_color='black').pack(side="left", padx=3)
         self._update_poly_nav_label()
 
         # Zoom controls

@@ -117,10 +117,10 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
         self.panel3 = ctk.CTkFrame(self)
         self.panel3.pack(padx=10, pady=10, fill="x")
 
-        self.btn_compute = ctk.CTkButton(self.panel3, text="Compute Matrix", command=self.compute_matrix)
+        self.btn_compute = ctk.CTkButton(self.panel3, text="Compute Matrix", command=self.compute_matrix, fg_color="#0F52BA")
         self.btn_compute.grid(row=0, column=0, padx=5, pady=5)
 
-        self.btn_compute_accuracy = ctk.CTkButton(self.panel3, text="Compute Accuracy", command=self.compute_accuracy)
+        self.btn_compute_accuracy = ctk.CTkButton(self.panel3, text="Compute Accuracy", command=self.compute_accuracy, fg_color="#6693F5")
         self.btn_compute_accuracy.grid(row=0, column=1, padx=5, pady=5)
 
         # -------------------------------  Panel 4 (Advanced)  -------------------------------

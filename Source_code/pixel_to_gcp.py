@@ -195,7 +195,7 @@ class PixelToGCPWindow(ctk.CTkToplevel):
         # Sub-panel for the Start Button
         pnl_start = ctk.CTkFrame(config_panel)
         pnl_start.pack(side="top", fill="x", padx=5, pady=2)
-        ctk.CTkButton(pnl_start, text="Start Process", command=self.start_process).pack(side="left")
+        ctk.CTkButton(pnl_start, text="Start Process", command=self.start_process, fg_color="#0F52BA").pack(side="left")
     
         # BIND keys to the entire window (zoom + next image)
         self.bind("<Return>", self.next_image)

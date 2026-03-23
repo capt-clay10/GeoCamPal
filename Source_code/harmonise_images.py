@@ -404,7 +404,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
         max_col = max(max_col, col)
 
         ctk.CTkButton(row2, text="Run Filter",
-                      command=self._filter_threaded).grid(
+                      command=self._filter_threaded, fg_color="#0F52BA").grid(
             row=1, column=max_col, padx=10, pady=3, rowspan=2, sticky="ns")
 
         ctk.CTkLabel(
@@ -440,7 +440,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
             row=0, column=5, padx=10, pady=3)
 
         ctk.CTkButton(row3, text="Run Harmonise",
-                      command=self._harmonise_threaded).grid(
+                      command=self._harmonise_threaded, fg_color="#0F52BA").grid(
             row=0, column=6, padx=10, pady=3)
 
         ctk.CTkLabel(

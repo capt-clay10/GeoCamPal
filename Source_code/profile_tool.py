@@ -326,7 +326,7 @@ class ProfileHovmullerWindow(ctk.CTkToplevel):
         self.output_label.grid(row=0, column=3, padx=5, pady=5, sticky="w")
 
         ctk.CTkButton(row3, text="Generate Hovmöller",
-                      command=self._generate_threaded).grid(
+                      command=self._generate_threaded, fg_color="#0F52BA").grid(
             row=0, column=4, padx=10, pady=5)
 
         self.progress_bar = ctk.CTkProgressBar(row3, width=180)

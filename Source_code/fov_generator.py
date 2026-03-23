@@ -518,7 +518,7 @@ class FOVGeneratorWindow(ctk.CTkToplevel):
         self.output_label.grid(row=0, column=1, padx=5, pady=5, sticky="w")
 
         ctk.CTkButton(row6, text="Generate FOV Map",
-                      command=self._generate_threaded).grid(row=0, column=2, padx=10, pady=5)
+                      command=self._generate_threaded, fg_color="#0F52BA").grid(row=0, column=2, padx=10, pady=5)
 
         self.btn_reset = ctk.CTkButton(
             row6, text="Reset", command=self._reset,

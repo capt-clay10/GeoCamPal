@@ -151,7 +151,7 @@ class LensCorrectionWindow(ctk.CTkToplevel):
         self.output_label.grid(row=0, column=1, padx=5, pady=5, sticky="w")
 
         ctk.CTkButton(row3, text="Generate Lens Correction File",
-                      command=self._calibrate_threaded).grid(
+                      command=self._calibrate_threaded, fg_color="#0F52BA").grid(
             row=0, column=2, padx=10, pady=5)
 
         self.progress_bar = ctk.CTkProgressBar(row3, width=200)

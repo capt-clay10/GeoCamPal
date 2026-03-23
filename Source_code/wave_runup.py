@@ -339,7 +339,7 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         self.btn_select_out_folder.grid(row=0, column=0, padx=5, pady=5)
         self.out_folder_label = ctk.CTkLabel(self.export_panel, text="No folder selected")
         self.out_folder_label.grid(row=0, column=1, padx=5, pady=5, sticky="w")
-        self.btn_export_runup = ctk.CTkButton(self.export_panel, text="Export Runup", command=self.export_runup)
+        self.btn_export_runup = ctk.CTkButton(self.export_panel, text="Export Runup", command=self.export_runup, fg_color="#0F52BA")
         self.btn_export_runup.grid(row=0, column=2, padx=5, pady=5)
 
         # Batch
@@ -353,7 +353,7 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         self.btn_select_batch_mask.grid(row=0, column=2, padx=5, pady=5)
         self.batch_mask_label = ctk.CTkLabel(self.batch_panel, text="No folder selected")
         self.batch_mask_label.grid(row=0, column=3, padx=5, pady=5, sticky="w")
-        self.btn_batch_process = ctk.CTkButton(self.batch_panel, text="Batch Process", command=self.run_batch_process)
+        self.btn_batch_process = ctk.CTkButton(self.batch_panel, text="Batch Process", command=self.run_batch_process, fg_color="#0F52BA")
         self.btn_batch_process.grid(row=1, column=0, padx=5, pady=5)
         self.batch_progress_bar = ctk.CTkProgressBar(self.batch_panel, width=200)
         self.batch_progress_bar.grid(row=1, column=1, padx=5, pady=5)

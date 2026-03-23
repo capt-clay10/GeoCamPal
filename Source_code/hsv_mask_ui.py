@@ -269,8 +269,7 @@ class HSVMaskUIMixin:
         ctk.CTkButton(aoi_method_row, text="Preview Profile", width=110,
                       command=self._aoi_preview_profile).pack(side="left", padx=5)
         ctk.CTkButton(aoi_method_row, text="Apply AOI", width=90,
-                      command=self._aoi_apply_filter,
-                      fg_color="#1a6b3c").pack(side="left", padx=5)
+                      command=self._aoi_apply_filter, fg_color="#0F52BA").pack(side="left", padx=5)
         ctk.CTkButton(aoi_method_row, text="Clear AOI", width=80,
                       command=self._aoi_clear,
                       fg_color="#8B0000", hover_color="#A52A2A").pack(side="left", padx=3)
@@ -450,7 +449,7 @@ class HSVMaskUIMixin:
         hsv_action_row = ctk.CTkFrame(self.hsv_controls_container)
         hsv_action_row.pack(side="top", fill="x", pady=(2, 5))
         if self.mode != "batch":
-            ctk.CTkButton(hsv_action_row, text="Calculate Mask", command=self.calculate_mask).pack(side="left", padx=5)
+            ctk.CTkButton(hsv_action_row, text="Calculate Mask", command=self.calculate_mask, fg_color="#0F52BA").pack(side="left", padx=5)
         self.hsv_invert_check = ctk.CTkCheckBox(
             hsv_action_row, text="Invert Mask?", variable=self.do_invert_mask
         )
@@ -560,12 +559,12 @@ class HSVMaskUIMixin:
             btn_next.pack(side="left", padx=5)
 
         if self.mode in ("ml", "individual"):
-            btn_boundary = ctk.CTkButton(calc_frame, text="Extract Boundary", command=self.extract_boundary)
+            btn_boundary = ctk.CTkButton(calc_frame, text="Extract Boundary", command=self.extract_boundary, fg_color="#0F52BA")
             btn_boundary.pack(side="left", padx=5)
-            btn_polygon = ctk.CTkButton(calc_frame, text="Extract Polygon", command=self.extract_polygon)
+            btn_polygon = ctk.CTkButton(calc_frame, text="Extract Polygon", command=self.extract_polygon, fg_color="#0F52BA")
             btn_polygon.pack(side="left", padx=5)
             btn_cut_feature = ctk.CTkButton(
-                calc_frame, text="Edit Detected Feature", command=self.cut_detected_feature
+                calc_frame, text="Edit Detected Feature", command=self.cut_detected_feature, fg_color="#0F52BA"
             )
             btn_cut_feature.pack(side="left", padx=5)
 
@@ -637,20 +636,20 @@ class HSVMaskUIMixin:
 
         if self.mode in ("individual", "ml"):
             btn_export_edge = ctk.CTkButton(
-                export_buttons_frame, text="Export feature as training data", command=self.export_training_data
+                export_buttons_frame, text="Export feature as training data", command=self.export_training_data, fg_color="#0F52BA"
             )
             btn_export_edge.pack(side="left", padx=5)
             btn_export_mask = ctk.CTkButton(
-                export_buttons_frame, text="Export mask as training data", command=self.export_mask_as_training_data
+                export_buttons_frame, text="Export mask as training data", command=self.export_mask_as_training_data, fg_color="#6693F5"
             )
             btn_export_mask.pack(side="left", padx=5)
             btn_export_test = ctk.CTkButton(
-                export_buttons_frame, text="Export as Test Data", command=self.export_as_test_data
+                export_buttons_frame, text="Export as Test Data", command=self.export_as_test_data, fg_color="#6693F5"
             )
             btn_export_test.pack(side="left", padx=5)
             if self.mode == "individual":
                 btn_export_overlay = ctk.CTkButton(
-                    export_buttons_frame, text="Export as Overlay", command=self.export_as_overlay
+                    export_buttons_frame, text="Export as Overlay", command=self.export_as_overlay, fg_color="#6693F5"
                 )
                 btn_export_overlay.pack(side="left", padx=5)
         else:

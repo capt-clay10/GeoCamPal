@@ -268,7 +268,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
         ctk.CTkButton(self.file_frame, text="Load Homography", command=self.load_homography).pack(side="left", padx=5)
 
         ctk.CTkButton(self.control_panel, text="Initial Georeferencing",
-                      command=self.perform_initial_georeferencing).pack(side="left", padx=10)
+                      command=self.perform_initial_georeferencing, fg_color="#6693F5").pack(side="left", padx=10)
 
         # ---- 2  AOI  ----------------------------------
         self.aoi_panel = ctk.CTkFrame(self)
@@ -282,7 +282,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
                                value=val).grid(row=0, column=idx, padx=5, pady=5, sticky="w")
 
         ctk.CTkButton(self.aoi_panel, text="Secondary Georeferencing",
-                      command=self.perform_secondary_georeferencing).grid(row=0, column=5, padx=5, pady=5, sticky="w")
+                      command=self.perform_secondary_georeferencing, fg_color="#6693F5").grid(row=0, column=5, padx=5, pady=5, sticky="w")
 
         self.manual_entry = ctk.CTkEntry(self.aoi_panel, width=300,
                                          placeholder_text="x1,y1,x2,y2,x3,y3,x4,y4")
@@ -311,7 +311,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
         self.scale_entry = ctk.CTkEntry(self.crop_panel, width=80)
         self.scale_entry.grid(row=0, column=col, padx=5)
         col += 1
-        ctk.CTkButton(self.crop_panel, text="Show Crop", command=self.show_crop).grid(row=0, column=col, padx=5)
+        ctk.CTkButton(self.crop_panel, text="Show Crop", command=self.show_crop, fg_color="#6693F5").grid(row=0, column=col, padx=5)
 
         # ---- 4  SINGLE–FOLDER FINAL  ------
         self.final_panel = ctk.CTkFrame(self)
@@ -329,7 +329,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
         self.epsg_entry.pack(side="left", padx=5)
 
         ctk.CTkButton(self.final_panel, text="Final Georeferencing",
-                      command=self.process_all_images).pack(side="left", padx=5)
+                      command=self.process_all_images, fg_color="#0F52BA").pack(side="left", padx=5)
 
         self.progress = ctk.CTkProgressBar(self.final_panel, width=220)
         self.progress.set(0)
@@ -346,7 +346,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
         ctk.CTkButton(self.batch_panel, text="Browse Main Folder",
                       command=self.select_batch_main_folder).pack(side="left", padx=5)
         ctk.CTkButton(self.batch_panel, text="Start Batch Process",
-                      command=self.start_batch_process).pack(side="left", padx=5)
+                      command=self.start_batch_process, fg_color="#0F52BA").pack(side="left", padx=5)
 
         self.batch_progress = ctk.CTkProgressBar(self.batch_panel, width=220)
         self.batch_progress.set(0)
