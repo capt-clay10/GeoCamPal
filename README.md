@@ -1,6 +1,6 @@
 # GeoCamPal
 
-![GitHub release](https://img.shields.io/github/v/release/capt-clay10/GeoCamPal?style=for-the-badge)
+
 ![License](https://img.shields.io/github/license/capt-clay10/GeoCamPal?style=for-the-badge)
 ![Python](https://img.shields.io/badge/python-3.8%2B-blue?style=for-the-badge)
 
