@@ -547,7 +547,7 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
             row=0, column=0, padx=5, pady=5)
 
         ctk.CTkButton(row3, text="Browse Output Folder",
-                      command=self._browse_output).grid(
+                      command=self._browse_output, fg_color="#8C7738").grid(
             row=0, column=1, padx=5, pady=5)
         self.output_label = ctk.CTkLabel(row3, text="No output folder selected")
         self.output_label.grid(row=0, column=2, padx=5, pady=5, sticky="w")

@@ -335,7 +335,7 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         # Export
         self.export_panel = ctk.CTkFrame(self.bottom_panel)
         self.export_panel.pack(side="top", fill="x", padx=5, pady=2)
-        self.btn_select_out_folder = ctk.CTkButton(self.export_panel, text="Output Folder", command=self.select_output_folder)
+        self.btn_select_out_folder = ctk.CTkButton(self.export_panel, text="Browse Output Folder", command=self.select_output_folder, fg_color="#8C7738")
         self.btn_select_out_folder.grid(row=0, column=0, padx=5, pady=5)
         self.out_folder_label = ctk.CTkLabel(self.export_panel, text="No folder selected")
         self.out_folder_label.grid(row=0, column=1, padx=5, pady=5, sticky="w")

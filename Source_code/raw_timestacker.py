@@ -548,7 +548,7 @@ class TimestackTool(ctk.CTkToplevel):
         # Output & single-timestack panel
         op = ctk.CTkFrame(self.bottom_frame)
         op.pack(fill="x", padx=5, pady=5)
-        ctk.CTkButton(op, text="Select Output Folder", command=self.select_output_folder)\
+        ctk.CTkButton(op, text="Browse Output Folder", command=self.select_output_folder, fg_color="#8C7738")\
             .grid(row=0, column=0, padx=5, pady=5, sticky="w")
         ctk.CTkLabel(op, textvariable=self.output_folder)\
             .grid(row=0, column=1, padx=5, pady=5, sticky="w")

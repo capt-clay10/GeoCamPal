@@ -56,6 +56,7 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
         self.gcp_ids = None
         self.best_H_annealing = None
         self.best_cost = None
+        self.detected_epsg = None
 
         # -------------------------------  Panel 1  -------------------------------
         self.panel1 = ctk.CTkFrame(self)
@@ -89,7 +90,7 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
         self.entry_output_name = ctk.CTkEntry(self.panel2)
         self.entry_output_name.pack(side="left", padx=5, pady=5, fill="x", expand=True)
 
-        self.btn_browse_output = ctk.CTkButton(self.panel2, text="Choose Output Folder", command=self.browse_output)
+        self.btn_browse_output = ctk.CTkButton(self.panel2, text="Browse Output Folder", command=self.browse_output, fg_color="#8C7738")
         self.btn_browse_output.pack(side="left", padx=5, pady=5)
 
         self.output_folder_label = ctk.CTkLabel(self.panel2, text="No folder selected", fg_color="transparent")
@@ -277,6 +278,15 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
         self.pixel_points = gcp_data[["Pixel_X", "Pixel_Y"]].values.astype(np.float32)
         self.utm_points = gcp_data[["Real_X", "Real_Y"]].values.astype(np.float32)
 
+        # -------------- extract EPSG if available ----------------
+        self.detected_epsg = None
+        if "EPSG" in gcp_data.columns:
+            epsg_vals = gcp_data["EPSG"].dropna().unique()
+            epsg_vals = [int(v) for v in epsg_vals if int(v) > 0]
+            if epsg_vals:
+                self.detected_epsg = epsg_vals[0]
+                self.log(f"Detected CRS from GCP file: EPSG:{self.detected_epsg}")
+
         if len(self.pixel_points) < 4:
             self.log("Not enough GCPs! Need at least 4.")
             messagebox.showerror("Error", "Not enough GCPs! Need at least 4.")
@@ -300,7 +310,10 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
         # -------------- save ----------------
         out_path = os.path.join(self.output_folder, f"{output_name}.txt")
         try:
-            np.savetxt(out_path, H_final)
+            header = ""
+            if self.detected_epsg:
+                header = f"EPSG:{self.detected_epsg}"
+            np.savetxt(out_path, H_final, header=header)
         except Exception as e:
             self.log(f"Error saving homography matrix: {e}")
             messagebox.showerror("Error", f"Error saving homography matrix: {e}")
@@ -462,7 +475,10 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
             return
         path = os.path.join(self.output_folder, f"{out_name}_bestsubset.txt")
         try:
-            np.savetxt(path, self.best_H_annealing)
+            header = ""
+            if self.detected_epsg:
+                header = f"EPSG:{self.detected_epsg}"
+            np.savetxt(path, self.best_H_annealing, header=header)
         except Exception as e:
             self.log(f"Error exporting: {e}")
             messagebox.showerror("Error", f"Error exporting best matrix: {e}")

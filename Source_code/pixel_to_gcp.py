@@ -13,10 +13,15 @@ def convert_to_utm(lat, lon):
     """
     Convert latitude and longitude to UTM coordinates.
     utm.from_latlon returns a tuple: (easting, northing, zone number, zone letter).
-    We only extract the easting and northing.
+    We return easting, northing, and the EPSG code.
     """
     easting, northing, zone_number, zone_letter = utm.from_latlon(lat, lon)
-    return easting, northing
+    # Northern hemisphere: EPSG 326xx, Southern: EPSG 327xx
+    if lat >= 0:
+        epsg = 32600 + zone_number
+    else:
+        epsg = 32700 + zone_number
+    return easting, northing, epsg
 
 def resource_path(relative_path: str) -> str:
     try:
@@ -181,7 +186,7 @@ class PixelToGCPWindow(ctk.CTkToplevel):
         # Sub-panel for Output Folder
         pnl_output_folder = ctk.CTkFrame(config_panel)
         pnl_output_folder.pack(side="top", fill="x", padx=5, pady=2)
-        ctk.CTkButton(pnl_output_folder, text="Output Folder", command=self.browse_output_folder).pack(side="left")
+        ctk.CTkButton(pnl_output_folder, text=" Browse Output Folder", command=self.browse_output_folder, fg_color="#8C7738").pack(side="left")
         self.label_output_folder = ctk.CTkLabel(pnl_output_folder, text="No folder selected")
         self.label_output_folder.pack(side="left", padx=5)
     
@@ -284,14 +289,17 @@ class PixelToGCPWindow(ctk.CTkToplevel):
                 df = df[~df['gcp_number'].isin(self.bad_gcp_list)]
                 if self.convert_to_utm_var.get():
                     # Perform UTM conversion using the helper function.
-                    df[['easting', 'northing']] = df.apply(
+                    df[['easting', 'northing', 'EPSG']] = df.apply(
                         lambda row: pd.Series(convert_to_utm(row['latitude'], row['longitude'])),
                         axis=1
                     )
+                    epsg_val = int(df['EPSG'].iloc[0])
+                    self.log(f"UTM conversion applied — detected EPSG:{epsg_val}")
                 else:
                     # If not converting, use latitude and longitude directly.
                     df['easting'] = df['latitude']
                     df['northing'] = df['longitude']
+                    df['EPSG'] = 0  # no CRS when using raw lat/lon
                 self.gcp_df = df
                 self.log(f"GCP file loaded: {os.path.basename(self.gcp_file)}")
             except Exception as e:
@@ -442,6 +450,7 @@ class PixelToGCPWindow(ctk.CTkToplevel):
             real_x = row['easting']
             real_y = row['northing']
             real_z = row['elevation'] if 'elevation' in row and pd.notna(row['elevation']) else 0
+            epsg_code = int(row['EPSG']) if 'EPSG' in row and pd.notna(row['EPSG']) else 0
             rows.append({
                 "Image_name": fname,
                 "Pixel_X": px_full,
@@ -450,10 +459,11 @@ class PixelToGCPWindow(ctk.CTkToplevel):
                 "camera": camera_part,
                 "Real_X": real_x,
                 "Real_Y": real_y,
-                "Real_Z": real_z
+                "Real_Z": real_z,
+                "EPSG": epsg_code
             })
         df = pd.DataFrame(rows, columns=[
-            "Image_name", "Pixel_X", "Pixel_Y", "gcp_id", "camera", "Real_X", "Real_Y", "Real_Z"
+            "Image_name", "Pixel_X", "Pixel_Y", "gcp_id", "camera", "Real_X", "Real_Y", "Real_Z", "EPSG"
         ])
         try:
             df.to_csv(output_path, index=False)

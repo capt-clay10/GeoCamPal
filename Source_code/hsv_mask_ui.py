@@ -609,7 +609,7 @@ class HSVMaskUIMixin:
         ctk.CTkLabel(export_frame, text="Export Folder:").pack(side="left", padx=5)
         self.export_path_entry = ctk.CTkEntry(export_frame, width=200)
         self.export_path_entry.pack(side="left", padx=5)
-        btn_browse = ctk.CTkButton(export_frame, text="Browse", command=self.browse_export_folder)
+        btn_browse = ctk.CTkButton(export_frame, text="Browse output folder", command=self.browse_export_folder, fg_color="#8C7738")
         btn_browse.pack(side="left", padx=5)
 
         # ── Row 6: Feature frame ───────────────────────────────────────────────────
@@ -636,7 +636,7 @@ class HSVMaskUIMixin:
 
         if self.mode in ("individual", "ml"):
             btn_export_edge = ctk.CTkButton(
-                export_buttons_frame, text="Export feature as training data", command=self.export_training_data, fg_color="#0F52BA"
+                export_buttons_frame, text="Export feature as training data", command=self.export_training_data, fg_color="#6693F5"
             )
             btn_export_edge.pack(side="left", padx=5)
             btn_export_mask = ctk.CTkButton(

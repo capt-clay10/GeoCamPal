@@ -1,17 +1,28 @@
 """
 Harmonise Images
 
-Two sub‑tasks in one window:
+Three sub‑tasks in one window:
   1. **Filter bad images** — robust blur, clipping‑based over‑exposure,
      under‑exposure, darkness, low‑information (entropy), rain/droplets
      on lens, and partial obstruction detection.
-  2. **Harmonise histograms** — luminance‑based gain (with soft‑knee) or
-     histogram matching, optional sky masking for reference computation,
-     and post‑correction sanity check.
+  2. **Harmonise brightness** — luminance‑based gain (with soft‑knee) or
+     L‑channel histogram matching, optional sky masking for reference
+     computation, and post‑correction sanity check.
+  3. **Harmonise colour** — full‑colour transfer to a user‑selected
+     reference image using Reinhard, per‑channel LAB histogram matching,
+     or iterative distribution transfer (Pitié et al., 2007).
+
+Both harmonisation stages include a **preview** system: a random 5 %
+sample (minimum 1) is processed first and shown as before/after pairs
+with Next/Previous navigation.  The user can inspect and then commit
+with "Process All".
 
 Outputs:
-  • bad_images.txt            — list of identified bad image filenames
-  • _harmonised/  subfolder   — corrected images with original structure
+  • bad_images.txt                    — list of identified bad image filenames
+  • _brightness_harmonised/ subfolder — brightness‑corrected images
+  • _colour_harmonised/    subfolder  — colour‑corrected images
+
+Originals are NEVER modified or overwritten.
 """
 
 # %% ————————————————————————————— imports —————————————————————————————
@@ -20,6 +31,8 @@ import os
 import glob
 import shutil
 import threading
+import time
+import random
 from pathlib import Path
 
 import numpy as np
@@ -190,7 +203,7 @@ def filter_image(img_bgr,
     return reasons
 
 
-# %% ————————————————————————————— harmonisation helpers ————————————————
+# %% ————————————————————————————— brightness harmonisation helpers ————
 
 def mean_luminance(img_bgr, sky_mask_frac=0.0):
     """
@@ -208,11 +221,36 @@ def mean_luminance(img_bgr, sky_mask_frac=0.0):
     return float(L.mean())
 
 
+def _preserve_saturation(original_bgr, corrected_bgr):
+    """
+    Restore the original per‑pixel HSV saturation after a brightness
+    correction.
+
+    Modifying only the L channel in LAB and converting back to BGR does
+    NOT perfectly preserve perceived colour saturation — the LAB→BGR
+    gamut mapping clips some channel combinations, especially on images
+    that are already low‑chroma (coastal, overcast, dawn/dusk scenes).
+    Even a modest L shift can visibly desaturate these images.
+
+    Fix: replace the corrected image's HSV‑S channel with the original's
+    while keeping the corrected H and V.  This ensures the brightness
+    change takes effect without washing out colour.
+    """
+    orig_hsv = cv2.cvtColor(original_bgr, cv2.COLOR_BGR2HSV)
+    corr_hsv = cv2.cvtColor(corrected_bgr, cv2.COLOR_BGR2HSV)
+    # keep corrected brightness (V) and hue (H), restore original saturation (S)
+    corr_hsv[..., 1] = orig_hsv[..., 1]
+    return cv2.cvtColor(corr_hsv, cv2.COLOR_HSV2BGR)
+
+
 def soft_gain_match(img_bgr, ref_mean_L, knee=200):
     """
     Luminance gain with soft‑knee rolloff above *knee* to avoid hard
     highlight clipping.  Pixels below the knee are scaled linearly;
     above the knee the gain tapers off smoothly toward 255.
+
+    Includes saturation preservation to prevent colour washout on
+    low‑chroma scenes (coastal, overcast, HDR panoramas).
     """
     lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
     L = lab[..., 0]
@@ -228,13 +266,16 @@ def soft_gain_match(img_bgr, ref_mean_L, knee=200):
         result[above] = knee + headroom * excess / (excess + headroom)
 
     lab[..., 0] = np.clip(result, 0, 255)
-    return cv2.cvtColor(lab.astype(np.uint8), cv2.COLOR_LAB2BGR)
+    corrected = cv2.cvtColor(lab.astype(np.uint8), cv2.COLOR_LAB2BGR)
+    return _preserve_saturation(img_bgr, corrected)
 
 
 def hist_match(img_bgr, ref_bgr):
     """
     Full L‑channel histogram matching using scikit‑image.
     Falls back to soft_gain if skimage is not available.
+
+    Includes saturation preservation to prevent colour washout.
     """
     if not HAS_SKIMAGE:
         return soft_gain_match(img_bgr, mean_luminance(ref_bgr))
@@ -243,7 +284,8 @@ def hist_match(img_bgr, ref_bgr):
     matched_L = sk_exposure.match_histograms(
         tgt_lab[..., 0], ref_lab[..., 0], channel_axis=None)
     tgt_lab[..., 0] = np.clip(matched_L, 0, 255).astype(np.uint8)
-    return cv2.cvtColor(tgt_lab, cv2.COLOR_LAB2BGR)
+    corrected = cv2.cvtColor(tgt_lab, cv2.COLOR_LAB2BGR)
+    return _preserve_saturation(img_bgr, corrected)
 
 
 def correction_sanity_check(original_bgr, corrected_bgr, ref_mean_L,
@@ -259,6 +301,173 @@ def correction_sanity_check(original_bgr, corrected_bgr, ref_mean_L,
     if abs(corr_L - ref_mean_L) > abs(orig_L - ref_mean_L):
         return original_bgr, True  # reverted
     return corrected_bgr, False
+
+
+# %% ————————————————————————————— colour harmonisation helpers ————————
+
+def reinhard_colour_transfer(src_bgr, ref_bgr):
+    """
+    Reinhard et al. (2001) colour transfer.
+    Converts both images to CIE LAB, then for each channel independently
+    shifts the mean and scales the standard deviation of the source to
+    match the reference.  Fast, effective for same‑scene time‑lapse.
+    """
+    src_lab = cv2.cvtColor(src_bgr, cv2.COLOR_BGR2LAB).astype(np.float64)
+    ref_lab = cv2.cvtColor(ref_bgr, cv2.COLOR_BGR2LAB).astype(np.float64)
+
+    for ch in range(3):
+        src_ch = src_lab[..., ch]
+        ref_ch = ref_lab[..., ch]
+
+        src_mean, src_std = src_ch.mean(), max(src_ch.std(), 1e-6)
+        ref_mean, ref_std = ref_ch.mean(), max(ref_ch.std(), 1e-6)
+
+        # shift and scale
+        src_lab[..., ch] = (src_ch - src_mean) * (ref_std / src_std) + ref_mean
+
+    src_lab = np.clip(src_lab, 0, 255).astype(np.uint8)
+    return cv2.cvtColor(src_lab, cv2.COLOR_LAB2BGR)
+
+
+def lab_histogram_colour_match(src_bgr, ref_bgr):
+    """
+    Per‑channel histogram matching in CIE LAB.
+    Matches the full cumulative distribution of each LAB channel (L, a, b)
+    independently using scikit‑image.  Handles larger colour shifts than
+    Reinhard but treats channels independently.
+    Falls back to Reinhard if scikit‑image is not available.
+    """
+    if not HAS_SKIMAGE:
+        return reinhard_colour_transfer(src_bgr, ref_bgr)
+
+    src_lab = cv2.cvtColor(src_bgr, cv2.COLOR_BGR2LAB)
+    ref_lab = cv2.cvtColor(ref_bgr, cv2.COLOR_BGR2LAB)
+
+    matched_lab = np.empty_like(src_lab)
+    for ch in range(3):
+        matched_lab[..., ch] = np.clip(
+            sk_exposure.match_histograms(
+                src_lab[..., ch].astype(np.float64),
+                ref_lab[..., ch].astype(np.float64),
+                channel_axis=None),
+            0, 255).astype(np.uint8)
+
+    return cv2.cvtColor(matched_lab, cv2.COLOR_LAB2BGR)
+
+
+def _random_rotation_matrix_3d():
+    """Generate a random 3x3 orthogonal rotation matrix via QR decomposition."""
+    H = np.random.randn(3, 3)
+    Q, R = np.linalg.qr(H)
+    # ensure proper rotation (det = +1)
+    Q = Q @ np.diag(np.sign(np.diag(R)))
+    if np.linalg.det(Q) < 0:
+        Q[:, 0] *= -1
+    return Q
+
+
+def iterative_distribution_transfer(src_bgr, ref_bgr, iterations=20,
+                                     relaxation=0.5):
+    """
+    Iterative Distribution Transfer (Pitie et al., 2007).
+
+    Treats colour as a 3D distribution in LAB space.  Each iteration:
+      1. Generate a random 3D rotation matrix.
+      2. Project both source and reference point clouds onto the
+         three rotated axes.
+      3. Match the 1D histogram along each rotated axis.
+      4. Rotate back to LAB space.
+
+    The *relaxation* parameter (0-1) blends each iteration's result
+    with the previous to improve convergence stability.  Lower values
+    are more conservative; 0.5 works well in practice.
+
+    For performance, the matching statistics are computed on a sub-sample
+    of ~300 000 pixels (if the image is larger), but the resulting
+    transfer is applied to every pixel via sorted‑rank mapping.
+    """
+    src_lab = cv2.cvtColor(src_bgr, cv2.COLOR_BGR2LAB).astype(np.float64)
+    ref_lab = cv2.cvtColor(ref_bgr, cv2.COLOR_BGR2LAB).astype(np.float64)
+
+    h, w, _ = src_lab.shape
+    src_flat = src_lab.reshape(-1, 3).copy()
+    ref_flat = ref_lab.reshape(-1, 3)
+
+    n_src = src_flat.shape[0]
+    n_ref = ref_flat.shape[0]
+
+    # sub-sample reference for speed (matching target)
+    max_pts = 300_000
+    if n_ref > max_pts:
+        idx_ref = np.random.choice(n_ref, max_pts, replace=False)
+        ref_sub = ref_flat[idx_ref]
+    else:
+        ref_sub = ref_flat
+
+    for it in range(iterations):
+        R = _random_rotation_matrix_3d()
+
+        # project into rotated space
+        src_rot = src_flat @ R.T
+        ref_rot = ref_sub @ R.T
+
+        new_src_rot = src_rot.copy()
+
+        for ch in range(3):
+            # sort source pixels along this rotated axis
+            src_order = np.argsort(src_rot[:, ch])
+            src_sorted = src_rot[src_order, ch]
+
+            # build reference CDF target
+            ref_sorted = np.sort(ref_rot[:, ch])
+
+            # interpolate reference quantiles to source length
+            ref_quantiles = np.interp(
+                np.linspace(0, 1, n_src),
+                np.linspace(0, 1, len(ref_sorted)),
+                ref_sorted
+            )
+
+            # assign matched values
+            matched = np.empty(n_src)
+            matched[src_order] = ref_quantiles
+            new_src_rot[:, ch] = matched
+
+        # rotate back to LAB
+        new_src_lab = new_src_rot @ R
+
+        # relaxation: blend with previous iteration
+        src_flat = src_flat * (1.0 - relaxation) + new_src_lab * relaxation
+
+    result = src_flat.reshape(h, w, 3)
+    result = np.clip(result, 0, 255).astype(np.uint8)
+    return cv2.cvtColor(result, cv2.COLOR_LAB2BGR)
+
+
+def colour_sanity_check(original_bgr, corrected_bgr, ref_bgr):
+    """
+    Verify colour correction improved similarity to the reference.
+    Compares mean LAB distance before and after.  If worse, revert.
+    Returns (image, reverted_bool).
+    """
+    ref_lab = cv2.cvtColor(ref_bgr, cv2.COLOR_BGR2LAB).astype(np.float64)
+    orig_lab = cv2.cvtColor(original_bgr, cv2.COLOR_BGR2LAB).astype(np.float64)
+    corr_lab = cv2.cvtColor(corrected_bgr, cv2.COLOR_BGR2LAB).astype(np.float64)
+
+    ref_mean = ref_lab.mean(axis=(0, 1))
+    orig_dist = np.linalg.norm(orig_lab.mean(axis=(0, 1)) - ref_mean)
+    corr_dist = np.linalg.norm(corr_lab.mean(axis=(0, 1)) - ref_mean)
+
+    if corr_dist > orig_dist:
+        return original_bgr, True
+    return corrected_bgr, False
+
+
+COLOUR_ALGORITHMS = {
+    "Reinhard (fast)": reinhard_colour_transfer,
+    "Histogram Match (LAB)": lab_histogram_colour_match,
+    "Iterative Transfer (best)": iterative_distribution_transfer,
+}
 
 
 # %% ————————————————————————————— file helpers ————————————————————————
@@ -281,14 +490,33 @@ def collect_images_recursive(folder):
     return results
 
 
+def preview_sample_count(n_total):
+    """5 % of total, rounded to nearest integer, minimum 1."""
+    return max(1, round(n_total * 0.05))
+
+
+def format_eta(seconds):
+    """Format seconds into a human-readable ETA string."""
+    if seconds < 0 or not np.isfinite(seconds):
+        return "estimating..."
+    m, s = divmod(int(seconds), 60)
+    h, m = divmod(m, 60)
+    if h > 0:
+        return f"{h}h {m:02d}m {s:02d}s"
+    elif m > 0:
+        return f"{m}m {s:02d}s"
+    else:
+        return f"{s}s"
+
+
 # %% ————————————————————————————— main GUI ————————————————————————————
 class HarmoniseImagesWindow(ctk.CTkToplevel):
-    """Filter bad images & harmonise histograms."""
+    """Filter bad images, harmonise brightness & harmonise colour."""
 
     def __init__(self, master=None, **kw):
         super().__init__(master=master, **kw)
         self.title("Harmonise Images")
-        self.geometry("1350x900")
+        self.geometry("1400x1020")
         try:
             self.iconbitmap(resource_path("launch_logo.ico"))
         except Exception:
@@ -300,13 +528,24 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
         self.bad_list = []
         self.recursive_var = tk.BooleanVar(value=False)
 
+        # colour harmonisation state
+        self.ref_colour_path = None
+        self.ref_colour_bgr = None
+
+        # preview state
+        self.preview_mode = None        # None | "brightness" | "colour"
+        self.preview_pairs = []         # list of (original, corrected, name)
+        self.preview_idx = 0
+        self._processing = False        # guard against double-clicks
+
         # ——— layout ———
         self.grid_rowconfigure(0, weight=3)
         self.grid_rowconfigure(1, weight=0)
-        self.grid_rowconfigure(2, weight=1)
+        self.grid_rowconfigure(2, weight=0)  # preview nav (hidden)
+        self.grid_rowconfigure(3, weight=1)
         self.grid_columnconfigure(0, weight=1)
 
-        # ---- TOP: preview ----
+        # ---- TOP: plot panel ----
         self.top_panel = ctk.CTkFrame(self)
         self.top_panel.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
 
@@ -320,7 +559,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
         self.canvas_plot = FigureCanvasTkAgg(self.fig, master=self.top_panel)
         self.canvas_plot.get_tk_widget().pack(fill="both", expand=True)
 
-        # ---- BOTTOM: controls ----
+        # ---- CONTROLS ----
         self.bottom_panel = ctk.CTkFrame(self)
         self.bottom_panel.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
 
@@ -366,7 +605,6 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
                             width=20).grid(row=1, column=col, padx=2, pady=2)
             self.filter_enabled[name] = var
             col += 1
-            # parameter pairs: (label, default), (label, default), ...
             params = fdef[1:]
             for i in range(0, len(params), 2):
                 plbl, pdef = params[i], params[i + 1]
@@ -376,7 +614,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
                 e.grid(row=1, column=col, padx=1, pady=2)
                 self.filter_entries[plbl] = e
                 col += 1
-        max_col = col  # remember widest row
+        max_col = col
 
         # Row B: 3 filters
         filters_b = [
@@ -408,21 +646,21 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
             row=1, column=max_col, padx=10, pady=3, rowspan=2, sticky="ns")
 
         ctk.CTkLabel(
-            row2, text="→ Flags blurry, overexposed, dark,\n"
+            row2, text="-> Flags blurry, overexposed, dark,\n"
                        "   foggy, rain-on-lens & blocked images",
             font=("Arial", 10), text_color="gray", justify="left",
         ).grid(row=1, column=max_col + 1, rowspan=2, padx=5, pady=3,
                sticky="w")
 
-        # Row 3 — harmonise parameters
+        # Row 3 — harmonise BRIGHTNESS (was "Harmonise Histograms")
         row3 = ctk.CTkFrame(self.bottom_panel)
         row3.pack(fill="x", padx=5, pady=2)
 
-        ctk.CTkLabel(row3, text="Harmonise Histograms",
+        ctk.CTkLabel(row3, text="Harmonise Brightness",
                      font=("Arial", 12, "bold")).grid(
             row=0, column=0, padx=5, pady=3, sticky="w")
 
-        ctk.CTkLabel(row3, text="L-tolerance (±)").grid(
+        ctk.CTkLabel(row3, text="L-tolerance (+/-)").grid(
             row=0, column=1, padx=3, pady=3)
         self.tol_entry = ctk.CTkEntry(row3, width=55)
         self.tol_entry.insert(0, "5")
@@ -439,76 +677,202 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
                         variable=self.exclude_bad_var).grid(
             row=0, column=5, padx=10, pady=3)
 
-        ctk.CTkButton(row3, text="Run Harmonise",
-                      command=self._harmonise_threaded, fg_color="#0F52BA").grid(
-            row=0, column=6, padx=10, pady=3)
+        ctk.CTkButton(row3, text="Preview",
+                      command=self._preview_brightness_threaded,
+                      fg_color="#2E8B57", width=80).grid(
+            row=0, column=6, padx=3, pady=3)
+
+        ctk.CTkButton(row3, text="Run Brightness",
+                      command=self._harmonise_brightness_threaded,
+                      fg_color="#0F52BA").grid(
+            row=0, column=7, padx=5, pady=3)
 
         ctk.CTkLabel(
-            row3, text="→ Matches brightness across all images",
-            font=("Arial", 10), text_color="gray",
-        ).grid(row=0, column=7, padx=5, pady=3, sticky="w")
+            row3, text="-> Matches luminance across images\n"
+                       "   (L-channel only, colour unchanged)",
+            font=("Arial", 10), text_color="gray", justify="left",
+        ).grid(row=0, column=8, padx=5, pady=3, sticky="w")
 
-        # Row 4 — output & reset
+        # Row 4 — harmonise COLOUR (NEW)
         row4 = ctk.CTkFrame(self.bottom_panel)
         row4.pack(fill="x", padx=5, pady=2)
 
-        ctk.CTkButton(row4, text="Browse Output Folder",
-                      command=self._browse_output).grid(
+        ctk.CTkLabel(row4, text="Harmonise Colour",
+                     font=("Arial", 12, "bold")).grid(
+            row=0, column=0, padx=5, pady=3, sticky="w")
+
+        ctk.CTkButton(row4, text="Select Reference Image",
+                      command=self._browse_ref_colour, width=160).grid(
+            row=0, column=1, padx=5, pady=3)
+        self.ref_colour_label = ctk.CTkLabel(row4,
+                                              text="No reference selected")
+        self.ref_colour_label.grid(row=0, column=2, padx=5, pady=3,
+                                    sticky="w")
+
+        ctk.CTkLabel(row4, text="Algorithm:").grid(
+            row=0, column=3, padx=3, pady=3)
+        self.colour_algo_var = tk.StringVar(
+            value="Iterative Transfer (best)")
+        self.colour_algo_menu = ctk.CTkOptionMenu(
+            row4, variable=self.colour_algo_var,
+            values=list(COLOUR_ALGORITHMS.keys()), width=190)
+        self.colour_algo_menu.grid(row=0, column=4, padx=3, pady=3)
+
+        self.exclude_bad_colour_var = tk.BooleanVar(value=True)
+        ctk.CTkCheckBox(row4, text="Exclude bad",
+                        variable=self.exclude_bad_colour_var).grid(
+            row=0, column=5, padx=5, pady=3)
+
+        ctk.CTkButton(row4, text="Preview",
+                      command=self._preview_colour_threaded,
+                      fg_color="#2E8B57", width=80).grid(
+            row=0, column=6, padx=3, pady=3)
+
+        ctk.CTkButton(row4, text="Run Colour",
+                      command=self._harmonise_colour_threaded,
+                      fg_color="#0F52BA").grid(
+            row=0, column=7, padx=5, pady=3)
+
+        ctk.CTkLabel(
+            row4, text="-> Transfers colour from reference\n"
+                       "   to all images (full LAB match)",
+            font=("Arial", 10), text_color="gray", justify="left",
+        ).grid(row=0, column=8, padx=5, pady=3, sticky="w")
+
+        # Row 5 — output, progress, ETA, reset
+        row5 = ctk.CTkFrame(self.bottom_panel)
+        row5.pack(fill="x", padx=5, pady=2)
+
+        ctk.CTkButton(row5, text="Browse Output Folder",
+                      command=self._browse_output, fg_color="#8C7738").grid(
             row=0, column=0, padx=5, pady=5)
-        self.output_label = ctk.CTkLabel(row4, text="No output folder selected")
+        self.output_label = ctk.CTkLabel(row5,
+                                          text="No output folder selected")
         self.output_label.grid(row=0, column=1, padx=5, pady=5, sticky="w")
 
-        self.progress_bar = ctk.CTkProgressBar(row4, width=200)
+        self.progress_bar = ctk.CTkProgressBar(row5, width=200)
         self.progress_bar.grid(row=0, column=2, padx=10, pady=5)
         self.progress_bar.set(0)
 
+        self.eta_label = ctk.CTkLabel(row5, text="ETA: --",
+                                       font=("Arial", 10))
+        self.eta_label.grid(row=0, column=3, padx=5, pady=5)
+
         self.btn_reset = ctk.CTkButton(
-            row4, text="Reset", command=self._reset,
+            row5, text="Reset", command=self._reset,
             width=80, fg_color="#8B0000", hover_color="#A52A2A")
-        self.btn_reset.grid(row=0, column=3, padx=5, pady=5, sticky="e")
+        self.btn_reset.grid(row=0, column=4, padx=5, pady=5, sticky="e")
+
+        # ---- PREVIEW NAVIGATION (hidden by default) ----
+        self.preview_nav_frame = ctk.CTkFrame(self)
+        # NOT gridded initially — shown only during preview
+
+        self.btn_prev = ctk.CTkButton(
+            self.preview_nav_frame, text="< Previous",
+            command=self._preview_prev, width=100)
+        self.btn_prev.pack(side="left", padx=10, pady=5)
+
+        self.preview_counter_label = ctk.CTkLabel(
+            self.preview_nav_frame, text="0 / 0",
+            font=("Arial", 12, "bold"))
+        self.preview_counter_label.pack(side="left", padx=15, pady=5)
+
+        self.btn_next = ctk.CTkButton(
+            self.preview_nav_frame, text="Next >",
+            command=self._preview_next, width=100)
+        self.btn_next.pack(side="left", padx=10, pady=5)
+
+        self.btn_accept = ctk.CTkButton(
+            self.preview_nav_frame, text="Accept & Process All",
+            command=self._accept_preview,
+            fg_color="#2E8B57", hover_color="#3CB371", width=180)
+        self.btn_accept.pack(side="left", padx=20, pady=5)
+
+        self.btn_cancel_preview = ctk.CTkButton(
+            self.preview_nav_frame, text="Cancel Preview",
+            command=self._cancel_preview,
+            fg_color="#8B0000", hover_color="#A52A2A", width=130)
+        self.btn_cancel_preview.pack(side="left", padx=10, pady=5)
 
         # ---- CONSOLE ----
         self.console_frame = ctk.CTkFrame(self)
-        self.console_frame.grid(row=2, column=0, sticky="nsew", padx=5, pady=5)
-        self.console_text = tk.Text(self.console_frame, wrap="word", height=8)
+        self.console_frame.grid(row=3, column=0, sticky="nsew",
+                                padx=5, pady=5)
+        self.console_text = tk.Text(self.console_frame, wrap="word",
+                                     height=8)
         self.console_text.pack(fill="both", expand=True, padx=5, pady=5)
         self.stdout_redirector = StdoutRedirector(self.console_text)
         sys.stdout = self.stdout_redirector
         sys.stderr = self.stdout_redirector
-        print("Harmonise Images — Tool Guide\n"
+        print("Harmonise Images - Tool Guide\n"
               "================================\n"
               "\n"
               "DISPLAY PANEL (top)\n"
-              "  Left plot:   Luminance distribution of all images (histogram).\n"
+              "  Left plot:   Luminance distribution of all images.\n"
               "  Centre plot: Number of images flagged by each filter.\n"
-              "  Right plot:  Harmonisation action breakdown (copy / gain / histogram-match).\n"
+              "  Right plot:  Harmonisation action breakdown.\n"
               "\n"
               "FILTER BAD IMAGES  (uncheck a filter to disable it)\n"
-              "  ☑ Blur            — Laplacian variance; images below threshold are blurry.\n"
-              "                      Guards against false positives on calm water / clear sky.\n"
-              "  ☑ Overexposure    — Fraction of pixels saturated at 254-255 in ALL channels.\n"
-              "                      Detects blown highlights (not just bright sand).\n"
-              "  ☑ Underexposure   — Two parameters: dark pixel value + fraction.\n"
-              "                      If more than 'fraction' of pixels are below 'value' → bad.\n"
-              "  ☑ Darkness        — If the brightest pixel in the image is below threshold\n"
-              "                      → nighttime / lens cap on.\n"
-              "  ☑ Low information — Histogram entropy; low values = fog, haze, condensation.\n"
-              "                      Good outdoor images: 6-7.5; fog: below 5.\n"
-              "  ☑ Lens droplets   — Detects rain or condensation droplets on the lens\n"
-              "                      (bright blobs after Gaussian subtraction).\n"
-              "  ☑ Obstruction     — Detects partial blockage (bird, lens cap, foreign object)\n"
-              "                      by checking for large dark regions in a 4×4 grid.\n"
+              "  Blur            - Laplacian variance; images below "
+              "threshold are blurry.\n"
+              "                    Guards against false positives on "
+              "calm water / clear sky.\n"
+              "  Overexposure    - Fraction of pixels saturated at "
+              "254-255 in ALL channels.\n"
+              "                    Detects blown highlights (not just "
+              "bright sand).\n"
+              "  Underexposure   - Two parameters: dark pixel value + "
+              "fraction.\n"
+              "                    If more than 'fraction' of pixels "
+              "are below 'value' -> bad.\n"
+              "  Darkness        - If the brightest pixel in the image "
+              "is below threshold\n"
+              "                    -> nighttime / lens cap on.\n"
+              "  Low information - Histogram entropy; low values = "
+              "fog, haze, condensation.\n"
+              "                    Good outdoor images: 6-7.5; "
+              "fog: below 5.\n"
+              "  Lens droplets   - Detects rain or condensation "
+              "droplets on the lens\n"
+              "                    (bright blobs after Gaussian "
+              "subtraction).\n"
+              "  Obstruction     - Detects partial blockage (bird, "
+              "lens cap, foreign object)\n"
+              "                    by checking for large dark regions "
+              "in a 4x4 grid.\n"
               "\n"
-              "HARMONISE HISTOGRAMS\n"
-              "  L-tolerance (±)     — Images within this luminance range of the median are\n"
-              "                        kept unchanged. Outside this range:\n"
-              "                          • Very dark (ΔL ≤ −2×tol) → histogram matching\n"
-              "                          • Very bright (ΔL ≥ +2×tol) → soft-gain correction\n"
-              "                          • Moderate deviation → soft-gain correction\n"
-              "                        A sanity check reverts if correction makes things worse.\n"
-              "  Sky mask (%)        — Ignore the top N% of the image when computing mean\n"
-              "                        brightness. Useful when bright sky dominates and skews\n"
-              "                        the reference luminance away from the foreground.\n"
+              "HARMONISE BRIGHTNESS\n"
+              "  L-tolerance (+/-)  - Images within this luminance "
+              "range of the median are\n"
+              "                       kept unchanged. Outside:\n"
+              "                         Very dark  -> histogram matching\n"
+              "                         Very bright -> soft-gain\n"
+              "                         Moderate   -> soft-gain\n"
+              "                       Sanity check reverts if correction "
+              "makes things worse.\n"
+              "  Sky mask (%)       - Ignore the top N% of the image "
+              "when computing mean\n"
+              "                       brightness.\n"
+              "\n"
+              "HARMONISE COLOUR\n"
+              "  Select a reference image that represents the desired\n"
+              "  colour appearance.  Three algorithms available:\n"
+              "    Reinhard (fast)           - mean+std transfer per "
+              "LAB channel\n"
+              "    Histogram Match (LAB)     - per-channel CDF matching "
+              "in LAB\n"
+              "    Iterative Transfer (best) - 3D distribution transfer\n"
+              "                                (Pitie et al. 2007)\n"
+              "\n"
+              "PREVIEW\n"
+              "  Both brightness and colour offer a 'Preview' button.\n"
+              "  A random 5% sample (min 1) is processed and shown as\n"
+              "  before/after pairs.  Use </> to navigate, then\n"
+              "  'Accept & Process All' or 'Cancel Preview'.\n"
+              "\n"
+              "  Originals are NEVER modified - all output goes to\n"
+              "  _brightness_harmonised/ or _colour_harmonised/ "
+              "sub-folders.\n"
               "================================\n")
 
     # ——— browse callbacks ———
@@ -525,56 +889,237 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
             self.output_folder = d
             self.output_label.configure(text=d)
 
+    def _browse_ref_colour(self):
+        """Let user pick one reference image for colour harmonisation."""
+        init_dir = self.input_folder if self.input_folder else None
+        f = filedialog.askopenfilename(
+            title="Select Reference Image for Colour",
+            initialdir=init_dir,
+            filetypes=[("Images", "*.jpg *.jpeg *.png *.bmp *.tif *.tiff"),
+                       ("All files", "*.*")])
+        if f:
+            img = cv2.imread(f)
+            if img is None:
+                messagebox.showerror("Error",
+                                      f"Cannot read image:\n{f}")
+                return
+            self.ref_colour_path = f
+            self.ref_colour_bgr = img
+            name = os.path.basename(f)
+            self.ref_colour_label.configure(
+                text=f"{name}  ({img.shape[1]}x{img.shape[0]})")
+            print(f"Colour reference image: {name}")
+
+            # show thumbnail in axes[2]
+            self._restore_normal_plots()
+            self.axes[2].clear()
+            self.axes[2].imshow(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+            self.axes[2].set_title(f"Colour Reference: {name}",
+                                    fontsize=9)
+            self.axes[2].axis("off")
+            self.fig.tight_layout()
+            self.canvas_plot.draw()
+
     # ——— reset ———
 
     def _reset(self):
+        self._cancel_preview()
         self.input_folder = None
         self.output_folder = None
         self.bad_list = []
+        self.ref_colour_path = None
+        self.ref_colour_bgr = None
         self.input_label.configure(text="No folder selected")
         self.output_label.configure(text="No output folder selected")
+        self.ref_colour_label.configure(text="No reference selected")
         self.progress_bar.set(0)
+        self.eta_label.configure(text="ETA: --")
         self.recursive_var.set(False)
         self.exclude_bad_var.set(True)
+        self.exclude_bad_colour_var.set(True)
         for var in self.filter_enabled.values():
             var.set(True)
 
-        for ax in self.axes:
-            ax.clear()
-            ax.axis("off")
-        self.axes[0].set_title("Luminance Distribution")
-        self.axes[1].set_title("Filter Results")
-        self.axes[2].set_title("Harmonisation Results")
-        self.fig.tight_layout()
-        self.canvas_plot.draw()
+        self._restore_normal_plots()
         self.console_text.delete("1.0", tk.END)
         print("Session reset.\n--------------------------------")
 
-    # ——— filtering ———
+    # ——— plot management ———
+
+    def _restore_normal_plots(self):
+        """Restore the 3-subplot layout."""
+        self.fig.clear()
+        self.axes = self.fig.subplots(1, 3)
+        self.axes[0].set_title("Luminance Distribution")
+        self.axes[0].axis("off")
+        self.axes[1].set_title("Filter Results")
+        self.axes[1].axis("off")
+        self.axes[2].set_title("Harmonisation Results")
+        self.axes[2].axis("off")
+        self.fig.tight_layout()
+        self.canvas_plot.draw()
+
+    def _switch_to_preview_plots(self, n_cols):
+        """Switch the figure to preview layout (2 or 3 columns)."""
+        self.fig.clear()
+        self.axes = self.fig.subplots(1, n_cols)
+        if n_cols == 1:
+            self.axes = [self.axes]
+        self.fig.tight_layout()
+        self.canvas_plot.draw()
+
+    def _show_preview_nav(self):
+        """Show the preview navigation bar."""
+        self.preview_nav_frame.grid(row=2, column=0, sticky="ew",
+                                     padx=5, pady=2)
+
+    def _hide_preview_nav(self):
+        """Hide the preview navigation bar."""
+        self.preview_nav_frame.grid_forget()
+
+    # ——— preview system ———
+
+    def _update_preview_display(self):
+        """Show current preview pair in the plot panel."""
+        if not self.preview_pairs:
+            return
+
+        idx = self.preview_idx
+        original, corrected, name = self.preview_pairs[idx]
+
+        is_colour = (self.preview_mode == "colour")
+        n_cols = 3 if (is_colour and self.ref_colour_bgr is not None) else 2
+
+        self._switch_to_preview_plots(n_cols)
+
+        col = 0
+        if is_colour and self.ref_colour_bgr is not None:
+            self.axes[col].imshow(
+                cv2.cvtColor(self.ref_colour_bgr, cv2.COLOR_BGR2RGB))
+            self.axes[col].set_title("Reference", fontsize=10)
+            self.axes[col].axis("off")
+            col += 1
+
+        self.axes[col].imshow(
+            cv2.cvtColor(original, cv2.COLOR_BGR2RGB))
+        self.axes[col].set_title("Original", fontsize=10)
+        self.axes[col].axis("off")
+
+        self.axes[col + 1].imshow(
+            cv2.cvtColor(corrected, cv2.COLOR_BGR2RGB))
+        self.axes[col + 1].set_title("Corrected", fontsize=10)
+        self.axes[col + 1].axis("off")
+
+        self.fig.suptitle(
+            f"Preview {idx + 1}/{len(self.preview_pairs)}: {name}",
+            fontsize=11, fontweight="bold")
+        self.fig.tight_layout(rect=[0, 0, 1, 0.94])
+        self.canvas_plot.draw()
+
+        self.preview_counter_label.configure(
+            text=f"{idx + 1} / {len(self.preview_pairs)}")
+
+    def _preview_next(self):
+        if self.preview_pairs:
+            self.preview_idx = (
+                (self.preview_idx + 1) % len(self.preview_pairs))
+            self._update_preview_display()
+
+    def _preview_prev(self):
+        if self.preview_pairs:
+            self.preview_idx = (
+                (self.preview_idx - 1) % len(self.preview_pairs))
+            self._update_preview_display()
+
+    def _cancel_preview(self):
+        """Exit preview mode, restore normal plots."""
+        self.preview_mode = None
+        self.preview_pairs = []
+        self.preview_idx = 0
+        self._hide_preview_nav()
+        self._restore_normal_plots()
+
+    def _accept_preview(self):
+        """Accept preview and process all images."""
+        mode = self.preview_mode
+        self._cancel_preview()
+        if mode == "brightness":
+            self._harmonise_brightness_threaded()
+        elif mode == "colour":
+            self._harmonise_colour_threaded()
+
+    # ——— gather images helper ———
+
+    def _gather_images(self, exclude_bad=True):
+        """Collect images, optionally excluding bad ones."""
+        if self.recursive_var.get():
+            images = collect_images_recursive(self.input_folder)
+        else:
+            images = collect_images(self.input_folder)
+
+        if exclude_bad:
+            bad_set = set(self.bad_list)
+            images = [p for p in images if str(p) not in bad_set]
+
+        return images
+
+    def _check_folders(self):
+        """Validate that input and output folders are set."""
+        if not self.input_folder:
+            messagebox.showwarning("Warning",
+                                    "Select an image folder first.")
+            return False
+        if not self.output_folder:
+            messagebox.showwarning("Warning",
+                                    "Select an output folder first.")
+            return False
+        return True
+
+    # ——— ETA helper ———
+
+    def _update_progress(self, idx, total, start_time):
+        """Update progress bar and ETA label."""
+        frac = (idx + 1) / total
+        self.progress_bar.set(frac)
+        elapsed = time.time() - start_time
+        if idx > 0:
+            per_image = elapsed / (idx + 1)
+            remaining = per_image * (total - idx - 1)
+            self.eta_label.configure(
+                text=f"ETA: ~{format_eta(remaining)}  "
+                     f"({idx + 1}/{total})")
+        else:
+            self.eta_label.configure(text=f"ETA: estimating...  "
+                                          f"({idx + 1}/{total})")
+
+    # ——— filtering (unchanged logic) ———
 
     def _filter_threaded(self):
+        if self._processing:
+            return
         threading.Thread(target=self._run_filter, daemon=True).start()
 
     def _run_filter(self):
         try:
+            self._processing = True
             self.progress_bar.set(0)
+            self.eta_label.configure(text="ETA: --")
 
-            if not self.input_folder:
-                messagebox.showwarning("Warning",
-                                       "Select an image folder first.")
-                return
-            if not self.output_folder:
-                messagebox.showwarning("Warning",
-                                       "Select an output folder first.")
+            if not self._check_folders():
                 return
 
             blur_t = float(self.filter_entries["Blur threshold"].get())
-            clip_f = float(self.filter_entries["Clip overexp fraction"].get())
+            clip_f = float(
+                self.filter_entries["Clip overexp fraction"].get())
             dark_v = int(self.filter_entries["Dark pixel value"].get())
-            under_f = float(self.filter_entries["Under-exp fraction"].get())
-            dark_max = int(self.filter_entries["Dark max threshold"].get())
-            entropy_t = float(self.filter_entries["Entropy threshold"].get())
-            droplet_f = float(self.filter_entries["Droplet fraction"].get())
+            under_f = float(
+                self.filter_entries["Under-exp fraction"].get())
+            dark_max = int(
+                self.filter_entries["Dark max threshold"].get())
+            entropy_t = float(
+                self.filter_entries["Entropy threshold"].get())
+            droplet_f = float(
+                self.filter_entries["Droplet fraction"].get())
             obstruct_f = float(
                 self.filter_entries["Obstruction fraction"].get())
 
@@ -593,7 +1138,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
             active = [k for k, v in en.items() if v]
             print(f"\nFiltering {len(images)} images with "
                   f"{len(active)} active filter(s): "
-                  f"{', '.join(active)} …")
+                  f"{', '.join(active)} ...")
             self.bad_list = []
             bad_reasons = {}
             reason_counts = {
@@ -602,6 +1147,8 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
                 "low_information": 0, "lens_droplets": 0,
                 "obstruction": 0,
             }
+
+            start_time = time.time()
 
             for idx, p in enumerate(images):
                 img = cv2.imread(str(p))
@@ -613,17 +1160,23 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
                 reasons = []
                 if en.get("Blur") and is_blurry(img, blur_t):
                     reasons.append("blurry")
-                if en.get("Overexposure") and is_clipped_overexposed(img, clip_f):
+                if (en.get("Overexposure")
+                        and is_clipped_overexposed(img, clip_f)):
                     reasons.append("clipped_overexposed")
-                if en.get("Underexposure") and is_underexposed(img, dark_v, under_f):
+                if (en.get("Underexposure")
+                        and is_underexposed(img, dark_v, under_f)):
                     reasons.append("underexposed")
                 if en.get("Darkness") and is_too_dark(img, dark_max):
                     reasons.append("too_dark")
-                if en.get("Low information") and is_low_information(img, entropy_t):
+                if (en.get("Low information")
+                        and is_low_information(img, entropy_t)):
                     reasons.append("low_information")
-                if en.get("Lens droplets") and has_lens_droplets(img, droplet_f):
+                if (en.get("Lens droplets")
+                        and has_lens_droplets(img, droplet_f)):
                     reasons.append("lens_droplets")
-                if en.get("Obstruction") and has_obstruction(img, block_fraction=obstruct_f):
+                if (en.get("Obstruction")
+                        and has_obstruction(img,
+                                            block_fraction=obstruct_f)):
                     reasons.append("obstruction")
 
                 if reasons:
@@ -631,9 +1184,9 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
                     bad_reasons[p.name] = reasons
                     for r in reasons:
                         reason_counts[r] = reason_counts.get(r, 0) + 1
-                    print(f"  ✗ {p.name}: {', '.join(reasons)}")
+                    print(f"  x {p.name}: {', '.join(reasons)}")
 
-                self.progress_bar.set((idx + 1) / len(images))
+                self._update_progress(idx, len(images), start_time)
 
             n_bad = len(self.bad_list)
             n_good = len(images) - n_bad
@@ -651,6 +1204,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
             print(f"Bad image list saved: {txt_path}")
 
             # update plot
+            self._restore_normal_plots()
             self.axes[1].clear()
             labels = [k for k, v in reason_counts.items() if v > 0]
             values = [reason_counts[k] for k in labels]
@@ -667,26 +1221,129 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
             self.fig.tight_layout()
             self.canvas_plot.draw()
 
+            self.eta_label.configure(text="Done")
+
         except Exception as e:
             print(f"[ERROR] {e}")
             messagebox.showerror("Error", str(e))
+        finally:
+            self._processing = False
 
-    # ——— harmonisation ———
+    # ——— brightness harmonisation ———
 
-    def _harmonise_threaded(self):
-        threading.Thread(target=self._run_harmonise, daemon=True).start()
+    def _preview_brightness_threaded(self):
+        if self._processing:
+            return
+        threading.Thread(target=self._run_preview_brightness,
+                         daemon=True).start()
 
-    def _run_harmonise(self):
+    def _run_preview_brightness(self):
+        """Generate brightness preview on random 5% sample."""
         try:
+            self._processing = True
             self.progress_bar.set(0)
 
-            if not self.input_folder:
-                messagebox.showwarning("Warning",
-                                       "Select an image folder first.")
+            if not self._check_folders():
                 return
-            if not self.output_folder:
+
+            exclude = self.exclude_bad_var.get()
+            images = self._gather_images(exclude_bad=exclude)
+            if not images:
                 messagebox.showwarning("Warning",
-                                       "Select an output folder first.")
+                                       "No images remaining.")
+                return
+
+            tol = float(self.tol_entry.get())
+            sky_pct = float(self.sky_entry.get())
+            sky_frac = max(0.0, min(0.9, sky_pct / 100.0))
+
+            n_preview = preview_sample_count(len(images))
+            sample_indices = sorted(random.sample(
+                range(len(images)), min(n_preview, len(images))))
+
+            print(f"\nBrightness preview: processing {len(sample_indices)} "
+                  f"of {len(images)} images...")
+
+            # pass 1: compute luminance for ALL images to find median
+            print("  Computing luminance statistics...")
+            means = []
+            for p in images:
+                img = cv2.imread(str(p))
+                if img is None:
+                    means.append(np.nan)
+                else:
+                    means.append(mean_luminance(img, sky_frac))
+            means_arr = np.array(means)
+            ref_mean = float(np.nanmedian(means_arr))
+            ref_idx = int(np.nanargmin(np.abs(means_arr - ref_mean)))
+            ref_img = cv2.imread(str(images[ref_idx]))
+            print(f"  Reference luminance: {ref_mean:.1f} "
+                  f"(from {images[ref_idx].name})")
+
+            # pass 2: process sample
+            self.preview_pairs = []
+            start_time = time.time()
+
+            for i, si in enumerate(sample_indices):
+                p = images[si]
+                img = cv2.imread(str(p))
+                if img is None:
+                    continue
+
+                m = means_arr[si]
+                delta = m - ref_mean
+
+                if abs(delta) <= tol:
+                    corrected = img.copy()
+                elif delta <= -2 * tol:
+                    corrected = hist_match(img, ref_img)
+                elif delta >= 2 * tol:
+                    corrected = soft_gain_match(img, ref_mean)
+                else:
+                    corrected = soft_gain_match(img, ref_mean)
+
+                # sanity check
+                if abs(delta) > tol:
+                    corrected, reverted = correction_sanity_check(
+                        img, corrected, ref_mean, sky_frac)
+                    if reverted:
+                        print(f"  [REVERT] {p.name}: correction "
+                              f"worsened luminance")
+
+                self.preview_pairs.append((img, corrected, p.name))
+                self._update_progress(i, len(sample_indices), start_time)
+
+            # enter preview mode — schedule UI updates on main thread
+            # (tkinter + matplotlib canvas ops must run on the main thread)
+            self.preview_mode = "brightness"
+            self.preview_idx = 0
+            self.after(0, self._show_preview_nav)
+            self.after(0, self._update_preview_display)
+            self.after(0, lambda: self.eta_label.configure(
+                text="Preview ready"))
+            print(f"  Preview ready: {len(self.preview_pairs)} images. "
+                  f"Use </> to navigate.")
+
+        except Exception as e:
+            print(f"[ERROR] {e}")
+            messagebox.showerror("Error", str(e))
+        finally:
+            self._processing = False
+
+    def _harmonise_brightness_threaded(self):
+        if self._processing:
+            return
+        threading.Thread(target=self._run_harmonise_brightness,
+                         daemon=True).start()
+
+    def _run_harmonise_brightness(self):
+        """Full brightness harmonisation (original logic, renamed)."""
+        try:
+            self._processing = True
+            self.progress_bar.set(0)
+            self.eta_label.configure(text="ETA: --")
+
+            if not self._check_folders():
                 return
 
             tol = float(self.tol_entry.get())
@@ -705,13 +1362,14 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
 
             if not images:
                 messagebox.showwarning("Warning",
-                                       "No images remaining after filtering.")
+                                       "No images remaining after "
+                                       "filtering.")
                 return
 
             sky_msg = (f", sky mask top {sky_pct:.0f}%"
                        if sky_frac > 0 else "")
-            print(f"\nHarmonising {len(images)} images "
-                  f"(tolerance ±{tol} L-units{sky_msg})…")
+            print(f"\nHarmonising brightness for {len(images)} images "
+                  f"(tolerance +/-{tol} L-units{sky_msg})...")
 
             # ---- pass 1: compute luminance stats ----
             means = []
@@ -730,13 +1388,13 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
             ref_mean = float(np.nanmedian(means_arr))
 
             # reference image: the one closest to median luminance
-            # (not the median-index image, which could be anything)
             ref_idx = int(np.nanargmin(np.abs(means_arr - ref_mean)))
             ref_img = loaded[ref_idx]
             print(f"Reference luminance (median): {ref_mean:.1f}  "
                   f"(image: {images[ref_idx].name})")
 
             # plot luminance distribution
+            self._restore_normal_plots()
             self.axes[0].clear()
             self.axes[0].hist(means_arr[valid], bins=30, color="#3498db",
                               edgecolor="white", alpha=0.8)
@@ -744,7 +1402,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
                                  label=f"Ref={ref_mean:.1f}")
             self.axes[0].axvspan(ref_mean - tol, ref_mean + tol,
                                  alpha=0.15, color="green",
-                                 label=f"±{tol} tolerance")
+                                 label=f"+/-{tol} tolerance")
             self.axes[0].set_title("Luminance Distribution")
             self.axes[0].set_xlabel("Mean L-channel")
             self.axes[0].set_ylabel("Count")
@@ -755,7 +1413,10 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
             counts = {"copy": 0, "histogram": 0, "soft-gain": 0,
                       "bright-gain": 0, "reverted": 0}
 
-            for idx, (p, img, m) in enumerate(zip(images, loaded, means)):
+            start_time = time.time()
+
+            for idx, (p, img, m) in enumerate(
+                    zip(images, loaded, means)):
                 if img is None:
                     continue
 
@@ -780,19 +1441,19 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
                     if reverted:
                         counts["reverted"] += 1
                         print(f"  [REVERT] {p.name}: correction made "
-                              f"luminance worse — kept original")
+                              f"luminance worse - kept original")
 
                 counts[mode] = counts.get(mode, 0) + 1
 
-                # preserve folder structure with _harmonised suffix
+                # preserve folder structure with _brightness_harmonised suffix
                 rel = Path(p).relative_to(input_root)
                 if len(rel.parts) > 1:
                     parent = rel.parent
                     out_parent = Path(self.output_folder) / (
-                        str(parent) + "_harmonised")
+                        str(parent) + "_brightness_harmonised")
                 else:
                     out_parent = Path(self.output_folder) / (
-                        input_root.name + "_harmonised")
+                        input_root.name + "_brightness_harmonised")
                 out_parent.mkdir(parents=True, exist_ok=True)
                 out_path = out_parent / rel.name
 
@@ -800,10 +1461,12 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
 
                 if (idx + 1) % 20 == 0 or idx == 0:
                     print(f"  {idx + 1}/{len(images)} | "
-                          f"{p.name} | ΔL={delta:+.1f} → {mode}")
-                self.progress_bar.set((idx + 1) / len(images))
+                          f"{p.name} | dL={delta:+.1f} -> {mode}")
+                self._update_progress(idx, len(images), start_time)
 
-            print(f"\nHarmonisation complete:")
+            elapsed = time.time() - start_time
+            print(f"\nBrightness harmonisation complete "
+                  f"({format_eta(elapsed)} elapsed):")
             for k, v in counts.items():
                 if v > 0:
                     print(f"  {k}: {v}")
@@ -821,19 +1484,240 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
                              plot_values,
                              color=[bar_colors.get(k, "#3498db")
                                     for k in plot_labels])
-            self.axes[2].set_title("Harmonisation Results")
+            self.axes[2].set_title("Brightness Results")
             self.axes[2].set_ylabel("Count")
 
             self.fig.tight_layout()
             self.canvas_plot.draw()
 
-            messagebox.showinfo("Done",
-                                f"Harmonised images saved to:\n"
-                                f"{self.output_folder}")
+            self.eta_label.configure(text="Done")
+            messagebox.showinfo(
+                "Done",
+                f"Brightness-harmonised images saved to:\n"
+                f"{self.output_folder}")
 
         except Exception as e:
             print(f"[ERROR] {e}")
             messagebox.showerror("Error", str(e))
+        finally:
+            self._processing = False
+
+    # ——— colour harmonisation ———
+
+    def _preview_colour_threaded(self):
+        if self._processing:
+            return
+        threading.Thread(target=self._run_preview_colour,
+                         daemon=True).start()
+
+    def _run_preview_colour(self):
+        """Generate colour preview on random 5% sample."""
+        try:
+            self._processing = True
+            self.progress_bar.set(0)
+
+            if not self._check_folders():
+                return
+            if self.ref_colour_bgr is None:
+                messagebox.showwarning(
+                    "Warning",
+                    "Select a reference image for colour first.")
+                return
+
+            exclude = self.exclude_bad_colour_var.get()
+            images = self._gather_images(exclude_bad=exclude)
+
+            # exclude the reference image itself
+            ref_abs = os.path.abspath(self.ref_colour_path)
+            images = [p for p in images
+                      if os.path.abspath(str(p)) != ref_abs]
+
+            if not images:
+                messagebox.showwarning("Warning",
+                                       "No images remaining.")
+                return
+
+            algo_name = self.colour_algo_var.get()
+            algo_fn = COLOUR_ALGORITHMS[algo_name]
+
+            n_preview = preview_sample_count(len(images))
+            sample_indices = sorted(random.sample(
+                range(len(images)), min(n_preview, len(images))))
+
+            print(f"\nColour preview ({algo_name}): processing "
+                  f"{len(sample_indices)} of {len(images)} images...")
+
+            self.preview_pairs = []
+            start_time = time.time()
+
+            for i, si in enumerate(sample_indices):
+                p = images[si]
+                img = cv2.imread(str(p))
+                if img is None:
+                    continue
+
+                corrected = algo_fn(img, self.ref_colour_bgr)
+
+                # sanity check
+                corrected, reverted = colour_sanity_check(
+                    img, corrected, self.ref_colour_bgr)
+                if reverted:
+                    print(f"  [REVERT] {p.name}: colour correction "
+                          f"worsened - kept original")
+
+                self.preview_pairs.append((img, corrected, p.name))
+                self._update_progress(i, len(sample_indices), start_time)
+
+            # enter preview mode — schedule UI updates on main thread
+            self.preview_mode = "colour"
+            self.preview_idx = 0
+            self.after(0, self._show_preview_nav)
+            self.after(0, self._update_preview_display)
+            self.after(0, lambda: self.eta_label.configure(
+                text="Preview ready"))
+            print(f"  Preview ready: {len(self.preview_pairs)} images. "
+                  f"Use </> to navigate.")
+
+        except Exception as e:
+            print(f"[ERROR] {e}")
+            messagebox.showerror("Error", str(e))
+        finally:
+            self._processing = False
+
+    def _harmonise_colour_threaded(self):
+        if self._processing:
+            return
+        threading.Thread(target=self._run_harmonise_colour,
+                         daemon=True).start()
+
+    def _run_harmonise_colour(self):
+        """Full colour harmonisation to reference image."""
+        try:
+            self._processing = True
+            self.progress_bar.set(0)
+            self.eta_label.configure(text="ETA: --")
+
+            if not self._check_folders():
+                return
+            if self.ref_colour_bgr is None:
+                messagebox.showwarning(
+                    "Warning",
+                    "Select a reference image for colour first.")
+                return
+
+            exclude = self.exclude_bad_colour_var.get()
+            images = self._gather_images(exclude_bad=exclude)
+
+            # exclude reference from processing
+            ref_abs = os.path.abspath(self.ref_colour_path)
+            images = [p for p in images
+                      if os.path.abspath(str(p)) != ref_abs]
+
+            if not images:
+                messagebox.showwarning("Warning",
+                                       "No images remaining.")
+                return
+
+            algo_name = self.colour_algo_var.get()
+            algo_fn = COLOUR_ALGORITHMS[algo_name]
+
+            print(f"\nColour harmonisation ({algo_name}): "
+                  f"{len(images)} images...")
+            print(f"  Reference: "
+                  f"{os.path.basename(self.ref_colour_path)}")
+
+            input_root = Path(self.input_folder)
+            counts = {"corrected": 0, "reverted": 0}
+            start_time = time.time()
+
+            for idx, p in enumerate(images):
+                img = cv2.imread(str(p))
+                if img is None:
+                    print(f"[WARN] Cannot read: {p.name}")
+                    continue
+
+                corrected = algo_fn(img, self.ref_colour_bgr)
+
+                # sanity check
+                corrected, reverted = colour_sanity_check(
+                    img, corrected, self.ref_colour_bgr)
+                if reverted:
+                    counts["reverted"] += 1
+                    print(f"  [REVERT] {p.name}: colour correction "
+                          f"worsened - kept original")
+                else:
+                    counts["corrected"] += 1
+
+                # preserve folder structure
+                rel = Path(p).relative_to(input_root)
+                if len(rel.parts) > 1:
+                    parent = rel.parent
+                    out_parent = Path(self.output_folder) / (
+                        str(parent) + "_colour_harmonised")
+                else:
+                    out_parent = Path(self.output_folder) / (
+                        input_root.name + "_colour_harmonised")
+                out_parent.mkdir(parents=True, exist_ok=True)
+                out_path = out_parent / rel.name
+
+                cv2.imwrite(str(out_path), corrected)
+
+                if (idx + 1) % 10 == 0 or idx == 0:
+                    print(f"  {idx + 1}/{len(images)} | {p.name}")
+                self._update_progress(idx, len(images), start_time)
+
+            elapsed = time.time() - start_time
+            print(f"\nColour harmonisation complete "
+                  f"({format_eta(elapsed)} elapsed):")
+            print(f"  corrected: {counts['corrected']}")
+            if counts["reverted"] > 0:
+                print(f"  reverted:  {counts['reverted']}")
+
+            # update result plot
+            self._restore_normal_plots()
+
+            # show reference in first panel
+            self.axes[0].imshow(
+                cv2.cvtColor(self.ref_colour_bgr, cv2.COLOR_BGR2RGB))
+            self.axes[0].set_title("Colour Reference", fontsize=9)
+            self.axes[0].axis("off")
+
+            # show counts in second panel
+            self.axes[1].clear()
+            plot_labels = [k for k in counts if counts[k] > 0]
+            plot_values = [counts[k] for k in plot_labels]
+            bar_colors = {"corrected": "#2ecc71", "reverted": "#7f8c8d"}
+            self.axes[1].bar(plot_labels, plot_values,
+                             color=[bar_colors.get(k, "#3498db")
+                                    for k in plot_labels])
+            self.axes[1].set_title("Colour Results")
+            self.axes[1].set_ylabel("Count")
+
+            self.axes[2].set_title(
+                f"Algorithm: {algo_name}", fontsize=9)
+            self.axes[2].text(
+                0.5, 0.5,
+                f"{counts['corrected']} corrected\n"
+                f"{counts['reverted']} reverted\n"
+                f"{format_eta(elapsed)} elapsed",
+                ha="center", va="center", fontsize=12,
+                transform=self.axes[2].transAxes)
+            self.axes[2].axis("off")
+
+            self.fig.tight_layout()
+            self.canvas_plot.draw()
+
+            self.eta_label.configure(text="Done")
+            messagebox.showinfo(
+                "Done",
+                f"Colour-harmonised images saved to:\n"
+                f"{self.output_folder}")
+
+        except Exception as e:
+            print(f"[ERROR] {e}")
+            messagebox.showerror("Error", str(e))
+        finally:
+            self._processing = False
 
 
 # ——— standalone ———

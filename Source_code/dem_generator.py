@@ -149,26 +149,18 @@ class CreateDemWindow(ctk.CTkToplevel):
         inputs = ctk.CTkFrame(self.bottom_frame)
         inputs.pack(side="top", fill="x", padx=5, pady=5)
 
-        ctk.CTkLabel(inputs, text="Water‑level CSV:").pack(side="left", padx=5)
         self.wl_csv_var = tk.StringVar()
         ctk.CTkEntry(inputs, textvariable=self.wl_csv_var, width=240).pack(side="left", padx=5)
-        ctk.CTkButton(inputs, text="Browse", command=self.browse_wl_csv).pack(side="left", padx=5)
+        ctk.CTkButton(inputs, text="Browse Water‑Level CSV",
+                       command=self.browse_wl_csv).pack(side="left", padx=5)
 
-        ctk.CTkLabel(inputs, text="GeoJSON folder:").pack(side="left", padx=15)
         self.geojson_dir_var = tk.StringVar()
         ctk.CTkEntry(inputs, textvariable=self.geojson_dir_var, width=240).pack(side="left", padx=5)
-        ctk.CTkButton(inputs, text="Browse", command=self.browse_geojson_dir).pack(side="left", padx=5)
+        ctk.CTkButton(inputs, text="Browse GeoJSON Folder",
+                       command=self.browse_geojson_dir).pack(side="left", padx=5)
 
         ctk.CTkLabel(inputs, text="Filename pattern:").pack(side="left", padx=15)
         ctk.CTkEntry(inputs, textvariable=self.regex_var, width=320).pack(side="left", padx=5)
-
-        ctk.CTkLabel(inputs, text="Output folder:").pack(side="left", padx=15)
-        self.out_dir_var = tk.StringVar()
-        out_entry = ctk.CTkEntry(inputs, textvariable=self.out_dir_var, width=180)
-        out_entry.pack(side="left", padx=5)
-        ctk.CTkButton(inputs, text="Browse", command=self.browse_out_dir).pack(side="left", padx=5)
-        self.out_dir_display_label = ctk.CTkLabel(inputs, text="", width=240)
-        self.out_dir_display_label.pack(side="left", padx=5)
 
         # ————————————— DEM settings row —————————————
         dem = ctk.CTkFrame(self.bottom_frame)
@@ -193,14 +185,15 @@ class CreateDemWindow(ctk.CTkToplevel):
         out = ctk.CTkFrame(self.bottom_frame)
         out.pack(side="top", fill="x", padx=5, pady=5)
 
-        ctk.CTkCheckBox(out, text="Export XYZ?", variable=self.export_xyz_var,
-                        command=self.on_toggle_export_xyz).pack(side="left", padx=20)
-        self.xyz_folder_var = tk.StringVar()
-        self.xyz_btn = ctk.CTkButton(out, text="Select XYZ folder", command=self.browse_xyz_folder)
-        self.xyz_btn.pack(side="left", padx=5)
-        self.xyz_display = ctk.CTkLabel(out, text="", width=240)
-        self.xyz_display.pack(side="left", padx=5)
-        self.xyz_btn.configure(state="disabled")
+        self.out_dir_var = tk.StringVar()
+        ctk.CTkEntry(out, textvariable=self.out_dir_var, width=240).pack(side="left", padx=5)
+        ctk.CTkButton(out, text="Browse Output Folder",
+                       command=self.browse_out_dir, fg_color="#8C7738").pack(side="left", padx=5)
+        self.out_dir_display_label = ctk.CTkLabel(out, text="", width=240)
+        self.out_dir_display_label.pack(side="left", padx=5)
+
+        ctk.CTkCheckBox(out, text="Export XYZ?",
+                        variable=self.export_xyz_var).pack(side="left", padx=20)
 
         ctk.CTkButton(out, text="Batch process",
                        command=self.on_batch_process, fg_color="#0F52BA").pack(side="left", padx=25)
@@ -226,17 +219,7 @@ class CreateDemWindow(ctk.CTkToplevel):
             self.out_dir_var.set(path)
             self.out_dir_display_label.configure(text=path)
 
-    def browse_xyz_folder(self):
-        path = filedialog.askdirectory()
-        if path:
-            self.xyz_folder_var.set(path)
-            self.xyz_display.configure(text=path)
 
-    def on_toggle_export_xyz(self):
-        state = "normal" if self.export_xyz_var.get() else "disabled"
-        self.xyz_btn.configure(state=state)
-        if state == "disabled":
-            self.xyz_display.configure(text="")
 
     # ————————————————————————— reset ———————————————————————————————————
     def _invalidate_caches(self):
@@ -266,9 +249,7 @@ class CreateDemWindow(ctk.CTkToplevel):
 
         # clear path displays
         self.out_dir_display_label.configure(text="")
-        self.xyz_display.configure(text="")
         self.export_xyz_var.set(False)
-        self.xyz_btn.configure(state="disabled")
 
         print("\n--- Session reset. All caches cleared. ---\n")
 
@@ -681,12 +662,10 @@ class CreateDemWindow(ctk.CTkToplevel):
         print(f"Saved DEM → {out_path}")
 
         if self.export_xyz_var.get():
-            folder = self.xyz_folder_var.get().strip()
-            if folder:
-                xyz_df = pd.DataFrame(xyz_all, columns=["x", "y", "z"])
-                csv_path = Path(folder) / f"shoreline_xyz_{date_val}.csv"
-                xyz_df.to_csv(csv_path, index=False)
-                print(f"Exported XYZ → {csv_path}")
+            xyz_df = pd.DataFrame(xyz_all, columns=["x", "y", "z"])
+            csv_path = Path(out_dir) / f"shoreline_xyz_{date_val}.csv"
+            xyz_df.to_csv(csv_path, index=False)
+            print(f"Exported XYZ → {csv_path}")
         return dem_masked
 
     # ————————————————————— UI actions —————————————————————————————————

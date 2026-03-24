@@ -17,6 +17,7 @@ from harmonise_images import HarmoniseImagesWindow
 
 from exploration import TimeSeriesExplorerWindow
 from profile_tool import ProfileHovmullerWindow
+from colour_explorer import ColorSpaceExplorerWindow
 
 # 1) Resource helper for PyInstaller or direct script
 def resource_path(relative_path: str) -> str:
@@ -97,6 +98,9 @@ def launcher_window():
     def open_timeseries():
         TimeSeriesExplorerWindow(master=dialog)
 
+    def open_color_explorer():
+        ColorSpaceExplorerWindow(master=dialog)
+
     def open_profile():
         ProfileHovmullerWindow(master=dialog)
 
@@ -158,6 +162,7 @@ def launcher_window():
     exp_frame = ctk.CTkFrame(frame, fg_color="transparent")
     exp_frame.pack(fill="x", pady=5)
     ctk.CTkButton(exp_frame, text="Time Series Analysis", command=open_timeseries).pack(side="left", padx=5)
+    ctk.CTkButton(exp_frame, text="Color Space Explorer", command=open_color_explorer).pack(side="left", padx=5)
 
 
     # (D) DEM Generator

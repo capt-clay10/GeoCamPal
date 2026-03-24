@@ -178,6 +178,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
 
         # ---------------- state ----------------
         self.H: np.ndarray | None = None
+        self.matrix_epsg: int | None = None
         self.image_list = []
         self.input_folder = ""
         self.output_folder = ""
@@ -323,9 +324,10 @@ class GeoReferenceModule(ctk.CTkToplevel):
 
         self.output_folder_label = ctk.CTkLabel(self.final_panel, text="Output Folder: Not selected")
         self.output_folder_label.pack(side="left", padx=5)
-        ctk.CTkButton(self.final_panel, text="Browse Output Folder", command=self.select_output_folder).pack(side="left", padx=5)
+        ctk.CTkButton(self.final_panel, text="Browse Output Folder", command=self.select_output_folder, fg_color="#8C7738").pack(side="left", padx=5)
 
-        self.epsg_entry = ctk.CTkEntry(self.final_panel, width=80, placeholder_text="EPSG Code")
+        self.epsg_entry = ctk.CTkEntry(self.final_panel, width=100,
+                                       placeholder_text="EPSG (optional)")
         self.epsg_entry.pack(side="left", padx=5)
 
         ctk.CTkButton(self.final_panel, text="Final Georeferencing",
@@ -382,6 +384,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
         
         # ---- Reset state variables ----
         self.H = None
+        self.matrix_epsg = None
         self.image_list = []
         self.input_folder = ""
         self.output_folder = ""
@@ -438,9 +441,27 @@ class GeoReferenceModule(ctk.CTkToplevel):
         path = filedialog.askopenfilename(filetypes=[("Text Files", "*.txt")])
         if path:
             try:
+                # Parse EPSG from comment header if present
+                self.matrix_epsg = None
+                with open(path, 'r') as f:
+                    first_line = f.readline().strip()
+                    if first_line.startswith('#') and 'EPSG:' in first_line:
+                        import re
+                        match = re.search(r'EPSG:(\d+)', first_line)
+                        if match:
+                            self.matrix_epsg = int(match.group(1))
+                            print(f"[CRS] EPSG:{self.matrix_epsg} detected "
+                                  f"from homography matrix")
+
                 self.H = np.loadtxt(path).reshape(3, 3)
                 self.homo_entry.delete(0, "end")
                 self.homo_entry.insert(0, path)
+
+                # Auto-fill EPSG entry if empty and we found one
+                if self.matrix_epsg and not self.epsg_entry.get().strip():
+                    self.epsg_entry.insert(0, str(self.matrix_epsg))
+                    print(f"[CRS] Auto-filled EPSG entry with "
+                          f"{self.matrix_epsg}")
             except Exception as e:
                 messagebox.showerror(
                     "Error", f"Invalid homography matrix: {str(e)}")
@@ -809,9 +830,21 @@ class GeoReferenceModule(ctk.CTkToplevel):
             return
         try:
             self.user_epsg = int(self.epsg_entry.get())
+            if self.matrix_epsg and self.user_epsg != self.matrix_epsg:
+                print(f"[CRS] User EPSG:{self.user_epsg} overrides "
+                      f"matrix EPSG:{self.matrix_epsg}")
         except ValueError:
-            messagebox.showerror("Error", "Please enter a valid EPSG code before running.")
-            return
+            if self.matrix_epsg:
+                self.user_epsg = self.matrix_epsg
+                print(f"[CRS] Using EPSG:{self.matrix_epsg} from "
+                      f"homography matrix")
+            else:
+                messagebox.showerror(
+                    "Error",
+                    "No EPSG code available.\n\n"
+                    "Enter one manually, or use a homography matrix "
+                    "with embedded CRS.")
+                return
 
         def _worker():
             total, start_ts = len(self.image_list), time.time()
@@ -938,9 +971,21 @@ class GeoReferenceModule(ctk.CTkToplevel):
             return
         try:
             self.user_epsg = int(self.epsg_entry.get())
+            if self.matrix_epsg and self.user_epsg != self.matrix_epsg:
+                print(f"[CRS] User EPSG:{self.user_epsg} overrides "
+                      f"matrix EPSG:{self.matrix_epsg}")
         except ValueError:
-            messagebox.showerror("Error", "Please enter a valid EPSG code before running.")
-            return
+            if self.matrix_epsg:
+                self.user_epsg = self.matrix_epsg
+                print(f"[CRS] Using EPSG:{self.matrix_epsg} from "
+                      f"homography matrix")
+            else:
+                messagebox.showerror(
+                    "Error",
+                    "No EPSG code available.\n\n"
+                    "Enter one manually, or use a homography matrix "
+                    "with embedded CRS.")
+                return
 
         print(f"Batch process has started (≤ {MAX_BATCH_WORKERS} workers)\n")
 

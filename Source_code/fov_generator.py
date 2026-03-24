@@ -193,25 +193,66 @@ def compute_headings_for_overlap(cam_params, base_heading_deg, overlap_pct):
     return [r + shift for r in rel]
 
 
-# ——— simple line‑of‑sight viewshed on a DEM ———
+# ——— bilinear interpolation helper ———
+
+def _bilinear_sample(grid_z, xs, ys, query_x, query_y):
+    """
+    Bilinear interpolation on a regular grid.
+
+    Parameters
+    ----------
+    grid_z : np.ndarray (H, W)  — elevation grid
+    xs : np.ndarray (W,)        — x coordinates of grid columns
+    ys : np.ndarray (H,)        — y coordinates of grid rows (top→bottom)
+    query_x, query_y : np.ndarray — query coordinates (same shape)
+
+    Returns
+    -------
+    np.ndarray — interpolated values, same shape as query_x
+    """
+    # compute fractional indices
+    fx = (query_x - xs[0]) / (xs[-1] - xs[0]) * (len(xs) - 1)
+    fy = (query_y - ys[0]) / (ys[-1] - ys[0]) * (len(ys) - 1)
+
+    ix0 = np.clip(np.floor(fx).astype(int), 0, len(xs) - 2)
+    iy0 = np.clip(np.floor(fy).astype(int), 0, len(ys) - 2)
+    ix1 = ix0 + 1
+    iy1 = iy0 + 1
+
+    # fractional part
+    wx = np.clip(fx - ix0, 0.0, 1.0)
+    wy = np.clip(fy - iy0, 0.0, 1.0)
+
+    # four corner values
+    v00 = grid_z[iy0, ix0]
+    v01 = grid_z[iy0, ix1]
+    v10 = grid_z[iy1, ix0]
+    v11 = grid_z[iy1, ix1]
+
+    # bilinear blend
+    return (v00 * (1 - wx) * (1 - wy) +
+            v01 * wx * (1 - wy) +
+            v10 * (1 - wx) * wy +
+            v11 * wx * wy)
+
+
+# ——— vectorised line‑of‑sight viewshed on a DEM ———
 
 def compute_viewshed_mask(dem_path, x0, y0, cam_height_m, utm_crs,
-                          bounds, width_px=400, height_px=400):
+                          bounds, width_px=600, height_px=600):
     """
-    Return a boolean mask (height_px × width_px) where True = visible from camera.
-    Uses ray marching along radial lines sampled from the DEM.
+    Return (bool_mask, cam_ground_z) where True = visible from camera.
+    Uses vectorised ray marching along radial lines sampled from the DEM
+    with bilinear interpolation for terrain lookups.
+    Returns (None, 0.0) on failure.
     """
     if not HAS_RASTERIO:
-        return None
+        return None, 0.0
     try:
         with rasterio.open(dem_path) as src:
             dem_crs = src.crs
-            # transform bounds to DEM CRS
-            left, bottom, right, top = bounds
             transformer_to_dem = pyproj.Transformer.from_crs(
                 utm_crs, dem_crs, always_xy=True)
-            transformer_from_dem = pyproj.Transformer.from_crs(
-                dem_crs, utm_crs, always_xy=True)
 
             dem_data = src.read(1).astype(np.float32)
             dem_transform = src.transform
@@ -219,8 +260,8 @@ def compute_viewshed_mask(dem_path, x0, y0, cam_height_m, utm_crs,
 
             # camera position in DEM pixel space
             x0_dem, y0_dem = transformer_to_dem.transform(x0, y0)
-            cam_row, cam_col = ~dem_transform * (x0_dem, y0_dem)
-            cam_row, cam_col = int(cam_row), int(cam_col)
+            cam_col, cam_row = ~dem_transform * (x0_dem, y0_dem)
+            cam_row, cam_col = int(round(cam_row)), int(round(cam_col))
 
             # camera ground elevation from DEM
             if (0 <= cam_row < dem_data.shape[0] and
@@ -232,64 +273,78 @@ def compute_viewshed_mask(dem_path, x0, y0, cam_height_m, utm_crs,
                 cam_ground_z = 0.0
             cam_z = cam_ground_z + cam_height_m
 
-        # build output grid in UTM
-        xs = np.linspace(left, right, width_px)
-        ys = np.linspace(top, bottom, height_px)  # top→bottom
+            # sample DEM elevations on the output grid
+            left, bottom, right, top = bounds
+            xs = np.linspace(left, right, width_px)
+            ys = np.linspace(top, bottom, height_px)  # top→bottom
+
+            grid_x, grid_y = np.meshgrid(xs, ys)
+            gx_dem, gy_dem = transformer_to_dem.transform(
+                grid_x.ravel(), grid_y.ravel())
+            gx_dem = np.array(gx_dem).reshape(grid_x.shape)
+            gy_dem = np.array(gy_dem).reshape(grid_y.shape)
+
+            rows_f = (gy_dem - dem_transform.f) / dem_transform.e
+            cols_f = (gx_dem - dem_transform.c) / dem_transform.a
+
+            # bilinear sample from DEM
+            r0 = np.clip(np.floor(rows_f).astype(int), 0, dem_data.shape[0] - 2)
+            c0 = np.clip(np.floor(cols_f).astype(int), 0, dem_data.shape[1] - 2)
+            r1 = r0 + 1
+            c1 = c0 + 1
+            wr = np.clip(rows_f - r0, 0.0, 1.0)
+            wc = np.clip(cols_f - c0, 0.0, 1.0)
+
+            grid_z = (dem_data[r0, c0] * (1 - wr) * (1 - wc) +
+                      dem_data[r0, c1] * (1 - wr) * wc +
+                      dem_data[r1, c0] * wr * (1 - wc) +
+                      dem_data[r1, c1] * wr * wc)
+
+            if dem_nodata is not None:
+                grid_z[grid_z == dem_nodata] = 0.0
+
+        # vectorised ray march: for each output pixel, check LOS
+        # compute distances from camera to each grid point
+        dx = grid_x - x0
+        dy = grid_y - y0
+        dist = np.sqrt(dx * dx + dy * dy)
+
+        # target elevations
+        target_z = grid_z.copy()
+
+        # number of steps scales with distance (every ~3 m for finer sampling)
+        max_dist = float(np.max(dist))
+        n_steps = max(int(max_dist / 3.0), 10)
+
         vis = np.ones((height_px, width_px), dtype=bool)
 
-        # sample DEM elevations on the output grid
-        grid_x, grid_y = np.meshgrid(xs, ys)
-        gx_dem, gy_dem = transformer_to_dem.transform(
-            grid_x.ravel(), grid_y.ravel())
-        gx_dem = np.array(gx_dem).reshape(grid_x.shape)
-        gy_dem = np.array(gy_dem).reshape(grid_y.shape)
+        # vectorised: check all pixels at each fractional step
+        for step in range(1, n_steps):
+            frac = step / n_steps
+            # intermediate positions along each ray
+            sx = x0 + dx * frac
+            sy = y0 + dy * frac
 
-        with rasterio.open(dem_path) as src:
-            dem_data = src.read(1).astype(np.float32)
-            dem_t = src.transform
+            # LOS height at this fraction
+            los_z = cam_z + (target_z - cam_z) * frac
 
-        rows_dem = ((gy_dem - dem_t.f) / dem_t.e).astype(int)
-        cols_dem = ((gx_dem - dem_t.c) / dem_t.a).astype(int)
-        rows_dem = np.clip(rows_dem, 0, dem_data.shape[0] - 1)
-        cols_dem = np.clip(cols_dem, 0, dem_data.shape[1] - 1)
-        grid_z = dem_data[rows_dem, cols_dem]
-        if dem_nodata is not None:
-            grid_z[grid_z == dem_nodata] = 0.0
+            # terrain height at intermediate positions (bilinear)
+            terrain_z = _bilinear_sample(grid_z, xs, ys, sx, sy)
 
-        # ray march: for each output pixel, check LOS
-        for iy in range(height_px):
-            for ix in range(width_px):
-                tx, ty = xs[ix], ys[iy]
-                tz = float(grid_z[iy, ix])
-                dx = tx - x0
-                dy = ty - y0
-                dist = math.sqrt(dx * dx + dy * dy)
-                if dist < 1.0:
-                    continue
-                # check intermediate points
-                n_steps = max(int(dist / 5.0), 5)  # every ~5 m
-                blocked = False
-                for step in range(1, n_steps):
-                    frac = step / n_steps
-                    sx = x0 + dx * frac
-                    sy = y0 + dy * frac
-                    # LOS height at this fraction
-                    los_z = cam_z + (tz - cam_z) * frac
-                    # DEM height at this position
-                    si = int((sy - ys[0]) / (ys[-1] - ys[0]) * (height_px - 1))
-                    sj = int((sx - xs[0]) / (xs[-1] - xs[0]) * (width_px - 1))
-                    si = max(0, min(height_px - 1, si))
-                    sj = max(0, min(width_px - 1, sj))
-                    terrain_z = float(grid_z[si, sj])
-                    if terrain_z > los_z:
-                        blocked = True
-                        break
-                if blocked:
-                    vis[iy, ix] = False
-        return vis
+            # mark blocked where terrain exceeds LOS
+            newly_blocked = (terrain_z > los_z) & (dist > 1.0)
+            vis[newly_blocked] = False
+
+        # pixels very close to camera are always visible
+        vis[dist < 1.0] = True
+
+        return vis, cam_ground_z
+
     except Exception as e:
         print(f"[WARN] Viewshed computation failed: {e}")
-        return None
+        import traceback
+        traceback.print_exc()
+        return None, 0.0
 
 
 # ——— load basemap helpers ———
@@ -327,6 +382,184 @@ def _load_geotiff_basemap(path, ax, bounds_utm, utm_crs):
     except Exception as e:
         print(f"[WARN] Could not load basemap: {e}")
         return False
+
+
+# ——— DEM hillshade fallback ———
+
+def _compute_hillshade(elevation, azimuth_deg=315, altitude_deg=45,
+                       cell_size=1.0):
+    """Return a 0–1 hillshade array from an elevation grid."""
+    az = math.radians(azimuth_deg)
+    alt = math.radians(altitude_deg)
+    dy, dx = np.gradient(elevation, cell_size)
+    slope = np.arctan(np.sqrt(dx * dx + dy * dy))
+    aspect = np.arctan2(-dy, dx)
+    hs = (np.sin(alt) * np.cos(slope) +
+          np.cos(alt) * np.sin(slope) * np.cos(az - aspect))
+    hs = np.clip(hs, 0, 1)
+    return hs
+
+
+def _load_dem_hillshade(dem_path, ax, bounds_utm, utm_crs):
+    """Render a hillshade derived from the DEM as background.
+
+    Returns (True, e_min, e_max) on success, (False, None, None) on failure.
+    """
+    if not HAS_RASTERIO:
+        return False, None, None
+    try:
+        with rasterio.open(dem_path) as src:
+            left, bottom, right, top = bounds_utm
+            bm_bounds = transform_bounds(utm_crs, src.crs,
+                                         left, bottom, right, top,
+                                         densify_pts=21)
+            from rasterio.windows import from_bounds
+            window = from_bounds(*bm_bounds, transform=src.transform)
+            elev = src.read(1, window=window).astype(np.float32)
+            nodata = src.nodata
+            if nodata is not None:
+                elev[elev == nodata] = np.nanmin(
+                    elev[elev != nodata]) if np.any(elev != nodata) else 0.0
+            # estimate cell size in metres from the window transform
+            win_transform = src.window_transform(window)
+            cell_m = abs(win_transform.a)
+            # if DEM CRS is geographic (degrees), approximate metres
+            if src.crs and src.crs.is_geographic:
+                cell_m = cell_m * 111_000.0
+
+        hs = _compute_hillshade(elev, cell_size=max(cell_m, 0.01))
+        # colour the hillshade with a terrain tint
+        terrain_cmap = plt.cm.terrain
+        # normalise elevation for colour
+        e_min, e_max = float(np.nanmin(elev)), float(np.nanmax(elev))
+        if e_max - e_min < 0.01:
+            e_norm = np.zeros_like(elev)
+        else:
+            e_norm = (elev - e_min) / (e_max - e_min)
+        rgb = terrain_cmap(e_norm)[..., :3]
+        # blend hillshade with terrain colour
+        hs3 = np.dstack([hs, hs, hs])
+        blended = np.clip(rgb * 0.5 + hs3 * 0.5, 0, 1)
+
+        ax.imshow(blended, extent=[left, right, bottom, top],
+                  origin="upper", aspect="equal", zorder=0, alpha=0.85)
+        return True, e_min, e_max
+    except Exception as e:
+        print(f"[WARN] Could not render DEM hillshade: {e}")
+        return False, None, None
+
+
+# ——— query DEM elevation at a point ———
+
+def _query_dem_elevation(dem_path, x_utm, y_utm, utm_crs):
+    """Return ground elevation (m) at a UTM point from the DEM."""
+    if not HAS_RASTERIO:
+        return None
+    try:
+        with rasterio.open(dem_path) as src:
+            transformer = pyproj.Transformer.from_crs(
+                utm_crs, src.crs, always_xy=True)
+            x_dem, y_dem = transformer.transform(x_utm, y_utm)
+            row, col = ~src.transform * (x_dem, y_dem)
+            row, col = int(round(row)), int(round(col))
+            data = src.read(1)
+            if 0 <= row < data.shape[0] and 0 <= col < data.shape[1]:
+                val = float(data[row, col])
+                if src.nodata is not None and val == src.nodata:
+                    return 0.0
+                return val
+        return 0.0
+    except Exception:
+        return None
+
+
+# ——— get DEM elevation range within bounds (for colorbar) ———
+
+def _get_dem_elevation_range(dem_path, bounds_utm, utm_crs):
+    """Return (e_min, e_max) from the DEM within the given UTM bounds."""
+    if not HAS_RASTERIO:
+        return None, None
+    try:
+        with rasterio.open(dem_path) as src:
+            left, bottom, right, top = bounds_utm
+            bm_bounds = transform_bounds(utm_crs, src.crs,
+                                         left, bottom, right, top,
+                                         densify_pts=21)
+            from rasterio.windows import from_bounds
+            window = from_bounds(*bm_bounds, transform=src.transform)
+            elev = src.read(1, window=window).astype(np.float32)
+            nodata = src.nodata
+            if nodata is not None:
+                elev = elev[elev != nodata]
+            if elev.size == 0:
+                return None, None
+            return float(np.nanmin(elev)), float(np.nanmax(elev))
+    except Exception:
+        return None, None
+
+
+# ——— vectorised FOV mask rasterisation ———
+
+def _rasterise_fov_mask(wedge_union, bounds, width_px, height_px):
+    """
+    Return a bool mask (height_px × width_px) True inside the FOV union.
+    Uses vectorised approach with Shapely's prepared geometry and chunked
+    point-in-polygon testing.
+    """
+    from shapely.prepared import prep
+    left, bottom, right, top = bounds
+    xs = np.linspace(left, right, width_px)
+    ys = np.linspace(top, bottom, height_px)
+
+    grid_x, grid_y = np.meshgrid(xs, ys)
+    points_flat = np.column_stack([grid_x.ravel(), grid_y.ravel()])
+
+    # use Shapely's vectorised contains if available (shapely >= 2.0)
+    try:
+        from shapely import contains_xy
+        mask_flat = contains_xy(wedge_union, points_flat[:, 0], points_flat[:, 1])
+        return mask_flat.reshape(height_px, width_px)
+    except ImportError:
+        pass
+
+    # fallback: use prepared geometry with MultiPoint chunks
+    prepared = prep(wedge_union)
+    mask = np.zeros(height_px * width_px, dtype=bool)
+
+    # process in row chunks for efficiency
+    chunk_size = width_px
+    for i in range(0, len(points_flat), chunk_size):
+        chunk = points_flat[i:i + chunk_size]
+        mp = geom.MultiPoint(chunk.tolist())
+        result = prepared.intersects(mp)
+        if result:
+            # need per-point test for this chunk
+            for j, pt in enumerate(chunk):
+                if prepared.contains(geom.Point(pt[0], pt[1])):
+                    mask[i + j] = True
+
+    return mask.reshape(height_px, width_px)
+
+
+# ——— auto-detect DEM native resolution ———
+
+def _get_dem_native_res_m(dem_path, utm_crs):
+    """
+    Return approximate DEM cell size in metres.
+    Used to auto-scale viewshed grid resolution.
+    """
+    if not HAS_RASTERIO:
+        return None
+    try:
+        with rasterio.open(dem_path) as src:
+            cell_x = abs(src.transform.a)
+            cell_y = abs(src.transform.e)
+            cell = (cell_x + cell_y) / 2.0
+            if src.crs and src.crs.is_geographic:
+                cell = cell * 111_000.0
+            return cell
+    except Exception:
+        return None
 
 
 # ——— scale bar ———
@@ -376,7 +609,7 @@ class FOVGeneratorWindow(ctk.CTkToplevel):
     def __init__(self, master=None, **kw):
         super().__init__(master=master, **kw)
         self.title("Field of View Generator")
-        self.geometry("1300x900")
+        self.geometry("1400x1050")
         try:
             self.iconbitmap(resource_path("launch_logo.ico"))
         except Exception:
@@ -386,11 +619,12 @@ class FOVGeneratorWindow(ctk.CTkToplevel):
         self.basemap_path = None
         self.dem_path = None
         self.output_folder = None
+        self.ax_vs = None
 
         # ——— layout: top display, bottom controls, console ———
-        self.grid_rowconfigure(0, weight=3)
+        self.grid_rowconfigure(0, weight=4)
         self.grid_rowconfigure(1, weight=0)
-        self.grid_rowconfigure(2, weight=1)
+        self.grid_rowconfigure(2, weight=1, minsize=160)
         self.grid_columnconfigure(0, weight=1)
 
         # ---- TOP: display panel (plot left, legend right) ----
@@ -476,7 +710,7 @@ class FOVGeneratorWindow(ctk.CTkToplevel):
             e.grid(row=0, column=col * 2 + 1, padx=3, pady=3)
             self.range_entries[lbl] = e
 
-        # Row 4 — cameras & overlap
+        # Row 4 — cameras & overlap & viewshed resolution
         row4 = ctk.CTkFrame(self.bottom_panel)
         row4.pack(fill="x", padx=5, pady=2)
 
@@ -489,6 +723,12 @@ class FOVGeneratorWindow(ctk.CTkToplevel):
         self.overlap_entry = ctk.CTkEntry(row4, width=60)
         self.overlap_entry.insert(0, "20")
         self.overlap_entry.grid(row=0, column=3, padx=3, pady=3)
+
+        ctk.CTkLabel(row4, text="Viewshed resolution (px)").grid(
+            row=0, column=4, padx=3, pady=3)
+        self.vs_res_entry = ctk.CTkEntry(row4, width=60)
+        self.vs_res_entry.insert(0, "auto")
+        self.vs_res_entry.grid(row=0, column=5, padx=3, pady=3)
 
         # Row 5 — sensor settings
         row5 = ctk.CTkFrame(self.bottom_panel)
@@ -513,7 +753,7 @@ class FOVGeneratorWindow(ctk.CTkToplevel):
         row6.pack(fill="x", padx=5, pady=2)
 
         ctk.CTkButton(row6, text="Browse Output Folder",
-                      command=self._browse_output).grid(row=0, column=0, padx=5, pady=5)
+                      command=self._browse_output, fg_color="#8C7738").grid(row=0, column=0, padx=5, pady=5)
         self.output_label = ctk.CTkLabel(row6, text="No output folder selected")
         self.output_label.grid(row=0, column=1, padx=5, pady=5, sticky="w")
 
@@ -528,13 +768,22 @@ class FOVGeneratorWindow(ctk.CTkToplevel):
         # ---- CONSOLE ----
         self.console_frame = ctk.CTkFrame(self)
         self.console_frame.grid(row=2, column=0, sticky="nsew", padx=5, pady=5)
-        self.console_text = tk.Text(self.console_frame, wrap="word", height=8)
+        console_scroll = tk.Scrollbar(self.console_frame)
+        console_scroll.pack(side="right", fill="y")
+        self.console_text = tk.Text(
+            self.console_frame, wrap="word", height=8,
+            font=("Consolas", 10), bg="#1e1e1e", fg="#d4d4d4",
+            insertbackground="#d4d4d4",
+            yscrollcommand=console_scroll.set)
         self.console_text.pack(fill="both", expand=True, padx=5, pady=5)
+        console_scroll.config(command=self.console_text.yview)
         self.stdout_redirector = StdoutRedirector(self.console_text)
         sys.stdout = self.stdout_redirector
         sys.stderr = self.stdout_redirector
         print("FOV Generator ready.\n"
               "Configure camera parameters below, then click Generate FOV Map.\n"
+              "Viewshed resolution: 'auto' = match DEM native resolution,\n"
+              "  or enter a number (e.g. 600) for manual control.\n"
               "--------------------------------")
 
     # ——— browse callbacks ———
@@ -576,8 +825,12 @@ class FOVGeneratorWindow(ctk.CTkToplevel):
                 e.delete(0, tk.END)
         self.num_cams_entry.delete(0, tk.END)
         self.overlap_entry.delete(0, tk.END)
+        self.vs_res_entry.delete(0, tk.END)
+        self.vs_res_entry.insert(0, "auto")
 
-        self.ax.clear()
+        self.fig.clear()
+        self.ax = self.fig.add_subplot(1, 1, 1)
+        self.ax_vs = None
         self.ax.set_title("FOV Map — Generate to display")
         self.ax.set_xlabel("Easting (m)")
         self.ax.set_ylabel("Northing (m)")
@@ -598,6 +851,39 @@ class FOVGeneratorWindow(ctk.CTkToplevel):
             return float(entry.get())
         except ValueError:
             raise ValueError(f"Invalid value for '{name}'")
+
+    def _resolve_viewshed_px(self, range_m):
+        """
+        Determine viewshed grid resolution in pixels.
+
+        'auto' → scale to DEM native resolution (capped at 1200 px).
+        A number → use directly (clamped 100–2000).
+        """
+        raw = self.vs_res_entry.get().strip().lower()
+        pad = range_m * 1.3
+        extent_m = pad * 2.0  # total width/height in metres
+
+        if raw == "auto":
+            if self.dem_path and os.path.exists(self.dem_path):
+                utm = utm_crs_from_lonlat(
+                    float(self.loc_entries["Longitude"].get()),
+                    float(self.loc_entries["Latitude"].get()))
+                cell_m = _get_dem_native_res_m(self.dem_path, utm)
+                if cell_m and cell_m > 0:
+                    px = int(extent_m / cell_m)
+                    px = max(200, min(px, 1200))
+                    print(f"[INFO] DEM native resolution: ~{cell_m:.2f} m/px"
+                          f" → viewshed grid: {px}×{px} px")
+                    return px
+            # fallback: default 600
+            return 600
+        else:
+            try:
+                px = int(float(raw))
+                return max(100, min(px, 2000))
+            except ValueError:
+                print("[WARN] Invalid viewshed resolution, using 600.")
+                return 600
 
     def _generate_threaded(self):
         threading.Thread(target=self._generate, daemon=True).start()
@@ -658,13 +944,35 @@ class FOVGeneratorWindow(ctk.CTkToplevel):
             utm = utm_crs_from_lonlat(lon, lat)
             x0, y0 = project_xy_from_lonlat(lon, lat, utm)
 
+            # ---- query ground elevation at camera from DEM ----
+            cam_ground_z = None
+            if self.dem_path and os.path.exists(self.dem_path):
+                cam_ground_z = _query_dem_elevation(
+                    self.dem_path, x0, y0, utm)
+                if cam_ground_z is not None:
+                    cam_abs_z = cam_ground_z + H_m
+                    print(f"DEM ground elevation at camera: "
+                          f"{cam_ground_z:.2f} m")
+                    print(f"Camera absolute elevation: "
+                          f"{cam_abs_z:.2f} m  "
+                          f"(ground {cam_ground_z:.2f} m + "
+                          f"height {H_m:.1f} m)\n")
+
             # ---- build geometry ----
             records = []
             info_lines = []
             info_lines.append("=== Camera FOV Report ===\n")
             info_lines.append(f"Location: {lat:.6f}°N, {lon:.6f}°E\n")
             info_lines.append(f"UTM CRS: {utm}\n")
-            info_lines.append(f"Camera height: {H_m} m\n\n")
+            info_lines.append(f"Camera height above ground: {H_m} m\n")
+            if cam_ground_z is not None:
+                info_lines.append(
+                    f"DEM ground elevation: {cam_ground_z:.2f} m\n")
+                info_lines.append(
+                    f"Camera absolute elevation: "
+                    f"{cam_ground_z + H_m:.2f} m\n\n")
+            else:
+                info_lines.append("\n")
 
             for cam_id, p in enumerate(cam_params, start=1):
                 wedge, hfov_rad, vfov_rad = build_wedge_polygon(
@@ -739,22 +1047,68 @@ class FOVGeneratorWindow(ctk.CTkToplevel):
 
             gdf = gpd.GeoDataFrame(records, crs=utm)
 
+            # ---- collect wedge geometries for FOV-restricted viewshed ----
+            from shapely.ops import unary_union
+            wedge_geoms = [r["geometry"] for r in records
+                           if r["layer"] == "wedge"]
+            wedge_union = unary_union(wedge_geoms) if wedge_geoms else None
+
             # ---- optional viewshed ----
             vis_mask = None
+            fov_mask = None
+            has_dem = self.dem_path and os.path.exists(self.dem_path)
             pad = range_m * 1.3
             bounds = (x0 - pad, y0 - pad, x0 + pad, y0 + pad)
-            if self.dem_path and os.path.exists(self.dem_path):
-                print("Computing viewshed from DEM (this may take a moment)…")
-                vis_mask = compute_viewshed_mask(
+
+            # resolve viewshed pixel resolution
+            vs_px = self._resolve_viewshed_px(range_m)
+
+            if has_dem:
+                print(f"Computing viewshed from DEM ({vs_px}×{vs_px} grid, "
+                      f"this may take a moment)…")
+                vis_mask, cam_ground_z_vs = compute_viewshed_mask(
                     self.dem_path, x0, y0, H_m, utm, bounds,
-                    width_px=300, height_px=300)
+                    width_px=vs_px, height_px=vs_px)
+                # use DEM-derived ground elevation if not already set
+                if cam_ground_z is None and cam_ground_z_vs > 0:
+                    cam_ground_z = cam_ground_z_vs
                 if vis_mask is not None:
+                    cam_eye = (cam_ground_z or 0.0) + H_m
+                    print(f"DEM ground elevation at camera: "
+                          f"{cam_ground_z or 0:.1f} m"
+                          f"  →  camera eye: {cam_eye:.1f} m")
+                    # restrict viewshed to within camera FOV wedges
+                    if wedge_union is not None:
+                        print("Restricting viewshed to camera FOV…")
+                        fov_mask = _rasterise_fov_mask(
+                            wedge_union, bounds, vs_px, vs_px)
+                        vis_mask_fov = vis_mask & fov_mask
+                    else:
+                        vis_mask_fov = vis_mask
                     print("Viewshed computed — masked areas are not visible.")
                 else:
+                    vis_mask_fov = None
                     print("[WARN] Viewshed returned None; using flat ground.")
+            else:
+                vis_mask_fov = None
 
-            # ---- plot ----
-            self.ax.clear()
+            # ---- get DEM elevation range for colorbar (always, if DEM exists) ----
+            _dem_elev_range = [None, None]
+            if has_dem:
+                e_lo, e_hi = _get_dem_elevation_range(
+                    self.dem_path, bounds, utm)
+                if e_lo is not None:
+                    _dem_elev_range = [e_lo, e_hi]
+
+            # ---- set up figure: 2 subplots if DEM viewshed, else 1 ----
+            self.fig.clear()
+            if has_dem and vis_mask is not None:
+                self.ax = self.fig.add_subplot(1, 2, 1)
+                self.ax_vs = self.fig.add_subplot(1, 2, 2)
+            else:
+                self.ax = self.fig.add_subplot(1, 1, 1)
+                self.ax_vs = None
+
             cycle_colors = plt.rcParams["axes.prop_cycle"].by_key().get(
                 "color", ["C0", "C1", "C2", "C3", "C4"])
 
@@ -764,46 +1118,81 @@ class FOVGeneratorWindow(ctk.CTkToplevel):
             COL_IN_FOCUS = "#ff7f0e"
             IN_FOCUS_HATCH = "///"
 
-            # basemap
-            basemap_loaded = False
-            if self.basemap_path and os.path.exists(self.basemap_path):
-                basemap_loaded = _load_geotiff_basemap(
-                    self.basemap_path, self.ax, bounds, utm)
-            if not basemap_loaded:
-                # No basemap: draw distance rings and a clean grid
-                # so the plot is still spatially informative
-                self.ax.set_facecolor("#f0f0f0")
-                ring_distances = [d for d in [50, 100, 200, 500, 1000, 2000]
-                                  if d <= range_m * 1.2]
-                for rd in ring_distances:
-                    circle = plt.Circle((x0, y0), rd, fill=False,
-                                        edgecolor="#b0b0b0", linewidth=0.6,
-                                        linestyle="--", zorder=0)
-                    self.ax.add_patch(circle)
-                    self.ax.text(x0 + rd * 0.71, y0 + rd * 0.71,
-                                 f"{rd} m", fontsize=7, color="#888888",
-                                 ha="left", va="bottom", zorder=0)
+            # ---- helper: draw background on an axes ----
+            _bg_msg_printed = [False]
+
+            def _draw_background(ax_target):
+                bg_loaded = False
+                if self.basemap_path and os.path.exists(self.basemap_path):
+                    bg_loaded = _load_geotiff_basemap(
+                        self.basemap_path, ax_target, bounds, utm)
+                if not bg_loaded and has_dem:
+                    bg_loaded, e_lo, e_hi = _load_dem_hillshade(
+                        self.dem_path, ax_target, bounds, utm)
+                    if bg_loaded:
+                        # update elevation range if hillshade provided it
+                        if e_lo is not None and _dem_elev_range[0] is None:
+                            _dem_elev_range[0] = e_lo
+                            _dem_elev_range[1] = e_hi
+                        if not _bg_msg_printed[0]:
+                            print("[INFO] Using DEM hillshade as background.")
+                            _bg_msg_printed[0] = True
+                if not bg_loaded:
+                    ax_target.set_facecolor("#f0f0f0")
+                    ring_distances = [d for d in
+                                      [50, 100, 200, 500, 1000, 2000]
+                                      if d <= range_m * 1.2]
+                    for rd in ring_distances:
+                        circle = plt.Circle(
+                            (x0, y0), rd, fill=False,
+                            edgecolor="#b0b0b0", linewidth=0.6,
+                            linestyle="--", zorder=0)
+                        ax_target.add_patch(circle)
+                        ax_target.text(
+                            x0 + rd * 0.71, y0 + rd * 0.71,
+                            f"{rd} m", fontsize=7, color="#888888",
+                            ha="left", va="bottom", zorder=0)
+                    if not _bg_msg_printed[0]:
+                        print("[INFO] No basemap loaded — showing "
+                              "distance grid.\n"
+                              "       Provide a GeoTIFF orthoimage for "
+                              "satellite background.")
+                        _bg_msg_printed[0] = True
+                return bg_loaded
+
+            # ---- helper: draw common decorations ----
+            def _draw_decorations(ax_target, title):
                 # north arrow
                 arr_x = x0 + pad * 0.85
                 arr_y = y0 - pad * 0.7
                 arr_len = pad * 0.15
-                self.ax.annotate("N", xy=(arr_x, arr_y + arr_len),
-                                 xytext=(arr_x, arr_y),
-                                 arrowprops=dict(arrowstyle="->",
-                                                 color="black", lw=1.5),
-                                 fontsize=10, ha="center", va="bottom",
-                                 fontweight="bold", zorder=7)
-                print("[INFO] No basemap loaded — showing distance grid.\n"
-                      "       Provide a GeoTIFF orthoimage for satellite "
-                      "background.")
+                ax_target.annotate("N", xy=(arr_x, arr_y + arr_len),
+                                   xytext=(arr_x, arr_y),
+                                   arrowprops=dict(arrowstyle="->",
+                                                   color="black", lw=1.5),
+                                   fontsize=10, ha="center", va="bottom",
+                                   fontweight="bold", zorder=7)
+                ax_target.set_xlim(x0 - pad, x0 + pad)
+                ax_target.set_ylim(y0 - pad, y0 + pad)
+                ax_target.set_xlabel("Easting (m)")
+                ax_target.set_ylabel("Northing (m)")
+                ax_target.set_title(title)
+                add_scalebar(ax_target, x_frac=0.60, y_frac=0.06, align="left")
 
-            # viewshed overlay
-            if vis_mask is not None:
-                left, bottom, right, top = bounds
-                mask_rgba = np.zeros((*vis_mask.shape, 4), dtype=np.float32)
-                mask_rgba[~vis_mask] = [0, 0, 0, 0.4]
+            # ================ LEFT PLOT: Camera FOV ================
+            _draw_background(self.ax)
+
+            # viewshed overlay (restricted to FOV)
+            if vis_mask_fov is not None:
+                left_b, bottom_b, right_b, top_b = bounds
+                mask_rgba = np.zeros((*vis_mask_fov.shape, 4),
+                                     dtype=np.float32)
+                mask_rgba[~vis_mask_fov & (fov_mask if fov_mask is not None
+                                           else np.ones_like(vis_mask_fov,
+                                                             dtype=bool))] = \
+                    [0, 0, 0, 0.45]
                 self.ax.imshow(mask_rgba,
-                               extent=[left, right, bottom, top],
+                               extent=[left_b, right_b, bottom_b, top_b],
                                origin="upper", zorder=2, aspect="equal")
 
             # plot layers
@@ -817,7 +1206,7 @@ class FOVGeneratorWindow(ctk.CTkToplevel):
                     edgecolor="none", zorder=3)
                 sub[sub.layer == "wedge"].plot(
                     ax=self.ax, facecolor="none", edgecolor=col,
-                    linewidth=2, zorder=5)
+                    linewidth=1.0, zorder=5)
                 best = sub[sub.layer == "best_band"]
                 if len(best) > 0:
                     best.plot(ax=self.ax, color=col, alpha=0.6,
@@ -829,7 +1218,6 @@ class FOVGeneratorWindow(ctk.CTkToplevel):
 
             # union in-focus
             if in_focus_geoms:
-                from shapely.ops import unary_union
                 union_geom = unary_union(in_focus_geoms)
                 gs = gpd.GeoSeries([union_geom], crs=utm)
                 gs.plot(ax=self.ax, color=COL_IN_FOCUS, alpha=0.18,
@@ -839,17 +1227,42 @@ class FOVGeneratorWindow(ctk.CTkToplevel):
             # camera marker
             self.ax.scatter([x0], [y0], marker="x", s=220,
                             linewidths=3.0, color="red", zorder=6)
+            _draw_decorations(self.ax, "Camera Field of View")
 
-            # extent
-            self.ax.set_xlim(x0 - pad, x0 + pad)
-            self.ax.set_ylim(y0 - pad, y0 + pad)
-            self.ax.set_xlabel("Easting (m)")
-            self.ax.set_ylabel("Northing (m)")
-            self.ax.set_title("Camera Field of View")
+            # ================ RIGHT PLOT: Viewshed Only ================
+            if self.ax_vs is not None and vis_mask is not None:
+                _draw_background(self.ax_vs)
 
-            add_scalebar(self.ax, x_frac=0.60, y_frac=0.06, align="left")
+                left_b, bottom_b, right_b, top_b = bounds
 
-            # legend — build handles (for export) and populate GUI panel
+                # show viewshed within FOV: green = visible, red = blocked
+                vs_rgba = np.zeros((*vis_mask.shape, 4), dtype=np.float32)
+                fov = fov_mask if fov_mask is not None else \
+                    np.ones_like(vis_mask, dtype=bool)
+                # visible within FOV → green
+                vs_rgba[vis_mask & fov] = [0.2, 0.8, 0.2, 0.35]
+                # blocked within FOV → red
+                vs_rgba[~vis_mask & fov] = [0.8, 0.1, 0.1, 0.40]
+
+                self.ax_vs.imshow(
+                    vs_rgba,
+                    extent=[left_b, right_b, bottom_b, top_b],
+                    origin="upper", zorder=2, aspect="equal")
+
+                # draw wedge outlines for spatial reference (thin, subtle)
+                for cam_id in sorted(gdf["cam_id"].unique()):
+                    col = cam_color(cam_id)
+                    sub = gdf[(gdf.cam_id == cam_id) & (gdf.layer == "wedge")]
+                    sub.plot(ax=self.ax_vs, facecolor="none", edgecolor=col,
+                             linewidth=0.6, linestyle="--", alpha=0.5,
+                             zorder=4)
+
+                # camera marker
+                self.ax_vs.scatter([x0], [y0], marker="x", s=220,
+                                   linewidths=3.0, color="red", zorder=6)
+                _draw_decorations(self.ax_vs, "Viewshed (within FOV)")
+
+            # ---- legend handles for export ----
             layer_handles = [
                 Patch(facecolor=COL_IN_FOCUS, edgecolor=COL_IN_FOCUS,
                       hatch=IN_FOCUS_HATCH, alpha=0.18,
@@ -857,6 +1270,14 @@ class FOVGeneratorWindow(ctk.CTkToplevel):
                 Line2D([0], [0], marker="x", color="red", linestyle="None",
                        markersize=10, label="Camera location"),
             ]
+            # add viewshed handles when a viewshed was computed
+            if self.ax_vs is not None and vis_mask is not None:
+                layer_handles.extend([
+                    Patch(facecolor=(0.2, 0.8, 0.2, 0.35), edgecolor="none",
+                          label="Viewshed: visible"),
+                    Patch(facecolor=(0.8, 0.1, 0.1, 0.40), edgecolor="none",
+                          label="Viewshed: blocked"),
+                ])
             camera_handles = []
             for cam_id in sorted(gdf["cam_id"].unique()):
                 p = cam_params[cam_id - 1]
@@ -867,8 +1288,37 @@ class FOVGeneratorWindow(ctk.CTkToplevel):
                            linewidth=3, label=label))
             all_handles = layer_handles + camera_handles
 
-            # do NOT put legend on the displayed figure (keeps plot clean)
-            self.fig.tight_layout()
+            # ---- DEM elevation colorbar (works with both basemap + DEM) ----
+            if _dem_elev_range[0] is not None and _dem_elev_range[1] is not None:
+                import matplotlib.cm as cm
+                from matplotlib.colors import Normalize
+                e_lo, e_hi = _dem_elev_range
+                norm = Normalize(vmin=e_lo, vmax=e_hi)
+                sm = cm.ScalarMappable(cmap=plt.cm.terrain, norm=norm)
+                sm.set_array([])
+                # attach colorbar to the left (FOV) axes
+                cbar = self.fig.colorbar(
+                    sm, ax=self.ax, orientation="vertical",
+                    fraction=0.03, pad=0.02, shrink=0.6)
+                cbar.set_label("Elevation (m)", fontsize=8)
+                cbar.ax.tick_params(labelsize=7)
+
+            if self.ax_vs is not None:
+                self.fig.subplots_adjust(
+                    left=0.07,
+                    right=0.97,
+                    bottom=0.10,
+                    top=0.90,
+                    wspace=0.22
+                )
+            else:
+                self.fig.subplots_adjust(
+                    left=0.08,
+                    right=0.97,
+                    bottom=0.10,
+                    top=0.90
+                )
+            
             self.canvas_plot.draw()
 
             # populate the GUI legend panel (right side)
@@ -879,6 +1329,20 @@ class FOVGeneratorWindow(ctk.CTkToplevel):
                 ("■ Visible & in focus", COL_IN_FOCUS),
                 ("✕ Camera location", "#ff0000"),
             ]
+            if self.ax_vs is not None:
+                legend_items.append(("■ Viewshed: visible", "#33cc33"))
+                legend_items.append(("■ Viewshed: blocked", "#cc1a1a"))
+            if _dem_elev_range[0] is not None:
+                e_lo, e_hi = _dem_elev_range
+                legend_items.append(
+                    (f"Elevation: {e_lo:.1f} – {e_hi:.1f} m", "#aaaaaa"))
+            if cam_ground_z is not None:
+                legend_items.append(
+                    (f"Cam ground: {cam_ground_z:.1f} m\n"
+                     f"Cam absolute: {cam_ground_z + H_m:.1f} m",
+                     "#dddddd"))
+            legend_items.append(
+                (f"Viewshed grid: {vs_px}×{vs_px} px", "#888888"))
             for cam_id in sorted(gdf["cam_id"].unique()):
                 p = cam_params[cam_id - 1]
                 col = cam_color(cam_id)
@@ -893,20 +1357,19 @@ class FOVGeneratorWindow(ctk.CTkToplevel):
                     font=("Arial", 11), justify="left", anchor="w",
                 ).pack(anchor="w", pady=2)
 
-            # ---- save (legend below plot) ----
+            # ---- save ----
             if self.output_folder:
                 plot_path = os.path.join(self.output_folder, "fov_map.png")
 
-                # temporarily add legend below plot for export, then remove
-                leg = self.ax.legend(
-                    handles=all_handles, loc="upper center",
-                    bbox_to_anchor=(0.5, -0.3),
+                # temporarily add a combined legend centred beneath both plots
+                leg = self.fig.legend(
+                    handles=all_handles, loc="lower center",
+                    bbox_to_anchor=(0.5, -0.02),
                     ncol=min(3, len(all_handles)), frameon=True,
                     framealpha=0.95, fontsize="small")
                 self.fig.savefig(plot_path, dpi=200,
                                  bbox_extra_artists=(leg,),
                                  bbox_inches="tight")
-                # remove legend from displayed figure after saving
                 leg.remove()
                 self.canvas_plot.draw()
 
@@ -916,15 +1379,61 @@ class FOVGeneratorWindow(ctk.CTkToplevel):
 
                 print(f"\nPlot saved to: {plot_path}")
                 print(f"Report saved to: {txt_path}")
+
+                # ---- export viewshed mask as georeferenced GeoTIFF ----
+                if (HAS_RASTERIO and vis_mask is not None
+                        and fov_mask is not None):
+                    from rasterio.transform import from_bounds as tf_from_bounds
+
+                    vs_path = os.path.join(self.output_folder,
+                                           "viewshed_mask.tif")
+                    left_b, bottom_b, right_b, top_b = bounds
+                    h_px, w_px = vis_mask.shape
+
+                    # encode: 1 = visible, 0 = blocked, 255 = outside FOV
+                    out_arr = np.full((h_px, w_px), 255, dtype=np.uint8)
+                    out_arr[fov_mask & vis_mask] = 1
+                    out_arr[fov_mask & ~vis_mask] = 0
+
+                    vs_transform = tf_from_bounds(
+                        left_b, bottom_b, right_b, top_b, w_px, h_px)
+
+                    with rasterio.open(
+                        vs_path, "w", driver="GTiff",
+                        height=h_px, width=w_px, count=1,
+                        dtype="uint8", crs=utm,
+                        transform=vs_transform, nodata=255,
+                        compress="deflate",
+                    ) as dst:
+                        dst.write(out_arr, 1)
+                        dst.update_tags(
+                            DESCRIPTION="Viewshed mask from GeoCamPal "
+                                        "FOV Generator",
+                            ENCODING="1=visible, 0=blocked, 255=outside_FOV")
+
+                    print(f"Viewshed GeoTIFF saved to: {vs_path}")
+                    print(f"  CRS: {utm}")
+                    print(f"  Grid: {w_px}×{h_px} px")
+                    print(f"  Values: 1=visible, 0=blocked, "
+                          f"255=outside FOV (nodata)")
+
                 messagebox.showinfo("Done",
                                     f"FOV map saved to:\n{plot_path}\n\n"
-                                    f"Report saved to:\n{txt_path}")
+                                    f"Report saved to:\n{txt_path}"
+                                    + (f"\n\nViewshed GeoTIFF saved to:\n"
+                                       f"{os.path.join(self.output_folder, 'viewshed_mask.tif')}"
+                                       if (vis_mask is not None
+                                           and fov_mask is not None
+                                           and HAS_RASTERIO)
+                                       else ""))
             else:
                 print("\n[INFO] No output folder selected — "
                       "map displayed but not saved.")
 
         except Exception as e:
             print(f"[ERROR] {e}")
+            import traceback
+            traceback.print_exc()
             messagebox.showerror("Error", str(e))
 
 
