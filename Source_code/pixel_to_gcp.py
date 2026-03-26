@@ -1,4 +1,5 @@
 import os
+import re
 import tkinter as tk
 from tkinter import filedialog, messagebox
 import customtkinter as ctk
@@ -63,6 +64,21 @@ def resource_path(relative_path: str) -> str:
     except Exception:
         base_path = os.path.dirname(__file__)  # Running directly from source
     return os.path.join(base_path, relative_path)
+
+
+# Regex to find GCP number: matches "GCP" (case-insensitive) followed by
+# an optional separator (_  or -) and one or more digits.
+_GCP_RE = re.compile(r'(?i)(?:gcp)[_-]?(\d+)')
+
+
+def extract_gcp_number(name: str):
+    """Return the integer GCP number from a filename or GCP_ID string,
+    or None if no match is found.
+    Matches: GCP_12, GCP-12, GCP12, gcp_003, etc."""
+    m = _GCP_RE.search(name)
+    if m:
+        return int(m.group(1))
+    return None
 
 
 class StdoutRedirector:
@@ -294,15 +310,11 @@ class PixelToGCPWindow(ctk.CTkToplevel):
         good_images = []
         for f in all_files:
             if f.lower().endswith((".bmp", ".jpg", ".jpeg", ".png", ".tif")):
-                try:
-                    # e.g. "GCP_12_cam1.bmp"
-                    parts = f.split("_")
-                    gcp_num = int(parts[1])
-                    if gcp_num not in self.bad_gcp_list:
-                        good_images.append(f)
-                except:
-                    continue
-        self.image_list = sorted(good_images, key=lambda x: int(x.split("_")[1]))
+                gcp_num = extract_gcp_number(f)
+                if gcp_num is not None and gcp_num not in self.bad_gcp_list:
+                    good_images.append(f)
+        self.image_list = sorted(good_images,
+                                 key=lambda x: extract_gcp_number(x) or 0)
         if not self.image_list:
             messagebox.showerror("Error", "No valid images found after filtering.")
             return
@@ -318,7 +330,12 @@ class PixelToGCPWindow(ctk.CTkToplevel):
                 if not all(col in df.columns for col in required_cols):
                     messagebox.showerror("Error", f"GCP file must contain columns: {required_cols}")
                     return
-                df['gcp_number'] = df['GCP_ID'].apply(lambda x: int(x.split('_')[-1]))
+                df['gcp_number'] = df['GCP_ID'].apply(
+                    lambda x: extract_gcp_number(str(x))
+                )
+                # Drop rows where no GCP number could be extracted
+                df = df.dropna(subset=['gcp_number'])
+                df['gcp_number'] = df['gcp_number'].astype(int)
                 df = df[~df['gcp_number'].isin(self.bad_gcp_list)]
                 if self.convert_to_utm_var.get():
                     # Perform UTM conversion using the helper function.
@@ -330,8 +347,9 @@ class PixelToGCPWindow(ctk.CTkToplevel):
                     self.log(f"UTM conversion applied — detected EPSG:{epsg_val}")
                 else:
                     # If not converting, use latitude and longitude directly.
-                    df['easting'] = df['latitude']
-                    df['northing'] = df['longitude']
+                    # X = longitude (east-west), Y = latitude (north-south)
+                    df['easting'] = df['longitude']
+                    df['northing'] = df['latitude']
                     df['EPSG'] = 0  # no CRS when using raw lat/lon
                 self.gcp_df = df
                 self.log(f"GCP file loaded: {os.path.basename(self.gcp_file)}")
@@ -466,12 +484,13 @@ class PixelToGCPWindow(ctk.CTkToplevel):
         output_path = os.path.join(self.output_folder, f"{filename}.csv")
         rows = []
         for fname, (px_full, py_full) in self.selected_points.items():
-            parts = fname.split("_")
-            try:
-                gcp_num = int(parts[1])
-            except:
+            gcp_num = extract_gcp_number(fname)
+            if gcp_num is None:
                 continue
-            camera_part = parts[2].split('.')[0] if len(parts) > 2 else "0"
+            # Extract camera label: everything after the GCP tag, minus extension
+            base = os.path.splitext(fname)[0]
+            cam_match = re.search(r'(?i)(?:gcp)[_-]?\d+[_-]?(.*)', base)
+            camera_part = cam_match.group(1) if cam_match and cam_match.group(1) else "0"
             if self.gcp_df is None:
                 continue
             match = self.gcp_df.loc[self.gcp_df['gcp_number'] == gcp_num]
