@@ -1,0 +1,92 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Build / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Test / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# Type checker / linter caches
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.dmypy.json
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE / editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Local config / secrets
+.env
+.env.*
+*.sqlite3
+
+# PyInstaller / auto-py-to-exe
+*.spec
+
+# Geospatial data files
+*.tif
+*.tiff
+*.geotiff
+*.shp
+*.shx
+*.dbf
+*.prj
+*.cpg
+*.kml
+*.kmz
+*.las
+*.laz
+*.hdf
+*.nc
+
+# Image files (input/output)
+*.png
+*.jpg
+*.jpeg
+*.bmp
+
+# GDAL / rasterio side-car files
+*.aux.xml
+*.ovr
+*.xml
+
+# Track specific project assets
+!launch_logo.png
+!splash_image.png
+
+# Output files
+*.csv
