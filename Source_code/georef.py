@@ -16,6 +16,39 @@ osr.DontUseExceptions()
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("green")
 
+# %% window resizer 
+
+def fit_geometry(window, design_w, design_h, resizable=True, margin=0.90):
+    """
+    Scale a window to fit the current screen while preserving
+    the aspect ratio of the original design size.
+    Centers the result on screen.  Never upscales beyond the design size.
+
+    Parameters
+    ----------
+    window      : Tk / CTk / CTkToplevel instance
+    design_w/h  : the "intended" pixel size (the old hardcoded values)
+    resizable   : whether the user can drag-resize afterward
+    margin      : fraction of screen to occupy at most (0.90 = 90 %)
+    """
+    screen_w = window.winfo_screenwidth()
+    screen_h = window.winfo_screenheight()
+
+    max_w = int(screen_w * margin)
+    max_h = int(screen_h * margin)
+
+    scale = min(max_w / design_w, max_h / design_h, 1.0)
+
+    final_w = int(design_w * scale)
+    final_h = int(design_h * scale)
+
+    x = (screen_w - final_w) // 2
+    y = max(0, (screen_h - final_h) // 2)
+
+    window.geometry(f"{final_w}x{final_h}+{x}+{y}")
+    window.resizable(resizable, resizable)
+
+
 # %% ------------------------------------------------------------------------------------------------------------ helpers ------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 def resource_path(relative_path: str) -> str:
     """Return absolute path to bundled resources (handles PyInstaller)."""
@@ -169,7 +202,8 @@ class GeoReferenceModule(ctk.CTkToplevel):
     def __init__(self, master=None, *args, **kwargs):
         super().__init__(master=master, *args, **kwargs)
         self.title("Georeferencing Tool")
-        self.geometry("1200x800")
+        #self.geometry("1200x800")
+        fit_geometry(self, 1200, 800, resizable=True)
 
         try:
             self.iconbitmap(resource_path("launch_logo.ico"))

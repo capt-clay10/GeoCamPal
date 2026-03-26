@@ -13,8 +13,39 @@ import threading
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("green")
 
+# %% window resizer 
 
-# --- StdoutRedirector class for redirecting console output into the GUI ---
+def fit_geometry(window, design_w, design_h, resizable=True, margin=0.90):
+    """
+    Scale a window to fit the current screen while preserving
+    the aspect ratio of the original design size.
+    Centers the result on screen.  Never upscales beyond the design size.
+
+    Parameters
+    ----------
+    window      : Tk / CTk / CTkToplevel instance
+    design_w/h  : the "intended" pixel size (the old hardcoded values)
+    resizable   : whether the user can drag-resize afterward
+    margin      : fraction of screen to occupy at most (0.90 = 90 %)
+    """
+    screen_w = window.winfo_screenwidth()
+    screen_h = window.winfo_screenheight()
+
+    max_w = int(screen_w * margin)
+    max_h = int(screen_h * margin)
+
+    scale = min(max_w / design_w, max_h / design_h, 1.0)
+
+    final_w = int(design_w * scale)
+    final_h = int(design_h * scale)
+
+    x = (screen_w - final_w) // 2
+    y = max(0, (screen_h - final_h) // 2)
+
+    window.geometry(f"{final_w}x{final_h}+{x}+{y}")
+    window.resizable(resizable, resizable)
+
+# %% --- StdoutRedirector class for redirecting console output into the GUI ---
 class StdoutRedirector:
     def __init__(self, text_widget):
         self.text_widget = text_widget
@@ -40,7 +71,8 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
     def __init__(self, master=None, *args, **kwargs):
         super().__init__(master=master, *args, **kwargs)
         self.title("Create Homography Matrix")
-        self.geometry("850x800")
+        #self.geometry("850x800")
+        fit_geometry(self, 850, 800, resizable = True)
 
         try:
             self.iconbitmap(resource_path("launch_logo.ico"))
@@ -181,9 +213,8 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
         sys.stderr = sys.stdout
         print("Here you may see console outputs\n--------------------------------\n")
 
-    # --------------------------------------------------------------------------
-    #                               Helper UI
-    # --------------------------------------------------------------------------
+# %% Helper
+
     def log(self, msg: str):
         self.text_console.insert(tk.END, msg + "\n")
         self.text_console.see(tk.END)
@@ -216,9 +247,7 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
             self.lbl_adv_info.configure(text="")
             self.advanced_frame.forget()
 
-    # --------------------------------------------------------------------------
-    #                             Math helpers
-    # --------------------------------------------------------------------------
+
     @staticmethod
     def normalize_points(points: np.ndarray):
         centroid = points.mean(axis=0)
@@ -231,9 +260,7 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
         norm_h = (T @ pts_h.T).T
         return norm_h, T
 
-    # --------------------------------------------------------------------------
-    #                              Core functions
-    # --------------------------------------------------------------------------
+# %% Core function
     def compute_matrix(self):
         """Load CSV, optionally exclude by GCP_ID, compute homography, save matrix."""
         if not self.input_file:
@@ -347,9 +374,9 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
         report += f"Mean error: {errors.mean():.3f} m\n"
         self.log(report)
 
-    # --------------------------------------------------------------------------
-    #             Simulated-annealing helpers 
-    # --------------------------------------------------------------------------
+
+    # %%             Simulated-annealing helpers 
+
     def compute_homography_and_errors(
         self, pixel_points, utm_points, subset_indices, ransac_thresh=0.5
     ):
@@ -391,9 +418,8 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
         errs = np.linalg.norm(utm_est - utm_points, axis=1)
         return errs.mean(), np.median(errs), errs.std(), errs.max(), (errs < 10).mean(), (errs > 5).sum()
 
-    # --------------------------------------------------------------------------
-    #                        Simulated-annealing main loop
-    # --------------------------------------------------------------------------
+    # %%                        Simulated-annealing main loop
+
     def run_simulated_annealing(self):
         threading.Thread(target=self.run_simulated_annealing_thread, daemon=True).start()
 
@@ -462,9 +488,8 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
             f"Inlier={inl*100:.1f} %, >5m={big}"
         )
 
-    # --------------------------------------------------------------------------
-    #                           Export SA result
-    # --------------------------------------------------------------------------
+    #%%                           Export SA result
+
     def accept_and_export_new_matrix(self):
         if self.best_H_annealing is None:
             messagebox.showerror("Error", "Run SA search first.")
@@ -487,9 +512,9 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
         messagebox.showinfo("Success", "Best homography matrix exported successfully.")
 
 
-# --------------------------------------------------------------------------
-#                                     Main
-# --------------------------------------------------------------------------
+
+# %%                                     Main
+
 def main():
     root = ctk.CTk()
     root.withdraw()

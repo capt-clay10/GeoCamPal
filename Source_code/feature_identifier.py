@@ -25,6 +25,38 @@ from PIL import Image
 import cv2
 import numpy as np
 
+# %% window resizer 
+
+def fit_geometry(window, design_w, design_h, resizable=True, margin=0.90):
+    """
+    Scale a window to fit the current screen while preserving
+    the aspect ratio of the original design size.
+    Centers the result on screen.  Never upscales beyond the design size.
+
+    Parameters
+    ----------
+    window      : Tk / CTk / CTkToplevel instance
+    design_w/h  : the "intended" pixel size (the old hardcoded values)
+    resizable   : whether the user can drag-resize afterward
+    margin      : fraction of screen to occupy at most (0.90 = 90 %)
+    """
+    screen_w = window.winfo_screenwidth()
+    screen_h = window.winfo_screenheight()
+
+    max_w = int(screen_w * margin)
+    max_h = int(screen_h * margin)
+
+    scale = min(max_w / design_w, max_h / design_h, 1.0)
+
+    final_w = int(design_w * scale)
+    final_h = int(design_h * scale)
+
+    x = (screen_w - final_w) // 2
+    y = max(0, (screen_h - final_h) // 2)
+
+    window.geometry(f"{final_w}x{final_h}+{x}+{y}")
+    window.resizable(resizable, resizable)
+
 # Import profile extraction from the profile tool (used for AOI filtering)
 try:
     from profile_tool import extract_profile
@@ -61,7 +93,7 @@ except ImportError:
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("green")
 
-# Import mixin classes and helpers
+# %% Import mixin classes and helpers
 from hsv_mask_ui import BBoxSelectorWindow, StdoutRedirector, HSVMaskUIMixin
 from hsv_mask_processing import HSVMaskProcessingMixin
 from hsv_mask_editing import HSVMaskEditingMixin
@@ -144,8 +176,10 @@ class FeatureIdentifier(HSVMaskEditingMixin, HSVMaskProcessingMixin, HSVMaskUIMi
 
         if self.mode in ("individual", "ml"):
             self.title("Feature Identifier- Configuration")
-            self.geometry("1100x850")
-            self.resizable(True, True)
+            # self.geometry("1100x850")
+            # self.resizable(True, True)
+            # self.minsize(900, 600)
+            fit_geometry(self, 1100, 900, resizable=True)
             self.minsize(900, 600)
 
             self.filename_label = ctk.CTkLabel(
@@ -254,8 +288,9 @@ class FeatureIdentifier(HSVMaskEditingMixin, HSVMaskProcessingMixin, HSVMaskUIMi
         else:
             # BATCH MODE: requires a settings file from Single/Folder processing
             self.title("Feature Identifier — Batch Process")
-            self.geometry("1200x600")
-            self.resizable(False, False)
+            #self.geometry("1200x600")
+            #self.resizable(False, False)
+            fit_geometry(self, 1200, 600, resizeable = True)
 
             self.do_invert_mask = tk.BooleanVar(master=self, value=False)
             self.use_bbox = tk.BooleanVar(master=self, value=False)

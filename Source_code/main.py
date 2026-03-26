@@ -1,5 +1,14 @@
 import sys
 import os
+
+# Windows DPI awareness — must be set before any GUI imports
+if sys.platform == "win32":
+    try:
+        import ctypes
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)  # system-aware
+    except Exception:
+        pass
+
 import customtkinter as ctk
 from PIL import Image
 
@@ -27,22 +36,46 @@ def resource_path(relative_path: str) -> str:
         base_path = os.path.dirname(__file__)  # Running from source
     return os.path.join(base_path, relative_path)
 
+
+def fit_geometry(window, design_w, design_h, resizable=True, margin=0.90):
+    """
+    Scale a window to fit the current screen while preserving
+    the aspect ratio of the original design size.
+    Centers the result on screen.  Never upscales beyond the design size.
+    """
+    screen_w = window.winfo_screenwidth()
+    screen_h = window.winfo_screenheight()
+
+    max_w = int(screen_w * margin)
+    max_h = int(screen_h * margin)
+
+    scale = min(max_w / design_w, max_h / design_h, 1.0)
+
+    final_w = int(design_w * scale)
+    final_h = int(design_h * scale)
+
+    x = (screen_w - final_w) // 2
+    y = max(0, (screen_h - final_h) // 2)
+
+    window.geometry(f"{final_w}x{final_h}+{x}+{y}")
+    window.resizable(resizable, resizable)
+
 # 2) Optional splash screen
 def show_splash(duration_ms=1000):
     splash = ctk.CTk()
     splash.iconbitmap(resource_path("launch_logo.ico"))
     splash.title("Loading...")
-    splash.geometry("400x280")
-    splash.resizable(False, False)
+    fit_geometry(splash, 400, 280, resizable=False)
 
-    # Center on screen
-    sw, sh = splash.winfo_screenwidth(), splash.winfo_screenheight()
-    splash.geometry(f"400x280+{(sw-400)//2}+{(sh-280)//2}")
+    # read back actual size for the splash image
+    splash.update_idletasks()
+    sw = splash.winfo_width()
+    sh = splash.winfo_height()
 
     try:
         img_path = resource_path("splash_image.png")
-        pil_img = Image.open(img_path).resize((400, 280), Image.Resampling.LANCZOS)
-        ctk_img = ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=(400, 280))
+        pil_img = Image.open(img_path).resize((sw, sh), Image.Resampling.LANCZOS)
+        ctk_img = ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=(sw, sh))
         ctk.CTkLabel(splash, image=ctk_img, text="").pack()
     except Exception:
         ctk.CTkLabel(splash, text="Loading...", font=("Serif", 18, "bold")).pack(expand=True)
@@ -110,8 +143,7 @@ def launcher_window():
 
     dialog = ctk.CTk()
     dialog.title("GeoCamPal")
-    dialog.geometry("600x700")
-    dialog.resizable(False, False)
+    fit_geometry(dialog, 600, 700, resizable=False)
     dialog.protocol("WM_DELETE_WINDOW", on_close)
     dialog.iconbitmap(resource_path("launch_logo.ico"))
 

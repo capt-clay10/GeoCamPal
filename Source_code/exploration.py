@@ -1,21 +1,24 @@
 """
- Data Exploration: Time Series Image Selector
+ Data Exploration: Multi-Time-Series Image Selector
 
-Matches images to hydrodynamic time series (time series, waves, currents)
-based on timestamps extracted from filenames.
+Matches images to one or more hydrodynamic time series
+(water level, waves, wind, currents, …) based on timestamps
+extracted from filenames.
 
-Analysis modes:
-  • High water          — images closest to local maxima
-  • Low water           — images closest to local minima
-  • Threshold-based     — images near user-defined extreme events
-  • User-defined value  — images nearest a specific level value
-  • Tidal-range class.  — classify images into spring / neap cycles
+Per-series criteria (combined with AND logic):
+  • Peaks (Maxima)          — images closest to local maxima
+  • Troughs (Minima)        — images closest to local minima
+  • Above Threshold         — value at image time ≥ threshold
+  • Below Threshold         — value at image time ≤ threshold
+  • Near Target Value       — value at image time ≈ target ± tolerance
+  • Spring Tide Peaks       — images near spring high-water events
+  • Neap Tide Peaks         — images near neap high-water events
+  • No Filter               — always passes (records value only)
 
 Outputs:
-  • A tab-separated .txt file with columns:
-      image_filename | analysis_mode | time_offset_minutes
-  • Optionally copies selected images to a user-defined output folder
-    (tidal-range mode creates spring/ and neap/ sub-folders).
+  • A tab-separated .txt file with matched images and values
+    from every loaded time series.
+  • Optionally copies selected images to a user-defined output folder.
 """
 
 # %% ————————————————————————————— imports —————————————————————————————
@@ -44,6 +47,28 @@ ctk.set_default_color_theme("green")
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
 
+# Maximum number of simultaneous time series
+MAX_SERIES = 5
+
+# Criteria that each series can be filtered by
+CRITERIA = [
+    "Peaks (Maxima)",
+    "Troughs (Minima)",
+    "Above Threshold",
+    "Below Threshold",
+    "Near Target Value",
+    "Spring Tide Peaks",
+    "Neap Tide Peaks",
+    "No Filter",
+]
+
+# Common no-data sentinel values (checked in order)
+COMMON_NODATA = [
+    -9999, -9999.0, -999, -999.0, -99.9, -99.99,
+    9999, 9999.0, 999, 999.0, 99.9, 99.99,
+    -1e30, 1e30, -1e10, 1e10,
+]
+
 
 # %% ————————————————————————————— util helpers ————————————————————————
 def resource_path(relative_path: str) -> str:
@@ -52,6 +77,30 @@ def resource_path(relative_path: str) -> str:
     except Exception:
         base_path = os.path.dirname(__file__)
     return os.path.join(base_path, relative_path)
+
+
+def fit_geometry(window, design_w, design_h, resizable=True, margin=0.90):
+    """
+    Scale a window to fit the current screen while preserving
+    the aspect ratio of the original design size.
+    Centers the result on screen.  Never upscales beyond the design size.
+    """
+    screen_w = window.winfo_screenwidth()
+    screen_h = window.winfo_screenheight()
+
+    max_w = int(screen_w * margin)
+    max_h = int(screen_h * margin)
+
+    scale = min(max_w / design_w, max_h / design_h, 1.0)
+
+    final_w = int(design_w * scale)
+    final_h = int(design_h * scale)
+
+    x = (screen_w - final_w) // 2
+    y = max(0, (screen_h - final_h) // 2)
+
+    window.geometry(f"{final_w}x{final_h}+{x}+{y}")
+    window.resizable(resizable, resizable)
 
 
 class StdoutRedirector:
@@ -64,6 +113,50 @@ class StdoutRedirector:
 
     def flush(self):
         pass
+
+
+# %% ————————————————————————————— no-data detection ———————————————————
+
+def detect_nodata(values, custom_nodata=None):
+    """
+    Detect no-data sentinel values in a numeric array.
+
+    Parameters
+    ----------
+    values : array-like
+        Raw numeric values (may contain NaN and sentinels).
+    custom_nodata : float or None
+        If provided, ONLY this value is treated as no-data
+        (auto-detection is skipped).
+
+    Returns
+    -------
+    nodata_vals : set of float
+        Detected (or user-specified) sentinel values.
+    report : str
+        Human-readable summary of what was found.
+    """
+    if custom_nodata is not None:
+        count = int(np.sum(np.isclose(values, custom_nodata,
+                                       atol=1e-6, equal_nan=False)))
+        report = (f"Using user-specified no-data value: {custom_nodata} "
+                  f"({count} occurrences)")
+        return {custom_nodata}, report
+
+    # auto-detect
+    detected = {}
+    for sentinel in COMMON_NODATA:
+        count = int(np.sum(np.isclose(values, sentinel,
+                                       atol=1e-6, equal_nan=False)))
+        if count > 0:
+            detected[sentinel] = count
+
+    if detected:
+        parts = [f"{v} ({n}×)" for v, n in detected.items()]
+        report = "Auto-detected no-data values: " + ", ".join(parts)
+    else:
+        report = "No common no-data sentinels detected."
+    return set(detected.keys()), report
 
 
 # %% ————————————————————————————— timestamp parsing ———————————————————
@@ -150,16 +243,37 @@ def collect_dated_images(folder, user_format=None, recursive=False):
     return results
 
 
-# %% ————————————————————————————— time series analysis ————————————————
+# %% ————————————————————————————— time series loading —————————————————
 
-def load_timeseries(csv_path, dt_col=0, val_col=1, sep=None):
+def load_timeseries(csv_path, dt_col=0, val_col=1, sep=None,
+                    nodata_value=None):
     """
     Load a time series CSV (water level, waves, wind, currents, etc.).
-    Auto-detects delimiter.  Strips timezone info to avoid naive/aware
-    datetime conflicts with filename-derived timestamps.
-    Returns a DataFrame with columns ['datetime', 'value'].
+    Auto-detects delimiter and no-data sentinels.
+    Strips timezone info to avoid naive/aware datetime conflicts.
+
+    Parameters
+    ----------
+    csv_path : str
+        Path to the CSV file.
+    dt_col : int
+        Column index for datetime (default 0).
+    val_col : int
+        Column index for values (default 1).
+    sep : str or None
+        Delimiter (auto-detected if None).
+    nodata_value : float or None
+        If provided, only this value is treated as no-data.
+        Otherwise, common sentinels are auto-detected.
+
+    Returns
+    -------
+    df : DataFrame
+        Columns ['datetime', 'value'], cleaned and sorted.
+    nodata_report : str
+        Description of no-data handling applied.
     """
-    # try to auto-detect separator
+    # auto-detect separator
     if sep is None:
         with open(csv_path, "r", encoding="utf-8", errors="ignore") as f:
             sample = f.read(4096)
@@ -172,36 +286,41 @@ def load_timeseries(csv_path, dt_col=0, val_col=1, sep=None):
 
     df = pd.read_csv(csv_path, sep=sep, header=0, encoding="utf-8",
                       engine="python")
-    # use positional columns
+
+    # datetime column
     dt_series = pd.to_datetime(df.iloc[:, dt_col], dayfirst=True,
                                 errors="coerce")
-    # strip timezone to keep everything as naive (filenames are naive)
+    # strip timezone
     try:
         if dt_series.dt.tz is not None:
             dt_series = dt_series.dt.tz_localize(None)
     except TypeError:
-        # some pandas versions need tz_convert first
         dt_series = dt_series.dt.tz_convert("UTC").dt.tz_localize(None)
+
     val_series = pd.to_numeric(df.iloc[:, val_col], errors="coerce")
+
+    # --- no-data detection and removal ---
+    raw_vals = val_series.dropna().values
+    nodata_vals, nodata_report = detect_nodata(raw_vals, nodata_value)
+
+    if nodata_vals:
+        mask = pd.Series(False, index=val_series.index)
+        for nd in nodata_vals:
+            mask |= np.isclose(val_series.values, nd,
+                               atol=1e-6, equal_nan=False)
+        val_series[mask] = np.nan
+
     out = pd.DataFrame({"datetime": dt_series, "value": val_series})
     out = out.dropna().sort_values("datetime").reset_index(drop=True)
-    return out
+    return out, nodata_report
 
+
+# %% ————————————————————————————— analysis functions ——————————————————
 
 def find_extrema(wl_df, kind="max", min_sep_hours=5.0, min_prominence=0.2):
     """
-    Find true tidal/hydrodynamic peaks or troughs using scipy.signal.find_peaks.
-
-    Parameters
-    ----------
-    wl_df : DataFrame with 'datetime' and 'value' columns.
-    kind  : "max" for peaks, "min" for troughs.
-    min_sep_hours  : Minimum hours between consecutive peaks.
-                     Prevents noise from being detected as separate events.
-    min_prominence : Minimum vertical rise a peak must have above its
-                     surrounding baseline to be considered a real event.
-
-    The sampling interval is auto-detected from the data.
+    Find true tidal/hydrodynamic peaks or troughs using
+    scipy.signal.find_peaks.
     """
     from scipy.signal import find_peaks
 
@@ -212,18 +331,15 @@ def find_extrema(wl_df, kind="max", min_sep_hours=5.0, min_prominence=0.2):
     if hasattr(dt_diff, 'total_seconds'):
         interval_min = dt_diff.total_seconds() / 60.0
     else:
-        # numpy timedelta
         interval_min = dt_diff / np.timedelta64(1, 'm')
-    interval_min = max(interval_min, 0.1)  # safety
+    interval_min = max(interval_min, 0.1)
 
-    # convert min_sep_hours to number of samples
     distance = max(1, int((min_sep_hours * 60.0) / interval_min))
 
     if kind == "min":
-        # invert to find troughs as peaks
         values = -values
 
-    peak_idx, properties = find_peaks(
+    peak_idx, _props = find_peaks(
         values, distance=distance, prominence=min_prominence)
 
     return wl_df.iloc[peak_idx].reset_index(drop=True)
@@ -236,7 +352,6 @@ def find_threshold_events(wl_df, threshold, direction="above"):
     else:
         mask = wl_df["value"] <= threshold
     events = wl_df[mask].copy()
-    # group consecutive True into events, take peak of each
     events["group"] = (~mask).cumsum()[mask]
     if direction == "above":
         peaks = events.groupby("group").apply(
@@ -258,11 +373,8 @@ def find_closest_value(wl_df, target_value, n_results=20):
 def find_images_closest_to_value(wl_df, image_list, target_value,
                                  value_tolerance=None, n_results=100):
     """
-    Rank images by how close the time-series value at the image timestamp is
-    to *target_value*.
-
-    The image timestamp is used only to look up/interpolate the series value;
-    selection is based on value difference, not a time buffer.
+    Rank images by how close the time-series value at the image timestamp
+    is to *target_value*.
     """
     if wl_df.empty or not image_list:
         return []
@@ -315,7 +427,7 @@ def classify_tidal_range(wl_df, min_sep_hours=5.0, min_prominence=0.2):
     """
     Classify each tidal cycle as spring or neap based on range.
     Returns a DataFrame with columns:
-      hw_time, lw_time, range_m, classification
+      hw_time, lw_time, range_m, classification, hw_level, lw_level
     """
     hw = find_extrema(wl_df, "max", min_sep_hours, min_prominence)
     lw = find_extrema(wl_df, "min", min_sep_hours, min_prominence)
@@ -326,7 +438,6 @@ def classify_tidal_range(wl_df, min_sep_hours=5.0, min_prominence=0.2):
     for i in range(len(hw)):
         hw_time = hw.iloc[i]["datetime"]
         hw_level = hw.iloc[i]["value"]
-        # find nearest LW before this HW
         lw_before = lw[lw["datetime"] < hw_time]
         if lw_before.empty:
             continue
@@ -385,261 +496,616 @@ def match_images_to_events(event_times, image_list, buffer_minutes,
     return results
 
 
+# %% ————————————————————— multi-series evaluation —————————————————————
+
+def interpolate_value(series_df, img_dt):
+    """
+    Interpolate the series value at a given image datetime.
+    Returns float value or None if out of range.
+    """
+    if series_df.empty or len(series_df) < 2:
+        return None
+    ts = series_df["datetime"].astype("int64").to_numpy(dtype=np.int64)
+    vals = series_df["value"].to_numpy(dtype=float)
+    img_ns = pd.Timestamp(img_dt).value
+    if img_ns < ts[0] or img_ns > ts[-1]:
+        return None
+    return float(np.interp(img_ns, ts, vals))
+
+
+def evaluate_criterion(series_df, img_dt, criterion, params,
+                       precomputed=None, buffer_minutes=30.0):
+    """
+    Evaluate whether a single image timestamp passes the criterion
+    for one time series.
+
+    Parameters
+    ----------
+    series_df : DataFrame
+        Time series with 'datetime' and 'value' columns.
+    img_dt : datetime
+        Image timestamp.
+    criterion : str
+        One of CRITERIA.
+    params : dict
+        Criterion-specific parameters:
+          threshold, target, tolerance,
+          min_sep_hours, min_prominence.
+    precomputed : dict or None
+        Pre-computed events (peaks, troughs, tidal classification).
+    buffer_minutes : float
+        Max offset for event-based criteria.
+
+    Returns
+    -------
+    passed : bool
+    info : dict
+        Contains 'value', 'offset_min', 'event_time', etc.
+    """
+    value = interpolate_value(series_df, img_dt)
+    if value is None:
+        return False, {"value": None, "reason": "out_of_range"}
+
+    info = {"value": value}
+
+    if criterion == "No Filter":
+        return True, info
+
+    elif criterion == "Above Threshold":
+        threshold = params.get("threshold", 0.0)
+        passed = value >= threshold
+        info["threshold"] = threshold
+        return passed, info
+
+    elif criterion == "Below Threshold":
+        threshold = params.get("threshold", 0.0)
+        passed = value <= threshold
+        info["threshold"] = threshold
+        return passed, info
+
+    elif criterion == "Near Target Value":
+        target = params.get("target", 0.0)
+        tolerance = params.get("tolerance", 0.5)
+        diff = abs(value - target)
+        passed = diff <= tolerance
+        info["target"] = target
+        info["tolerance"] = tolerance
+        info["value_diff"] = diff
+        return passed, info
+
+    elif criterion in ("Peaks (Maxima)", "Troughs (Minima)"):
+        kind = "max" if criterion == "Peaks (Maxima)" else "min"
+        events = precomputed.get(f"events_{kind}")
+        if events is None or events.empty:
+            return False, {**info, "reason": "no_events"}
+        return _check_event_proximity(events, img_dt, buffer_minutes, info)
+
+    elif criterion in ("Spring Tide Peaks", "Neap Tide Peaks"):
+        target_class = ("spring" if criterion == "Spring Tide Peaks"
+                        else "neap")
+        tidal_df = precomputed.get("tidal_classification")
+        if tidal_df is None or tidal_df.empty:
+            return False, {**info, "reason": "no_tidal_data"}
+        filtered = tidal_df[tidal_df["classification"] == target_class]
+        if filtered.empty:
+            return False, {**info, "reason": f"no_{target_class}_events"}
+        # build an events-like DataFrame from hw_time / hw_level
+        events = pd.DataFrame({
+            "datetime": filtered["hw_time"].values,
+            "value": filtered["hw_level"].values,
+        })
+        passed, evt_info = _check_event_proximity(
+            events, img_dt, buffer_minutes, info)
+        if passed:
+            # look up tidal range for matched event
+            evt_t = evt_info.get("event_time")
+            if evt_t is not None:
+                match_rows = filtered[filtered["hw_time"] == evt_t]
+                if not match_rows.empty:
+                    evt_info["classification"] = target_class
+                    evt_info["tidal_range"] = float(
+                        match_rows.iloc[0]["range_m"])
+        return passed, evt_info
+
+    return False, info
+
+
+def _check_event_proximity(events_df, img_dt, buffer_minutes, info):
+    """Check if img_dt is within buffer_minutes of any event."""
+    evt_times = events_df["datetime"].tolist()
+    evt_vals = events_df["value"].tolist()
+
+    best_offset = None
+    best_evt_time = None
+    best_evt_val = None
+
+    for et, ev in zip(evt_times, evt_vals):
+        if isinstance(et, np.datetime64):
+            et = pd.Timestamp(et).to_pydatetime()
+        elif isinstance(et, pd.Timestamp):
+            et = et.to_pydatetime()
+        offset = (img_dt - et).total_seconds() / 60.0
+        if abs(offset) <= buffer_minutes:
+            if best_offset is None or abs(offset) < abs(best_offset):
+                best_offset = offset
+                best_evt_time = et
+                best_evt_val = ev
+
+    if best_offset is not None:
+        info["offset_min"] = best_offset
+        info["event_time"] = best_evt_time
+        info["event_value"] = best_evt_val
+        return True, info
+    return False, info
+
+
+def precompute_events(series_df, criterion, params):
+    """
+    Pre-compute events for a series + criterion combination.
+    Returns a dict that can be passed to evaluate_criterion().
+    """
+    result = {}
+    min_sep = params.get("min_sep_hours", 5.0)
+    min_prom = params.get("min_prominence", 0.2)
+
+    if criterion == "Peaks (Maxima)":
+        result["events_max"] = find_extrema(
+            series_df, "max", min_sep, min_prom)
+    elif criterion == "Troughs (Minima)":
+        result["events_min"] = find_extrema(
+            series_df, "min", min_sep, min_prom)
+    elif criterion in ("Spring Tide Peaks", "Neap Tide Peaks"):
+        result["tidal_classification"] = classify_tidal_range(
+            series_df, min_sep, min_prom)
+
+    return result
+
+
+def run_multi_series_analysis(series_configs, image_list,
+                              buffer_minutes, print_fn=print):
+    """
+    Run combined multi-series analysis with AND logic.
+
+    Parameters
+    ----------
+    series_configs : list of dict
+        Each dict has keys: 'df', 'label', 'criterion', 'params'.
+    image_list : list of (Path, datetime) tuples
+    buffer_minutes : float
+    print_fn : callable
+
+    Returns
+    -------
+    results : list of dict
+        Each dict has: image_path, image_dt, and per-series info.
+    """
+    if not series_configs or not image_list:
+        return []
+
+    # pre-compute events for each series
+    precomputed_list = []
+    for sc in series_configs:
+        pc = precompute_events(sc["df"], sc["criterion"], sc["params"])
+        precomputed_list.append(pc)
+
+        # report pre-computed events
+        crit = sc["criterion"]
+        label = sc["label"]
+        if crit == "Peaks (Maxima)" and "events_max" in pc:
+            n = len(pc["events_max"])
+            print_fn(f"  [{label}] Detected {n} peak events.")
+        elif crit == "Troughs (Minima)" and "events_min" in pc:
+            n = len(pc["events_min"])
+            print_fn(f"  [{label}] Detected {n} trough events.")
+        elif crit in ("Spring Tide Peaks", "Neap Tide Peaks"):
+            tdf = pc.get("tidal_classification", pd.DataFrame())
+            if not tdf.empty:
+                ns = (tdf["classification"] == "spring").sum()
+                nn = (tdf["classification"] == "neap").sum()
+                print_fn(f"  [{label}] Tidal cycles: {ns} spring, "
+                         f"{nn} neap.")
+            else:
+                print_fn(f"  [{label}] Warning: could not classify "
+                         f"tidal ranges.")
+
+    # evaluate each image against ALL series criteria
+    results = []
+    for img_path, img_dt in image_list:
+        all_pass = True
+        row = {"image_path": img_path, "image_dt": img_dt}
+
+        for i, sc in enumerate(series_configs):
+            passed, info = evaluate_criterion(
+                sc["df"], img_dt, sc["criterion"], sc["params"],
+                precomputed=precomputed_list[i],
+                buffer_minutes=buffer_minutes,
+            )
+            label = sc["label"]
+            row[f"{label}_value"] = info.get("value")
+            row[f"{label}_offset_min"] = info.get("offset_min", 0.0)
+            row[f"{label}_event_time"] = info.get("event_time")
+            row[f"{label}_event_value"] = info.get("event_value")
+            row[f"{label}_criterion"] = sc["criterion"]
+            row[f"{label}_passed"] = passed
+
+            # carry extra tidal info
+            if "classification" in info:
+                row[f"{label}_classification"] = info["classification"]
+            if "tidal_range" in info:
+                row[f"{label}_tidal_range"] = info["tidal_range"]
+            if "value_diff" in info:
+                row[f"{label}_value_diff"] = info["value_diff"]
+
+            if not passed:
+                all_pass = False
+                break  # short-circuit AND
+
+        if all_pass:
+            results.append(row)
+
+    return results
+
+
 # %% ————————————————————————————— main GUI ————————————————————————————
 class TimeSeriesExplorerWindow(ctk.CTkToplevel):
-    """Match images to any hydrodynamic time series (water level, waves, wind, currents, etc.)."""
+    """
+    Multi-time-series image explorer.
 
-    ANALYSIS_MODES = [
-        "High Water",
-        "Low Water",
-        "Threshold-based Extreme Event",
-        "User-defined Value Targeting",
-        "Tidal-range Classification",
-    ]
+    Load 1–5 time series (each from a separate CSV) and assign a
+    criterion to each.  Images that satisfy ALL criteria simultaneously
+    are selected.
+    """
 
     def __init__(self, master=None, **kw):
         super().__init__(master=master, **kw)
-        self.title("Time Series Image Explorer")
-        self.geometry("1350x900")
+        self.title("Multi-Time-Series Image Explorer")
+        fit_geometry(self, 1400, 900, resizable=True)
         try:
             self.iconbitmap(resource_path("launch_logo.ico"))
         except Exception:
             pass
 
         # ——— state ———
-        self.wl_path = None
         self.image_folder = None
         self.output_folder = None
-        self.wl_df = None
         self.matched_results = []
         self.recursive_var = tk.BooleanVar(value=False)
         self.copy_images_var = tk.BooleanVar(value=False)
-        self.plot_scatter = None
+        self.plot_scatter_list = []   # one scatter per subplot
         self.scatter_meta = []
-        self.hover_annotation = None
+        self.hover_annotations = []
 
-        # ——— layout ———
-        self.grid_rowconfigure(0, weight=3)
-        self.grid_rowconfigure(1, weight=0)
-        self.grid_rowconfigure(2, weight=1)
+        # per-series state: list of dicts
+        self.series_state = []
+        for _ in range(MAX_SERIES):
+            self.series_state.append({
+                "csv_path": None,
+                "df": None,
+                "nodata_report": "",
+            })
+
+        # ——— main layout (3 rows) ———
+        self.grid_rowconfigure(0, weight=3)     # plot
+        self.grid_rowconfigure(1, weight=0)     # controls
+        self.grid_rowconfigure(2, weight=1)     # console
         self.grid_columnconfigure(0, weight=1)
 
         # ---- TOP: plot ----
+        self._build_plot_area()
+
+        # ---- MIDDLE: controls ----
+        self._build_controls()
+
+        # ---- BOTTOM: console ----
+        self._build_console()
+
+        # initial visibility
+        self._on_num_series_change(1)
+        self._print_welcome()
+
+    # ═══════════════════════════════════════════════════════════════════
+    # BUILD UI SECTIONS
+    # ═══════════════════════════════════════════════════════════════════
+
+    def _build_plot_area(self):
         self.top_panel = ctk.CTkFrame(self)
         self.top_panel.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
 
         self.plot_canvas_frame = tk.Frame(self.top_panel)
         self.plot_canvas_frame.pack(fill="both", expand=True)
 
-        self.fig, self.ax = plt.subplots(figsize=(12, 4))
-        self.ax.set_title("Time Series")
-        self.ax.set_xlabel("Date")
-        self.ax.set_ylabel("Value")
-        self.ax.grid(True, alpha=0.3)
+        # start with a single subplot — rebuilt dynamically
+        self.fig, self.axes = plt.subplots(1, 1, figsize=(12, 4))
+        if not isinstance(self.axes, np.ndarray):
+            self.axes = np.array([self.axes])
         self.fig.tight_layout()
-        self.canvas_plot = FigureCanvasTkAgg(self.fig, master=self.plot_canvas_frame)
+
+        self.canvas_plot = FigureCanvasTkAgg(
+            self.fig, master=self.plot_canvas_frame)
         self.canvas_plot.get_tk_widget().pack(fill="both", expand=True)
 
         self.toolbar_frame = tk.Frame(self.top_panel)
         self.toolbar_frame.pack(fill="x")
-        self.toolbar = NavigationToolbar2Tk(self.canvas_plot, self.toolbar_frame)
+        self.toolbar = NavigationToolbar2Tk(
+            self.canvas_plot, self.toolbar_frame)
         self.toolbar.update()
 
-        self.hover_annotation = self.ax.annotate(
-            "", xy=(0, 0), xytext=(12, 12), textcoords="offset points",
-            bbox=dict(boxstyle="round", fc="white", alpha=0.9),
-            arrowprops=dict(arrowstyle="->", alpha=0.7)
-        )
-        self.hover_annotation.set_visible(False)
-        self.canvas_plot.mpl_connect("motion_notify_event", self._on_plot_hover)
-        self.canvas_plot.mpl_connect("scroll_event", self._on_plot_scroll)
+        self.canvas_plot.mpl_connect(
+            "motion_notify_event", self._on_plot_hover)
+        self.canvas_plot.mpl_connect(
+            "scroll_event", self._on_plot_scroll)
 
-        # ---- BOTTOM: controls ----
+    def _build_controls(self):
         self.bottom_panel = ctk.CTkFrame(self)
-        self.bottom_panel.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
+        self.bottom_panel.grid(
+            row=1, column=0, sticky="nsew", padx=5, pady=5)
 
-        # Row 1 — data inputs
-        row1 = ctk.CTkFrame(self.bottom_panel)
-        row1.pack(fill="x", padx=5, pady=2)
+        # ── Row 0: global top bar ──
+        top_bar = ctk.CTkFrame(self.bottom_panel)
+        top_bar.pack(fill="x", padx=5, pady=2)
 
-        ctk.CTkButton(row1, text="Browse Time Series CSV",
-                      command=self._browse_wl).grid(
-            row=0, column=0, padx=5, pady=5)
-        self.wl_label = ctk.CTkLabel(row1, text="No file selected")
-        self.wl_label.grid(row=0, column=1, padx=5, pady=5, sticky="w")
+        ctk.CTkLabel(top_bar, text="Number of time series:"
+                     ).grid(row=0, column=0, padx=5, pady=3)
+        self.num_series_var = tk.IntVar(value=1)
+        self.num_series_menu = ctk.CTkOptionMenu(
+            top_bar,
+            variable=self.num_series_var,
+            values=[str(i) for i in range(1, MAX_SERIES + 1)],
+            command=lambda v: self._on_num_series_change(int(v)),
+            width=60,
+        )
+        self.num_series_menu.grid(row=0, column=1, padx=5, pady=3)
 
-        ctk.CTkButton(row1, text="Browse Image Folder",
-                      command=self._browse_images).grid(
-            row=0, column=2, padx=5, pady=5)
-        self.img_label = ctk.CTkLabel(row1, text="No folder selected")
-        self.img_label.grid(row=0, column=3, padx=5, pady=5, sticky="w")
-
-        ctk.CTkCheckBox(row1, text="Include sub-folders",
-                        variable=self.recursive_var).grid(
-            row=0, column=4, padx=10, pady=5)
-
-        # datetime format
-        ctk.CTkLabel(row1, text="Filename datetime format:").grid(
-            row=0, column=5, padx=3, pady=5)
-        self.fmt_entry = ctk.CTkEntry(row1, width=160,
-                                       placeholder_text="%Y_%m_%d_%H_%M")
-        self.fmt_entry.grid(row=0, column=6, padx=3, pady=5)
-
-        # Row 2 — analysis mode & parameters
-        row2 = ctk.CTkFrame(self.bottom_panel)
-        row2.pack(fill="x", padx=5, pady=2)
-
-        ctk.CTkLabel(row2, text="Analysis mode:").grid(
-            row=0, column=0, padx=5, pady=3)
-        self.mode_var = ctk.StringVar(value=self.ANALYSIS_MODES[0])
-        self.mode_menu = ctk.CTkOptionMenu(
-            row2, variable=self.mode_var,
-            values=self.ANALYSIS_MODES,
-            command=self._on_mode_change)
-        self.mode_menu.grid(row=0, column=1, padx=5, pady=3)
-
-        self.buffer_label = ctk.CTkLabel(row2, text="Search buffer (min):")
-        self.buffer_label.grid(row=0, column=2, padx=5, pady=3)
-        self.buffer_entry = ctk.CTkEntry(row2, width=60)
+        ctk.CTkLabel(top_bar, text="Search buffer (min):"
+                     ).grid(row=0, column=2, padx=(20, 5), pady=3)
+        self.buffer_entry = ctk.CTkEntry(top_bar, width=60)
         self.buffer_entry.insert(0, "30")
         self.buffer_entry.grid(row=0, column=3, padx=3, pady=3)
 
-        # peak detection params (visible for HW/LW/tidal-range)
-        self.sep_label = ctk.CTkLabel(row2, text="Min peak sep. (hrs):")
-        self.sep_label.grid(row=0, column=4, padx=5, pady=3)
-        self.sep_entry = ctk.CTkEntry(row2, width=50)
-        self.sep_entry.insert(0, "5")
-        self.sep_entry.grid(row=0, column=5, padx=3, pady=3)
+        ctk.CTkLabel(top_bar, text="Filename datetime format:"
+                     ).grid(row=0, column=4, padx=(20, 3), pady=3)
+        self.fmt_entry = ctk.CTkEntry(
+            top_bar, width=160,
+            placeholder_text="%Y_%m_%d_%H_%M")
+        self.fmt_entry.grid(row=0, column=5, padx=3, pady=3)
 
-        self.prom_label = ctk.CTkLabel(row2, text="Min prominence:")
-        self.prom_label.grid(row=0, column=6, padx=5, pady=3)
-        self.prom_entry = ctk.CTkEntry(row2, width=50)
-        self.prom_entry.insert(0, "0.2")
-        self.prom_entry.grid(row=0, column=7, padx=3, pady=3)
+        # ── Series panels ──
+        self.series_container = ctk.CTkFrame(
+            self.bottom_panel, fg_color="transparent")
+        self.series_container.pack(fill="x", padx=5, pady=2)
 
-        # threshold / value entry (shown/hidden by mode)
-        self.param_label = ctk.CTkLabel(row2, text="Threshold:")
-        self.param_label.grid(row=0, column=8, padx=5, pady=3)
-        self.param_entry = ctk.CTkEntry(row2, width=80)
-        self.param_entry.grid(row=0, column=9, padx=3, pady=3)
+        self.series_panels = []
+        self.series_widgets = []
 
-        self.direction_var = ctk.StringVar(value="above")
-        self.direction_menu = ctk.CTkOptionMenu(
-            row2, variable=self.direction_var,
-            values=["above", "below"], width=80)
-        self.direction_menu.grid(row=0, column=10, padx=3, pady=3)
+        for idx in range(MAX_SERIES):
+            self._create_series_panel(idx)
 
-        self.value_tol_label = ctk.CTkLabel(row2, text="Value tolerance:")
-        self.value_tol_label.grid(row=0, column=11, padx=5, pady=3)
-        self.value_tol_entry = ctk.CTkEntry(row2, width=80)
-        self.value_tol_entry.insert(0, "0.5")
-        self.value_tol_entry.grid(row=0, column=12, padx=3, pady=3)
+        # ── Row: image folder, output, actions ──
+        actions_bar = ctk.CTkFrame(self.bottom_panel)
+        actions_bar.pack(fill="x", padx=5, pady=2)
 
-        # initially hide threshold-specific widgets
-        self._on_mode_change(self.mode_var.get())
+        ctk.CTkButton(actions_bar, text="Browse Image Folder",
+                      command=self._browse_images
+                      ).grid(row=0, column=0, padx=5, pady=5)
+        self.img_label = ctk.CTkLabel(
+            actions_bar, text="No folder selected")
+        self.img_label.grid(row=0, column=1, padx=5, pady=5, sticky="w")
 
-        # Row 3 — actions
-        row3 = ctk.CTkFrame(self.bottom_panel)
-        row3.pack(fill="x", padx=5, pady=2)
+        ctk.CTkCheckBox(actions_bar, text="Include sub-folders",
+                        variable=self.recursive_var
+                        ).grid(row=0, column=2, padx=10, pady=5)
 
-        ctk.CTkCheckBox(row3, text="Copy identified images to output",
-                        variable=self.copy_images_var).grid(
-            row=0, column=0, padx=5, pady=5)
+        ctk.CTkCheckBox(actions_bar, text="Copy images to output",
+                        variable=self.copy_images_var
+                        ).grid(row=0, column=3, padx=10, pady=5)
 
-        ctk.CTkButton(row3, text="Browse Output Folder",
-                      command=self._browse_output, fg_color="#8C7738").grid(
-            row=0, column=1, padx=5, pady=5)
-        self.output_label = ctk.CTkLabel(row3, text="No output folder selected")
-        self.output_label.grid(row=0, column=2, padx=5, pady=5, sticky="w")
+        ctk.CTkButton(actions_bar, text="Browse Output Folder",
+                      command=self._browse_output,
+                      fg_color="#8C7738"
+                      ).grid(row=0, column=4, padx=5, pady=5)
+        self.output_label = ctk.CTkLabel(
+            actions_bar, text="No output folder selected")
+        self.output_label.grid(
+            row=0, column=5, padx=5, pady=5, sticky="w")
 
-        ctk.CTkButton(row3, text="Run Analysis",
-                      command=self._run_threaded, fg_color="#0F52BA").grid(
-            row=0, column=3, padx=10, pady=5)
+        ctk.CTkButton(actions_bar, text="Run Analysis",
+                      command=self._run_threaded,
+                      fg_color="#0F52BA"
+                      ).grid(row=0, column=6, padx=10, pady=5)
 
-        self.progress_bar = ctk.CTkProgressBar(row3, width=200)
-        self.progress_bar.grid(row=0, column=4, padx=5, pady=5)
+        self.progress_bar = ctk.CTkProgressBar(actions_bar, width=160)
+        self.progress_bar.grid(row=0, column=7, padx=5, pady=5)
         self.progress_bar.set(0)
 
-        self.btn_reset = ctk.CTkButton(
-            row3, text="Reset", command=self._reset,
-            width=80, fg_color="#8B0000", hover_color="#A52A2A")
-        self.btn_reset.grid(row=0, column=5, padx=5, pady=5, sticky="e")
+        ctk.CTkButton(actions_bar, text="Reset",
+                      command=self._reset,
+                      width=80, fg_color="#8B0000",
+                      hover_color="#A52A2A"
+                      ).grid(row=0, column=8, padx=5, pady=5)
 
-        # ---- CONSOLE ----
+    def _create_series_panel(self, idx):
+        """Build the widgets for one series input row."""
+        frame = ctk.CTkFrame(self.series_container)
+        frame.pack(fill="x", padx=2, pady=3)
+
+        w = {}  # widget references
+
+        # ── Row 0: file & label ──
+        ctk.CTkLabel(frame, text=f"Series {idx + 1}:",
+                     font=("Serif", 13, "bold")
+                     ).grid(row=0, column=0, padx=5, pady=2)
+
+        w["browse_btn"] = ctk.CTkButton(
+            frame, text="Browse CSV", width=100,
+            command=lambda i=idx: self._browse_series_csv(i))
+        w["browse_btn"].grid(row=0, column=1, padx=3, pady=2)
+
+        w["file_label"] = ctk.CTkLabel(frame, text="No file",
+                                        width=150, anchor="w")
+        w["file_label"].grid(row=0, column=2, padx=3, pady=2, sticky="w")
+
+        ctk.CTkLabel(frame, text="Label:"
+                     ).grid(row=0, column=3, padx=(10, 3), pady=2)
+        default_labels = ["Water_Level", "Wave_Height", "Wind_Speed",
+                          "Current", "Series_5"]
+        w["label_entry"] = ctk.CTkEntry(frame, width=120)
+        w["label_entry"].insert(0, default_labels[idx])
+        w["label_entry"].grid(row=0, column=4, padx=3, pady=2)
+
+        ctk.CTkLabel(frame, text="No-data:"
+                     ).grid(row=0, column=5, padx=(10, 3), pady=2)
+        w["nodata_entry"] = ctk.CTkEntry(
+            frame, width=80,
+            placeholder_text="auto")
+        w["nodata_entry"].grid(row=0, column=6, padx=3, pady=2)
+
+        # ── Row 1: criterion & parameters ──
+        ctk.CTkLabel(frame, text="Criterion:"
+                     ).grid(row=1, column=0, padx=5, pady=2)
+        w["criterion_var"] = ctk.StringVar(value="No Filter")
+        w["criterion_menu"] = ctk.CTkOptionMenu(
+            frame, variable=w["criterion_var"],
+            values=CRITERIA, width=160,
+            command=lambda v, i=idx: self._on_criterion_change(i, v))
+        w["criterion_menu"].grid(row=1, column=1, padx=3, pady=2,
+                                  columnspan=2)
+
+        # threshold / target / tolerance
+        w["thresh_label"] = ctk.CTkLabel(frame, text="Threshold:")
+        w["thresh_label"].grid(row=1, column=3, padx=3, pady=2)
+        w["thresh_entry"] = ctk.CTkEntry(frame, width=70)
+        w["thresh_entry"].grid(row=1, column=4, padx=3, pady=2)
+
+        w["tol_label"] = ctk.CTkLabel(frame, text="Tolerance:")
+        w["tol_label"].grid(row=1, column=5, padx=3, pady=2)
+        w["tol_entry"] = ctk.CTkEntry(frame, width=70)
+        w["tol_entry"].insert(0, "0.5")
+        w["tol_entry"].grid(row=1, column=6, padx=3, pady=2)
+
+        # peak detection params
+        w["sep_label"] = ctk.CTkLabel(frame, text="Peak sep. (hrs):")
+        w["sep_label"].grid(row=1, column=7, padx=3, pady=2)
+        w["sep_entry"] = ctk.CTkEntry(frame, width=50)
+        w["sep_entry"].insert(0, "5")
+        w["sep_entry"].grid(row=1, column=8, padx=3, pady=2)
+
+        w["prom_label"] = ctk.CTkLabel(frame, text="Prominence:")
+        w["prom_label"].grid(row=1, column=9, padx=3, pady=2)
+        w["prom_entry"] = ctk.CTkEntry(frame, width=50)
+        w["prom_entry"].insert(0, "0.2")
+        w["prom_entry"].grid(row=1, column=10, padx=3, pady=2)
+
+        self.series_panels.append(frame)
+        self.series_widgets.append(w)
+
+        # set initial visibility
+        self._on_criterion_change(idx, "No Filter")
+
+    def _build_console(self):
         self.console_frame = ctk.CTkFrame(self)
-        self.console_frame.grid(row=2, column=0, sticky="nsew", padx=5, pady=5)
-        self.console_text = tk.Text(self.console_frame, wrap="word", height=8)
+        self.console_frame.grid(
+            row=2, column=0, sticky="nsew", padx=5, pady=5)
+        self.console_text = tk.Text(
+            self.console_frame, wrap="word", height=8)
         self.console_text.pack(fill="both", expand=True, padx=5, pady=5)
         self.stdout_redirector = StdoutRedirector(self.console_text)
         sys.stdout = self.stdout_redirector
         sys.stderr = self.stdout_redirector
-        print("Time Series Image Explorer ready.\n"
-              "Provide a time series CSV (water level, waves, wind, currents,\n"
-              "  etc.) and a folder of images with timestamps in filenames.\n"
-              "\n"
-              "Peak detection (High Water / Low Water / Tidal-range modes):\n"
-              "  Min peak sep. (hrs) — Minimum hours between consecutive peaks.\n"
-              "    Prevents noise from being detected as separate events.\n"
-              "    For tides: 5-6 hrs.  For wind gusts: 1-2 hrs.\n"
-              "  Min prominence — Minimum rise above surrounding baseline.\n"
-              "    For tides: 0.2-0.5 m.  Increase if too many false peaks.\n"
-              "\n"
-              "Filename datetime format (optional):\n"
-              "  Leave blank for auto-detection — works with patterns like:\n"
-              "    2025_05_01_04_02-04_12_camPANO_v2_HDR.tif\n"
-              "  Or enter a Python strftime pattern, e.g. %Y_%m_%d_%H_%M\n"
-              "--------------------------------")
 
-    # ——— mode change visibility ———
+    def _print_welcome(self):
+        print(
+            "Multi-Time-Series Image Explorer ready.\n"
+            "\n"
+            "Load 1–5 time series (water level, waves, wind, …) from\n"
+            "separate CSV files.  Assign a criterion to each series.\n"
+            "Images satisfying ALL criteria simultaneously are selected.\n"
+            "\n"
+            "Criteria per series:\n"
+            "  Peaks / Troughs — images near detected extrema\n"
+            "  Above / Below Threshold — value at image time vs threshold\n"
+            "  Near Target Value — value at image time ≈ target ± tolerance\n"
+            "  Spring / Neap Tide Peaks — tidal classification + peaks\n"
+            "  No Filter — records value but does not filter\n"
+            "\n"
+            "Peak detection parameters (per series):\n"
+            "  Peak sep. (hrs) — min hours between consecutive peaks\n"
+            "    Tides: 5–6 hrs.  Wind gusts: 1–2 hrs.\n"
+            "  Prominence — min rise above surrounding baseline\n"
+            "    Tides: 0.2–0.5 m.  Increase if too many false peaks.\n"
+            "\n"
+            "No-data handling:\n"
+            "  Leave the no-data field as 'auto' to auto-detect common\n"
+            "  sentinels (-9999, -999, 9999, etc.).\n"
+            "  Enter a custom value to override auto-detection.\n"
+            "\n"
+            "Filename datetime format (optional):\n"
+            "  Leave blank for auto-detection, or enter strftime pattern.\n"
+            "--------------------------------"
+        )
 
-    def _on_mode_change(self, mode):
-        # peak detection params — visible for HW, LW, tidal-range
-        if mode in ("High Water", "Low Water", "Tidal-range Classification"):
-            self.sep_label.grid()
-            self.sep_entry.grid()
-            self.prom_label.grid()
-            self.prom_entry.grid()
+    # ═══════════════════════════════════════════════════════════════════
+    # VISIBILITY MANAGEMENT
+    # ═══════════════════════════════════════════════════════════════════
+
+    def _on_num_series_change(self, n):
+        """Show/hide series panels based on selected count."""
+        if isinstance(n, str):
+            n = int(n)
+        for idx in range(MAX_SERIES):
+            if idx < n:
+                self.series_panels[idx].pack(fill="x", padx=2, pady=3)
+            else:
+                self.series_panels[idx].pack_forget()
+
+    def _on_criterion_change(self, idx, criterion):
+        """Show/hide criterion-specific parameter fields."""
+        w = self.series_widgets[idx]
+
+        # peak detection params — only for event-based criteria
+        needs_peak = criterion in (
+            "Peaks (Maxima)", "Troughs (Minima)",
+            "Spring Tide Peaks", "Neap Tide Peaks")
+        for key in ("sep_label", "sep_entry", "prom_label", "prom_entry"):
+            if needs_peak:
+                w[key].grid()
+            else:
+                w[key].grid_remove()
+
+        # threshold — for Above/Below Threshold
+        needs_thresh = criterion in ("Above Threshold", "Below Threshold")
+        if needs_thresh:
+            w["thresh_label"].configure(text="Threshold:")
+            w["thresh_label"].grid()
+            w["thresh_entry"].grid()
+        elif criterion == "Near Target Value":
+            w["thresh_label"].configure(text="Target value:")
+            w["thresh_label"].grid()
+            w["thresh_entry"].grid()
         else:
-            self.sep_label.grid_remove()
-            self.sep_entry.grid_remove()
-            self.prom_label.grid_remove()
-            self.prom_entry.grid_remove()
+            w["thresh_label"].grid_remove()
+            w["thresh_entry"].grid_remove()
 
-        if mode == "User-defined Value Targeting":
-            self.buffer_label.grid_remove()
-            self.buffer_entry.grid_remove()
-            self.value_tol_label.grid()
-            self.value_tol_entry.grid()
+        # tolerance — only for Near Target Value
+        if criterion == "Near Target Value":
+            w["tol_label"].grid()
+            w["tol_entry"].grid()
         else:
-            self.buffer_label.grid()
-            self.buffer_entry.grid()
-            self.value_tol_label.grid_remove()
-            self.value_tol_entry.grid_remove()
+            w["tol_label"].grid_remove()
+            w["tol_entry"].grid_remove()
 
-        # threshold / value / direction — mode-specific
-        if mode == "Threshold-based Extreme Event":
-            self.param_label.configure(text="Threshold:")
-            self.param_entry.grid()
-            self.direction_menu.grid()
-        elif mode == "User-defined Value Targeting":
-            self.param_label.configure(text="Target value:")
-            self.param_entry.grid()
-            self.direction_menu.grid_remove()
-        else:
-            self.param_label.configure(text="")
-            self.param_entry.grid_remove()
-            self.direction_menu.grid_remove()
+    # ═══════════════════════════════════════════════════════════════════
+    # BROWSE CALLBACKS
+    # ═══════════════════════════════════════════════════════════════════
 
-    # ——— browse callbacks ———
-
-    def _browse_wl(self):
+    def _browse_series_csv(self, idx):
         p = filedialog.askopenfilename(
-            title="Select Time Series CSV",
+            title=f"Select CSV for Series {idx + 1}",
             filetypes=[("CSV / TXT", "*.csv *.txt *.dat")])
         if p:
-            self.wl_path = p
-            self.wl_label.configure(text=os.path.basename(p))
-            self._load_and_plot_wl()
+            self.series_state[idx]["csv_path"] = p
+            self.series_widgets[idx]["file_label"].configure(
+                text=os.path.basename(p))
+            self._load_series(idx)
 
     def _browse_images(self):
         d = filedialog.askdirectory(title="Select Image Folder")
@@ -653,194 +1119,286 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
             self.output_folder = d
             self.output_label.configure(text=d)
 
-    # ——— load & plot time series ———
+    # ═══════════════════════════════════════════════════════════════════
+    # LOAD & PLOT
+    # ═══════════════════════════════════════════════════════════════════
 
-    def _load_and_plot_wl(self):
+    def _load_series(self, idx):
+        """Load a time series CSV and plot it."""
         try:
-            self.wl_df = load_timeseries(self.wl_path)
-            print(f"Loaded {len(self.wl_df)} time series records.")
-            print(f"  Range: {self.wl_df['datetime'].min()} → "
-                  f"{self.wl_df['datetime'].max()}")
-            print(f"  Value range: {self.wl_df['value'].min():.3f} – "
-                  f"{self.wl_df['value'].max():.3f}")
-            self._refresh_plot("Time Series", [])
+            w = self.series_widgets[idx]
+            csv_path = self.series_state[idx]["csv_path"]
+            label = w["label_entry"].get().strip() or f"Series_{idx + 1}"
+
+            # parse user no-data value
+            nodata_text = w["nodata_entry"].get().strip()
+            nodata_val = None
+            if nodata_text and nodata_text.lower() != "auto":
+                try:
+                    nodata_val = float(nodata_text)
+                except ValueError:
+                    print(f"[WARNING] Invalid no-data value '{nodata_text}'"
+                          f" for {label}, falling back to auto-detect.")
+
+            df, nodata_report = load_timeseries(
+                csv_path, nodata_value=nodata_val)
+            self.series_state[idx]["df"] = df
+            self.series_state[idx]["nodata_report"] = nodata_report
+
+            print(f"\n[{label}] Loaded {len(df)} records from "
+                  f"{os.path.basename(csv_path)}")
+            print(f"  Range: {df['datetime'].min()} → "
+                  f"{df['datetime'].max()}")
+            print(f"  Value range: {df['value'].min():.3f} – "
+                  f"{df['value'].max():.3f}")
+            print(f"  {nodata_report}")
+
+            self._refresh_plot(results=[])
+
         except Exception as e:
-            print(f"[ERROR] Loading time series: {e}")
+            print(f"[ERROR] Loading series {idx + 1}: {e}")
 
-    # ——— reset ———
+    def _get_active_count(self):
+        """Return the number of series panels currently visible."""
+        return self.num_series_var.get()
 
-    def _reset(self):
-        self.wl_path = None
-        self.image_folder = None
-        self.output_folder = None
-        self.wl_df = None
-        self.matched_results = []
-        self.wl_label.configure(text="No file selected")
-        self.img_label.configure(text="No folder selected")
-        self.output_label.configure(text="No output folder selected")
-        self.progress_bar.set(0)
-        self.recursive_var.set(False)
-        self.copy_images_var.set(False)
-        self.mode_var.set(self.ANALYSIS_MODES[0])
-        self._on_mode_change(self.ANALYSIS_MODES[0])
-        self.buffer_entry.delete(0, tk.END)
-        self.buffer_entry.insert(0, "30")
-        self.sep_entry.delete(0, tk.END)
-        self.sep_entry.insert(0, "5")
-        self.prom_entry.delete(0, tk.END)
-        self.prom_entry.insert(0, "0.2")
-        self.param_entry.delete(0, tk.END)
-        self.value_tol_entry.delete(0, tk.END)
-        self.value_tol_entry.insert(0, "0.5")
-        self.fmt_entry.delete(0, tk.END)
+    def _get_active_series(self):
+        """Return list of (idx, series_state, widgets) for loaded series."""
+        n = self._get_active_count()
+        active = []
+        for idx in range(n):
+            if self.series_state[idx]["df"] is not None:
+                active.append((idx, self.series_state[idx],
+                                self.series_widgets[idx]))
+        return active
 
-        self._refresh_plot("Time Series", [])
-        self.console_text.delete("1.0", tk.END)
-        print("Session reset.\n--------------------------------")
+    # ═══════════════════════════════════════════════════════════════════
+    # PLOT
+    # ═══════════════════════════════════════════════════════════════════
 
-    # ——— analysis ———
+    def _rebuild_subplots(self, n_plots):
+        """Recreate figure with n_plots stacked subplots."""
+        self.fig.clear()
+        if n_plots <= 0:
+            n_plots = 1
+        height_per = max(2.5, 10.0 / n_plots)
+        self.fig.set_size_inches(12, height_per * n_plots)
+        self.axes = self.fig.subplots(
+            n_plots, 1, squeeze=False, sharex=True)[:, 0]
+        self.hover_annotations = []
+        for ax in self.axes:
+            ann = ax.annotate(
+                "", xy=(0, 0), xytext=(12, 12),
+                textcoords="offset points",
+                bbox=dict(boxstyle="round", fc="white", alpha=0.9),
+                arrowprops=dict(arrowstyle="->", alpha=0.7))
+            ann.set_visible(False)
+            self.hover_annotations.append(ann)
 
-    def _refresh_plot(self, title, results, mode=None):
-        self.ax.clear()
+    def _refresh_plot(self, results=None, title=None):
+        """Redraw all subplots with loaded series and matched results."""
+        active = self._get_active_series()
+        n_plots = max(1, len(active))
+        self._rebuild_subplots(n_plots)
 
-        if self.wl_df is not None and not self.wl_df.empty:
-            self.ax.plot(self.wl_df["datetime"], self.wl_df["value"],
-                         color="#3498db", linewidth=0.5, alpha=0.6,
-                         label="Time series")
-
-        self.plot_scatter = None
+        self.plot_scatter_list = []
         self.scatter_meta = []
-        if self.hover_annotation is not None:
-            self.hover_annotation.set_visible(False)
 
-        if results:
-            xs = []
-            ys = []
-            colors = []
+        series_colors = ["#3498db", "#e67e22", "#2ecc71",
+                         "#9b59b6", "#e74c3c"]
 
-            for r in results:
-                if mode == "User-defined Value Targeting":
-                    x = r["image_dt"]
-                    y = r["matched_value"]
-                    color = "#e67e22"
-                    text = (
-                        f"Image: {r['image_path'].name}\n"
-                        f"Image time: {r['image_dt']}\n"
-                        f"Series value: {r['matched_value']:.3f}\n"
-                        f"Target: {r['target_value']:.3f}\n"
-                        f"Value diff: {r['value_diff']:.3f}\n"
-                        f"Nearest series time: {r['nearest_series_dt']}\n"
-                        f"Series time offset: {r['offset_min']:.2f} min"
-                    )
-                else:
-                    x = r["event_time"]
-                    y = r.get("event_value")
-                    if y is None and self.wl_df is not None:
-                        idx = (self.wl_df["datetime"] - x).abs().idxmin()
-                        y = float(self.wl_df.loc[idx, "value"])
-                    if mode == "Tidal-range Classification":
-                        color = "#e74c3c" if r.get("classification") == "spring" else "#2ecc71"
+        for ax_idx, ax in enumerate(self.axes):
+            if ax_idx < len(active):
+                idx, state, widgets = active[ax_idx]
+                df = state["df"]
+                label = widgets["label_entry"].get().strip() or \
+                    f"Series_{idx + 1}"
+                color = series_colors[ax_idx % len(series_colors)]
+
+                ax.plot(df["datetime"], df["value"],
+                        color=color, linewidth=0.5, alpha=0.6,
+                        label=label)
+                ax.set_ylabel(label, fontsize=9)
+                ax.grid(True, alpha=0.3)
+                ax.legend(fontsize="small", loc="upper right")
+
+                # overlay matched results on this series
+                if results:
+                    xs, ys, cs, meta_batch = [], [], [], []
+                    for r in results:
+                        val_key = f"{label}_value"
+                        val = r.get(val_key)
+                        if val is None:
+                            continue
+
+                        evt_t = r.get(f"{label}_event_time") or \
+                            r["image_dt"]
+                        xs.append(evt_t)
+                        ys.append(val)
+
+                        # colour by classification if present
+                        cls = r.get(f"{label}_classification")
+                        if cls == "spring":
+                            cs.append("#e74c3c")
+                        elif cls == "neap":
+                            cs.append("#2ecc71")
+                        else:
+                            cs.append("#e74c3c")
+
+                        crit = r.get(f"{label}_criterion", "")
+                        offset = r.get(f"{label}_offset_min", 0.0)
                         text = (
                             f"Image: {r['image_path'].name}\n"
-                            f"Event time: {r['event_time']}\n"
                             f"Image time: {r['image_dt']}\n"
-                            f"Value: {float(y):.3f}\n"
-                            f"Time offset: {r['offset_min']:.2f} min\n"
-                            f"Class: {r.get('classification', '')}\n"
-                            f"Tidal range: {r.get('tidal_range', float('nan')):.3f}"
+                            f"[{label}] value: {val:.3f}\n"
+                            f"[{label}] criterion: {crit}\n"
+                            f"[{label}] offset: {offset:.1f} min"
                         )
-                    else:
-                        color = "#e74c3c"
-                        text = (
-                            f"Image: {r['image_path'].name}\n"
-                            f"Event time: {r['event_time']}\n"
-                            f"Image time: {r['image_dt']}\n"
-                            f"Value: {float(y):.3f}\n"
-                            f"Time offset: {r['offset_min']:.2f} min"
-                        )
-                xs.append(x)
-                ys.append(y)
-                colors.append(color)
-                self.scatter_meta.append({"x": x, "y": y, "text": text})
+                        meta_batch.append({
+                            "x": evt_t, "y": val, "text": text,
+                            "ax_idx": ax_idx,
+                        })
 
-            self.plot_scatter = self.ax.scatter(xs, ys, c=colors, s=36,
-                                                zorder=5, picker=True)
+                    if xs:
+                        sc = ax.scatter(xs, ys, c=cs, s=36,
+                                        zorder=5, picker=True)
+                        self.plot_scatter_list.append(
+                            (ax_idx, sc, meta_batch))
+                        self.scatter_meta.extend(meta_batch)
 
-            if mode == "Tidal-range Classification":
-                from matplotlib.patches import Patch as MPatch
-                self.ax.legend(handles=[
-                    MPatch(color="#e74c3c", label="Spring"),
-                    MPatch(color="#2ecc71", label="Neap"),
-                ], fontsize="small")
+                        # auto-zoom to matched range
+                        dt_sorted = sorted(xs)
+                        dt_first, dt_last = dt_sorted[0], dt_sorted[-1]
+                        span = ((dt_last - dt_first)
+                                if dt_last != dt_first
+                                else timedelta(hours=6))
+                        pad = span * 0.05 + timedelta(hours=1)
+                        ax.set_xlim(dt_first - pad, dt_last + pad)
             else:
-                self.ax.legend([self.plot_scatter], [f"Matched ({mode})"],
-                               fontsize="small")
+                ax.set_visible(False)
 
-            img_dts = sorted([r["image_dt"] for r in results])
-            dt_first, dt_last = img_dts[0], img_dts[-1]
-            span = (dt_last - dt_first) if dt_last != dt_first else timedelta(hours=6)
-            pad = span * 0.05 + timedelta(hours=1)
-            self.ax.set_xlim(dt_first - pad, dt_last + pad)
+        # format x axis on the bottom-most visible axis
+        for ax in self.axes:
+            if ax.get_visible():
+                last_visible = ax
+        last_visible.set_xlabel("Date")
+        last_visible.xaxis.set_major_formatter(
+            mdates.DateFormatter(
+                "%Y-%m-%d %H:%M" if results else "%Y-%m-%d"))
 
-        self.ax.set_title(title)
-        self.ax.set_xlabel("Date")
-        self.ax.set_ylabel("Value")
-        self.ax.grid(True, alpha=0.3)
-        self.ax.xaxis.set_major_formatter(mdates.DateFormatter(
-            "%Y-%m-%d %H:%M" if results else "%Y-%m-%d"))
+        if title:
+            self.axes[0].set_title(title, fontsize=11)
+
         self.fig.autofmt_xdate()
         self.fig.tight_layout()
         self.canvas_plot.draw_idle()
 
     def _on_plot_hover(self, event):
-        if self.plot_scatter is None or self.hover_annotation is None:
-            return
-        if event.inaxes != self.ax:
-            if self.hover_annotation.get_visible():
-                self.hover_annotation.set_visible(False)
-                self.canvas_plot.draw_idle()
+        if not self.scatter_meta:
             return
 
-        contains, info = self.plot_scatter.contains(event)
-        if contains and info.get("ind"):
-            idx = info["ind"][0]
-            meta = self.scatter_meta[idx]
-            self.hover_annotation.xy = (meta["x"], meta["y"])
-            self.hover_annotation.set_text(meta["text"])
-            self.hover_annotation.set_visible(True)
-            self.canvas_plot.draw_idle()
-        elif self.hover_annotation.get_visible():
-            self.hover_annotation.set_visible(False)
-            self.canvas_plot.draw_idle()
+        for ax_idx, scatter, meta_batch in self.plot_scatter_list:
+            ax = self.axes[ax_idx]
+            ann = self.hover_annotations[ax_idx]
+            if event.inaxes != ax:
+                if ann.get_visible():
+                    ann.set_visible(False)
+                    self.canvas_plot.draw_idle()
+                continue
+
+            contains, info = scatter.contains(event)
+            if contains and info.get("ind"):
+                i = info["ind"][0]
+                meta = meta_batch[i]
+                ann.xy = (mdates.date2num(meta["x"]), meta["y"])
+                ann.set_text(meta["text"])
+                ann.set_visible(True)
+                self.canvas_plot.draw_idle()
+            elif ann.get_visible():
+                ann.set_visible(False)
+                self.canvas_plot.draw_idle()
 
     def _on_plot_scroll(self, event):
-        if event.inaxes != self.ax or event.xdata is None or event.ydata is None:
-            return
+        for ax in self.axes:
+            if event.inaxes == ax:
+                if event.xdata is None or event.ydata is None:
+                    return
+                scale = 1 / 1.2 if event.button == "up" else 1.2
+                x0, x1 = ax.get_xlim()
+                y0, y1 = ax.get_ylim()
+                xr = (x1 - x0) * scale
+                yr = (y1 - y0) * scale
+                rx = ((x1 - event.xdata) / (x1 - x0)
+                      if x1 != x0 else 0.5)
+                ry = ((y1 - event.ydata) / (y1 - y0)
+                      if y1 != y0 else 0.5)
+                ax.set_xlim([event.xdata - xr * (1 - rx),
+                             event.xdata + xr * rx])
+                ax.set_ylim([event.ydata - yr * (1 - ry),
+                             event.ydata + yr * ry])
+                self.canvas_plot.draw_idle()
+                break
 
-        scale_factor = 1 / 1.2 if event.button == "up" else 1.2
-        x_min, x_max = self.ax.get_xlim()
-        y_min, y_max = self.ax.get_ylim()
-        x_range = (x_max - x_min) * scale_factor
-        y_range = (y_max - y_min) * scale_factor
+    # ═══════════════════════════════════════════════════════════════════
+    # RESET
+    # ═══════════════════════════════════════════════════════════════════
 
-        rel_x = (x_max - event.xdata) / (x_max - x_min) if x_max != x_min else 0.5
-        rel_y = (y_max - event.ydata) / (y_max - y_min) if y_max != y_min else 0.5
+    def _reset(self):
+        self.image_folder = None
+        self.output_folder = None
+        self.matched_results = []
+        self.img_label.configure(text="No folder selected")
+        self.output_label.configure(text="No output folder selected")
+        self.progress_bar.set(0)
+        self.recursive_var.set(False)
+        self.copy_images_var.set(False)
+        self.num_series_var.set(1)
+        self._on_num_series_change(1)
 
-        self.ax.set_xlim([event.xdata - x_range * (1 - rel_x),
-                          event.xdata + x_range * rel_x])
-        self.ax.set_ylim([event.ydata - y_range * (1 - rel_y),
-                          event.ydata + y_range * rel_y])
-        self.canvas_plot.draw_idle()
+        self.buffer_entry.delete(0, tk.END)
+        self.buffer_entry.insert(0, "30")
+        self.fmt_entry.delete(0, tk.END)
+
+        for idx in range(MAX_SERIES):
+            self.series_state[idx] = {
+                "csv_path": None, "df": None, "nodata_report": ""}
+            w = self.series_widgets[idx]
+            w["file_label"].configure(text="No file")
+            w["criterion_var"].set("No Filter")
+            self._on_criterion_change(idx, "No Filter")
+            w["thresh_entry"].delete(0, tk.END)
+            w["tol_entry"].delete(0, tk.END)
+            w["tol_entry"].insert(0, "0.5")
+            w["sep_entry"].delete(0, tk.END)
+            w["sep_entry"].insert(0, "5")
+            w["prom_entry"].delete(0, tk.END)
+            w["prom_entry"].insert(0, "0.2")
+            w["nodata_entry"].delete(0, tk.END)
+
+        self._refresh_plot(results=[])
+        self.console_text.delete("1.0", tk.END)
+        print("Session reset.\n--------------------------------")
+
+    # ═══════════════════════════════════════════════════════════════════
+    # RUN ANALYSIS
+    # ═══════════════════════════════════════════════════════════════════
 
     def _run_threaded(self):
         threading.Thread(target=self._run_analysis, daemon=True).start()
 
     def _run_analysis(self):
         try:
-            if self.wl_df is None:
-                messagebox.showwarning("Warning",
-                                       "Load a time series file first.")
-                return
+            # --- validation ---
+            n = self._get_active_count()
+            loaded = []
+            for idx in range(n):
+                if self.series_state[idx]["df"] is None:
+                    messagebox.showwarning(
+                        "Warning",
+                        f"Series {idx + 1} has no CSV loaded.")
+                    return
+                loaded.append(idx)
+
             if not self.image_folder:
                 messagebox.showwarning("Warning",
                                        "Select an image folder first.")
@@ -850,36 +1408,80 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
                                        "Select an output folder first.")
                 return
 
-            mode = self.mode_var.get()
+            buffer_min = float(self.buffer_entry.get())
             user_fmt = self.fmt_entry.get().strip() or None
-            buffer_min = (float(self.buffer_entry.get())
-                          if mode != "User-defined Value Targeting" else None)
 
-            # peak detection params (used by HW/LW/tidal-range)
-            min_sep_h = float(self.sep_entry.get())
-            min_prom = float(self.prom_entry.get())
+            # --- build series configs ---
+            series_configs = []
+            for idx in loaded:
+                w = self.series_widgets[idx]
+                label = w["label_entry"].get().strip() or \
+                    f"Series_{idx + 1}"
+                criterion = w["criterion_var"].get()
 
-            print(f"\n=== Analysis: {mode} ===")
-            value_tol = None
-            target = None
-            if mode == "User-defined Value Targeting":
-                target = float(self.param_entry.get())
-                tol_text = self.value_tol_entry.get().strip()
-                value_tol = float(tol_text) if tol_text else None
-                if value_tol is None:
-                    print(f"Target value: {target} (no tolerance filter)")
-                else:
-                    print(f"Target value: {target} ± {value_tol}")
-            else:
-                print(f"Search buffer: ±{buffer_min} min")
-            if mode in ("High Water", "Low Water",
-                        "Tidal-range Classification"):
-                print(f"Peak detection: min separation={min_sep_h} hrs, "
-                      f"min prominence={min_prom}")
+                # re-load with current no-data setting in case user
+                # changed it after initial load
+                nodata_text = w["nodata_entry"].get().strip()
+                nodata_val = None
+                if nodata_text and nodata_text.lower() != "auto":
+                    try:
+                        nodata_val = float(nodata_text)
+                    except ValueError:
+                        pass
 
+                csv_path = self.series_state[idx]["csv_path"]
+                df, nodata_report = load_timeseries(
+                    csv_path, nodata_value=nodata_val)
+                self.series_state[idx]["df"] = df
+                self.series_state[idx]["nodata_report"] = nodata_report
+
+                params = {}
+                if criterion in ("Above Threshold", "Below Threshold"):
+                    params["threshold"] = float(
+                        w["thresh_entry"].get())
+                elif criterion == "Near Target Value":
+                    params["target"] = float(
+                        w["thresh_entry"].get())
+                    params["tolerance"] = float(
+                        w["tol_entry"].get())
+
+                if criterion in ("Peaks (Maxima)", "Troughs (Minima)",
+                                 "Spring Tide Peaks", "Neap Tide Peaks"):
+                    params["min_sep_hours"] = float(
+                        w["sep_entry"].get())
+                    params["min_prominence"] = float(
+                        w["prom_entry"].get())
+
+                series_configs.append({
+                    "df": df,
+                    "label": label,
+                    "criterion": criterion,
+                    "params": params,
+                })
+
+            # --- summarise ---
+            crit_desc = " AND ".join(
+                f"[{sc['label']}: {sc['criterion']}]"
+                for sc in series_configs)
+            print(f"\n=== Multi-Series Analysis ===")
+            print(f"Criteria (AND): {crit_desc}")
+            print(f"Search buffer: ±{buffer_min} min")
+
+            for sc in series_configs:
+                nd_rep = ""
+                for idx in loaded:
+                    lbl = self.series_widgets[idx][
+                        "label_entry"].get().strip()
+                    if lbl == sc["label"]:
+                        nd_rep = self.series_state[idx]["nodata_report"]
+                        break
+                print(f"  [{sc['label']}] {nd_rep}")
+
+            # --- collect images ---
             print("Scanning images for timestamps …")
             image_list = collect_dated_images(
-                self.image_folder, user_fmt, self.recursive_var.get())
+                self.image_folder, user_fmt,
+                self.recursive_var.get())
             if not image_list:
                 messagebox.showwarning(
                     "Warning",
@@ -889,146 +1491,71 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
             print(f"Found {len(image_list)} dated images.")
             self.progress_bar.set(0.1)
 
-            results = []
-            mode_tag = mode.lower().replace(" ", "_").replace("-", "_")
-
-            if mode == "High Water":
-                events = find_extrema(self.wl_df, "max",
-                                      min_sep_h, min_prom)
-                print(f"Detected {len(events)} high-water events.")
-                results = match_images_to_events(
-                    events["datetime"].tolist(), image_list, buffer_min,
-                    event_values=events["value"].tolist())
-
-            elif mode == "Low Water":
-                events = find_extrema(self.wl_df, "min",
-                                      min_sep_h, min_prom)
-                print(f"Detected {len(events)} low-water events.")
-                results = match_images_to_events(
-                    events["datetime"].tolist(), image_list, buffer_min,
-                    event_values=events["value"].tolist())
-
-            elif mode == "Threshold-based Extreme Event":
-                thresh = float(self.param_entry.get())
-                direction = self.direction_var.get()
-                events = find_threshold_events(
-                    self.wl_df, thresh, direction)
-                print(f"Detected {len(events)} events ({direction} {thresh}).")
-                results = match_images_to_events(
-                    events["datetime"].tolist(), image_list, buffer_min,
-                    event_values=events["value"].tolist())
-
-            elif mode == "User-defined Value Targeting":
-                results = find_images_closest_to_value(
-                    self.wl_df, image_list, target,
-                    value_tolerance=value_tol, n_results=100)
-                if value_tol is None:
-                    print(f"Ranked images by closeness to {target}.")
-                else:
-                    print(f"Found {len(results)} images within {target} ± {value_tol}.")
-
-            elif mode == "Tidal-range Classification":
-                cycle_df = classify_tidal_range(
-                    self.wl_df, min_sep_h, min_prom)
-                if cycle_df.empty:
-                    messagebox.showwarning("Warning",
-                                           "Could not classify tidal ranges.")
-                    return
-                n_spring = (cycle_df["classification"] == "spring").sum()
-                n_neap = (cycle_df["classification"] == "neap").sum()
-                print(f"Classified {len(cycle_df)} tidal cycles: "
-                      f"{n_spring} spring, {n_neap} neap.")
-
-                for _, row in cycle_df.iterrows():
-                    hw_time = row["hw_time"]
-                    if isinstance(hw_time, pd.Timestamp):
-                        hw_time = hw_time.to_pydatetime()
-                    diffs = [(abs((dt - hw_time).total_seconds() / 60.0),
-                              p, dt)
-                             for p, dt in image_list]
-                    diffs.sort(key=lambda x: x[0])
-                    if diffs and diffs[0][0] <= buffer_min:
-                        best = diffs[0]
-                        results.append({
-                            "image_path": best[1],
-                            "image_dt": best[2],
-                            "event_time": hw_time,
-                            "offset_min": (best[2] - hw_time).total_seconds() / 60.0,
-                            "classification": row["classification"],
-                            "tidal_range": row["range_m"],
-                            "event_value": row["hw_level"],
-                        })
-
+            # --- run combined analysis ---
+            print("Evaluating criteria …")
+            results = run_multi_series_analysis(
+                series_configs, image_list, buffer_min,
+                print_fn=print)
             self.matched_results = results
             self.progress_bar.set(0.6)
 
             if not results:
-                if mode == "User-defined Value Targeting":
-                    print("No images matched the requested value tolerance.")
-                else:
-                    print("No matching images found within the buffer window.")
-                messagebox.showinfo("Result", "No matching images found.")
-                self._refresh_plot("Time Series", [], mode=mode)
+                print("No images matched ALL criteria.")
+                messagebox.showinfo("Result",
+                                    "No matching images found.")
+                self._refresh_plot(results=[])
                 return
 
-            print(f"\nMatched {len(results)} images.")
+            print(f"\nMatched {len(results)} images (all criteria).")
 
+            # --- save results ---
+            labels = [sc["label"] for sc in series_configs]
+            mode_tag = "_".join(labels).lower().replace(" ", "_")
             txt_name = f"matched_images_{mode_tag}.txt"
             txt_path = os.path.join(self.output_folder, txt_name)
+
             with open(txt_path, "w", encoding="utf-8") as f:
-                if mode == "Tidal-range Classification":
-                    f.write("image_filename\tanalysis_mode\t"
-                            "time_offset_minutes\tclassification\t"
-                            "tidal_range_m\n")
-                    for r in results:
-                        f.write(f"{r['image_path'].name}\t{mode}\t"
-                                f"{r['offset_min']:.1f}\t"
-                                f"{r.get('classification', '')}\t"
-                                f"{r.get('tidal_range', ''):.3f}\n")
-                elif mode == "User-defined Value Targeting":
-                    f.write("image_filename\tanalysis_mode\t"
-                            "matched_value\tvalue_difference\t"
-                            "series_time_offset_minutes\n")
-                    for r in results:
-                        f.write(f"{r['image_path'].name}\t{mode}\t"
-                                f"{r['matched_value']:.3f}\t"
-                                f"{r['value_diff']:.3f}\t"
-                                f"{r['offset_min']:.1f}\n")
-                else:
-                    f.write("image_filename\tanalysis_mode\t"
-                            "time_offset_minutes\n")
-                    for r in results:
-                        f.write(f"{r['image_path'].name}\t{mode}\t"
-                                f"{r['offset_min']:.1f}\n")
+                # header
+                cols = ["image_filename", "image_time"]
+                for lb in labels:
+                    cols.extend([f"{lb}_value", f"{lb}_criterion",
+                                 f"{lb}_offset_min"])
+                f.write("\t".join(cols) + "\n")
+
+                for r in results:
+                    row_parts = [
+                        r["image_path"].name,
+                        str(r["image_dt"]),
+                    ]
+                    for lb in labels:
+                        val = r.get(f"{lb}_value")
+                        val_str = f"{val:.3f}" if val is not None else ""
+                        crit = r.get(f"{lb}_criterion", "")
+                        off = r.get(f"{lb}_offset_min", 0.0)
+                        row_parts.extend([val_str, crit, f"{off:.1f}"])
+                    f.write("\t".join(row_parts) + "\n")
+
             print(f"Results saved: {txt_path}")
 
+            # --- copy images ---
             if self.copy_images_var.get():
                 print("Copying images …")
-                if mode == "Tidal-range Classification":
-                    spring_dir = os.path.join(self.output_folder, "spring")
-                    neap_dir = os.path.join(self.output_folder, "neap")
-                    os.makedirs(spring_dir, exist_ok=True)
-                    os.makedirs(neap_dir, exist_ok=True)
-                    for i, r in enumerate(results):
-                        dest = spring_dir if r.get(
-                            "classification") == "spring" else neap_dir
-                        shutil.copy2(str(r["image_path"]),
-                                     os.path.join(dest, r["image_path"].name))
-                        self.progress_bar.set(0.6 + 0.35 * (i + 1) / len(results))
-                    print(f"  Spring: {spring_dir}")
-                    print(f"  Neap: {neap_dir}")
-                else:
-                    copy_dir = os.path.join(self.output_folder,
-                                            f"images_{mode_tag}")
-                    os.makedirs(copy_dir, exist_ok=True)
-                    for i, r in enumerate(results):
-                        shutil.copy2(str(r["image_path"]),
-                                     os.path.join(copy_dir,
-                                                   r["image_path"].name))
-                        self.progress_bar.set(0.6 + 0.35 * (i + 1) / len(results))
-                    print(f"  Copied to: {copy_dir}")
+                copy_dir = os.path.join(
+                    self.output_folder, f"images_{mode_tag}")
+                os.makedirs(copy_dir, exist_ok=True)
+                for i, r in enumerate(results):
+                    shutil.copy2(
+                        str(r["image_path"]),
+                        os.path.join(copy_dir,
+                                     r["image_path"].name))
+                    self.progress_bar.set(
+                        0.6 + 0.35 * (i + 1) / len(results))
+                print(f"  Copied to: {copy_dir}")
 
-            self._refresh_plot(f"Time Series — {mode}", results, mode=mode)
+            # --- update plot ---
+            self._refresh_plot(
+                results=results,
+                title=f"Matched: {crit_desc}")
 
             self.progress_bar.set(1.0)
             messagebox.showinfo(
@@ -1038,6 +1565,8 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
 
         except Exception as e:
             print(f"[ERROR] {e}")
+            import traceback
+            traceback.print_exc()
             messagebox.showerror("Error", str(e))
 
 

@@ -20,7 +20,39 @@ import concurrent.futures
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("green")
 
-# -------------------------------------------------------------------------------
+# %% window resizer 
+
+def fit_geometry(window, design_w, design_h, resizable=True, margin=0.90):
+    """
+    Scale a window to fit the current screen while preserving
+    the aspect ratio of the original design size.
+    Centers the result on screen.  Never upscales beyond the design size.
+
+    Parameters
+    ----------
+    window      : Tk / CTk / CTkToplevel instance
+    design_w/h  : the "intended" pixel size (the old hardcoded values)
+    resizable   : whether the user can drag-resize afterward
+    margin      : fraction of screen to occupy at most (0.90 = 90 %)
+    """
+    screen_w = window.winfo_screenwidth()
+    screen_h = window.winfo_screenheight()
+
+    max_w = int(screen_w * margin)
+    max_h = int(screen_h * margin)
+
+    scale = min(max_w / design_w, max_h / design_h, 1.0)
+
+    final_w = int(design_w * scale)
+    final_h = int(design_h * scale)
+
+    x = (screen_w - final_w) // 2
+    y = max(0, (screen_h - final_h) // 2)
+
+    window.geometry(f"{final_w}x{final_h}+{x}+{y}")
+    window.resizable(resizable, resizable)
+
+# %% helpers
 # StdoutRedirector: Redirect console output to the built-in console widget
 # -------------------------------------------------------------------------------
 class StdoutRedirector:
@@ -34,8 +66,7 @@ class StdoutRedirector:
     def flush(self):
         pass
 
-# -------------------------------------------------------------------------------
-# Robust timestamp parsing (NEW)
+# Robust timestamp parsing 
 # -------------------------------------------------------------------------------
 # Patterns we’ll accept in filenames (we search anywhere in the basename)
 _PATTERNS = [
@@ -126,8 +157,8 @@ def collect_dated_files(files):
     dts_sorted   = [dt for dt, _ in parsed]
     return files_sorted, dts_sorted
 
-# -------------------------------------------------------------------------------
-# ROI Selector (small helper window)
+
+# ROI Selector 
 # -------------------------------------------------------------------------------
 class ScrollZoomBBoxSelector(tk.Frame):
     """A scroll-zoom capable widget that lets the user draw a bounding box."""
@@ -254,8 +285,8 @@ class ScrollZoomBBoxSelector(tk.Frame):
     def on_enter_key(self, _):
         print("Final bounding box:", self.bbox)
 
-# -------------------------------------------------------------------------------
-# Core timestack generators (same logic; use robust parsing) 
+
+# Core timestack generators 
 # -------------------------------------------------------------------------------
 def generate_with_fill(image_files, bbox, resolution_x_m, output_path,
                        freq_hz=1.0, duration_s=600.0, progress_callback=None):
@@ -408,7 +439,7 @@ def generate_no_fill(image_files, bbox, resolution_x_m, output_path, progress_ca
     out.save(output_path, format="PNG", pnginfo=info)
     return output_path
 
-# -------------------------------------------------------------------------------
+
 # Utility to get resource path
 # -------------------------------------------------------------------------------
 def resource_path(rel: str) -> str:
@@ -418,8 +449,8 @@ def resource_path(rel: str) -> str:
         base = os.path.dirname(__file__)
     return os.path.join(base, rel)
 
-# -------------------------------------------------------------------------------
-# Helper executed in worker processes  (NEW)
+
+# Helper executed in worker processes  
 # -------------------------------------------------------------------------------
 def _process_subfolder(sub_path: str, bbox: tuple, res_x: float,
                        freq: float, dur: float, fill_gaps: bool,
@@ -460,14 +491,15 @@ def _process_subfolder(sub_path: str, bbox: tuple, res_x: float,
     except Exception as exc:
         return sub_path, "error", str(exc)
 
-# -------------------------------------------------------------------------------
+
 # Main GUI class – TimestackTool
 # -------------------------------------------------------------------------------
 class TimestackTool(ctk.CTkToplevel):
     def __init__(self, master=None):
         super().__init__(master)
         self.title("Time-stacking Tool")
-        self.geometry("1200x800")
+        #self.geometry("1200x800")
+        fit_geometry(self, 1200, 800, resizable=True)
         try:
             self.iconbitmap(resource_path("launch_logo.ico"))
         except Exception:
@@ -496,8 +528,7 @@ class TimestackTool(ctk.CTkToplevel):
         sys.stderr = self.stdout_redirector
         print("Here you may see console outputs\n--------------------------------\n")
 
-    # ---------------------------------------------------------------------------
-    # (all UI-building helpers unchanged)
+    # ( UI-building helpers)
     # ---------------------------------------------------------------------------
     def _build_ui(self):
         # Top: preview image

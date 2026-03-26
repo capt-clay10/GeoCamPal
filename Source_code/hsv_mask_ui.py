@@ -17,9 +17,40 @@ from PIL import Image, ImageTk
 import cv2
 import numpy as np
 
+# %% window resizer 
 
-# ──────────────────────────────────────────────
-# Standalone helper classes
+def fit_geometry(window, design_w, design_h, resizable=True, margin=0.90):
+    """
+    Scale a window to fit the current screen while preserving
+    the aspect ratio of the original design size.
+    Centers the result on screen.  Never upscales beyond the design size.
+
+    Parameters
+    ----------
+    window      : Tk / CTk / CTkToplevel instance
+    design_w/h  : the "intended" pixel size (the old hardcoded values)
+    resizable   : whether the user can drag-resize afterward
+    margin      : fraction of screen to occupy at most (0.90 = 90 %)
+    """
+    screen_w = window.winfo_screenwidth()
+    screen_h = window.winfo_screenheight()
+
+    max_w = int(screen_w * margin)
+    max_h = int(screen_h * margin)
+
+    scale = min(max_w / design_w, max_h / design_h, 1.0)
+
+    final_w = int(design_w * scale)
+    final_h = int(design_h * scale)
+
+    x = (screen_w - final_w) // 2
+    y = max(0, (screen_h - final_h) // 2)
+
+    window.geometry(f"{final_w}x{final_h}+{x}+{y}")
+    window.resizable(resizable, resizable)
+
+
+# %% Standalone helper classes
 # ──────────────────────────────────────────────
 
 class BBoxSelectorWindow(tk.Toplevel):
@@ -164,8 +195,7 @@ class StdoutRedirector:
         pass  # no-op for Python's IO flush requirements
 
 
-# ──────────────────────────────────────────────
-# UI Mixin
+# %% UI Mixin
 # ──────────────────────────────────────────────
 
 class HSVMaskUIMixin:
@@ -804,7 +834,7 @@ class HSVMaskUIMixin:
             self.max_contour_label.pack_forget()
             self.max_contour_entry.pack_forget()
 
-    # ────────────────────────────────────────────────────────────────────────────
+
     #  DROPDOWN 1: AOI / Profile-based Filter — toggle & actions
     # ────────────────────────────────────────────────────────────────────────────
 
@@ -1197,7 +1227,6 @@ class HSVMaskUIMixin:
             self.display_mask()
         print("[AOI] Filter cleared.")
 
-    # ────────────────────────────────────────────────────────────────────────────
 
     #  DROPDOWN 3: Colour Picker — toggle & actions
     # ────────────────────────────────────────────────────────────────────────────

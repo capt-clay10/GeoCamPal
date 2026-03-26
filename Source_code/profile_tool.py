@@ -43,6 +43,37 @@ ctk.set_default_color_theme("green")
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
 
+# %% window resizer 
+
+def fit_geometry(window, design_w, design_h, resizable=True, margin=0.90):
+    """
+    Scale a window to fit the current screen while preserving
+    the aspect ratio of the original design size.
+    Centers the result on screen.  Never upscales beyond the design size.
+
+    Parameters
+    ----------
+    window      : Tk / CTk / CTkToplevel instance
+    design_w/h  : the "intended" pixel size (the old hardcoded values)
+    resizable   : whether the user can drag-resize afterward
+    margin      : fraction of screen to occupy at most (0.90 = 90 %)
+    """
+    screen_w = window.winfo_screenwidth()
+    screen_h = window.winfo_screenheight()
+
+    max_w = int(screen_w * margin)
+    max_h = int(screen_h * margin)
+
+    scale = min(max_w / design_w, max_h / design_h, 1.0)
+
+    final_w = int(design_w * scale)
+    final_h = int(design_h * scale)
+
+    x = (screen_w - final_w) // 2
+    y = max(0, (screen_h - final_h) // 2)
+
+    window.geometry(f"{final_w}x{final_h}+{x}+{y}")
+    window.resizable(resizable, resizable)
 
 # %% ————————————————————————————— util helpers ————————————————————————
 def resource_path(relative_path: str) -> str:
@@ -207,7 +238,8 @@ class ProfileHovmullerWindow(ctk.CTkToplevel):
     def __init__(self, master=None, **kw):
         super().__init__(master=master, **kw)
         self.title("Profile & Hovmöller Tool")
-        self.geometry("1400x950")
+        #self.geometry("1400x950")
+        fit_geometry(self, 1400, 850, resizable=True)
         try:
             self.iconbitmap(resource_path("launch_logo.ico"))
         except Exception:

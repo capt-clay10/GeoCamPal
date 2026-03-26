@@ -9,6 +9,40 @@ import utm
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("green")
 
+
+# %% window resizer 
+
+def fit_geometry(window, design_w, design_h, resizable=True, margin=0.90):
+    """
+    Scale a window to fit the current screen while preserving
+    the aspect ratio of the original design size.
+    Centers the result on screen.  Never upscales beyond the design size.
+
+    Parameters
+    ----------
+    window      : Tk / CTk / CTkToplevel instance
+    design_w/h  : the "intended" pixel size (the old hardcoded values)
+    resizable   : whether the user can drag-resize afterward
+    margin      : fraction of screen to occupy at most (0.90 = 90 %)
+    """
+    screen_w = window.winfo_screenwidth()
+    screen_h = window.winfo_screenheight()
+
+    max_w = int(screen_w * margin)
+    max_h = int(screen_h * margin)
+
+    scale = min(max_w / design_w, max_h / design_h, 1.0)
+
+    final_w = int(design_w * scale)
+    final_h = int(design_h * scale)
+
+    x = (screen_w - final_w) // 2
+    y = max(0, (screen_h - final_h) // 2)
+
+    window.geometry(f"{final_w}x{final_h}+{x}+{y}")
+    window.resizable(resizable, resizable)
+
+# %% helpers
 def convert_to_utm(lat, lon):
     """
     Convert latitude and longitude to UTM coordinates.
@@ -48,7 +82,8 @@ class PixelToGCPWindow(ctk.CTkToplevel):
     def __init__(self, master=None):
         super().__init__(master)
         self.title("Pixel to GCP Tool")
-        self.geometry("1200x800")
+        #self.geometry("1200x800")
+        fit_geometry(self, 1200, 800, resizable=True)
         
         try:
             self.iconbitmap(resource_path("launch_logo.ico"))
@@ -126,9 +161,7 @@ class PixelToGCPWindow(ctk.CTkToplevel):
         sys.stderr = self.stdout_redirector
         print("Here you may see console outputs\n--------------------------------\n")
     
-        # =============================
-        # MIDDLE SECTION: INSTRUCTIONS
-        # =============================
+
         instructions_panel = ctk.CTkFrame(self)
         instructions_panel.pack(side="top", fill="x", padx=5, pady=5)
         instructions_text = (
@@ -142,7 +175,7 @@ class PixelToGCPWindow(ctk.CTkToplevel):
         instructions_label = ctk.CTkLabel(instructions_panel, text=instructions_text, justify="left")
         instructions_label.pack(side="left", padx=10, pady=5)
     
-        # =============================
+
         # BOTTOM SECTION: CONFIG PANEL (Each control in its own sub-panel)
         # =============================
         config_panel = ctk.CTkFrame(self)
@@ -209,14 +242,14 @@ class PixelToGCPWindow(ctk.CTkToplevel):
         self.bind("<KP_Add>", self.zoom_in)
         self.bind("<KP_Subtract>", self.zoom_out)
     
-    # ---------------
+
     # LOGGING TO CONSOLE
     # ---------------
     def log(self, msg):
         self.console_text.insert(tk.END, msg + "\n")
         self.console_text.see(tk.END)
     
-    # ---------------
+
     # BROWSE / CONFIG
     # ---------------
     def browse_image_folder(self):
@@ -309,7 +342,7 @@ class PixelToGCPWindow(ctk.CTkToplevel):
         self.show_image(self.image_list[self.current_index])
         self.focus_set()
     
-    # ---------------
+
     # SHOW IMAGE
     # ---------------
     def show_image(self, filename):
@@ -366,7 +399,7 @@ class PixelToGCPWindow(ctk.CTkToplevel):
             outline="red", width=2
         )
     
-    # ---------------
+
     # CLICK & SCROLL
     # ---------------
     def on_main_click(self, event):
@@ -387,8 +420,7 @@ class PixelToGCPWindow(ctk.CTkToplevel):
         direction = -1 if event.delta > 0 else 1
         self.main_canvas.xview_scroll(direction, "units")
         self._update_overview()
-    
-    # ---------------
+
     # ZOOM
     # ---------------
     def zoom_in(self, event=None):
@@ -409,7 +441,7 @@ class PixelToGCPWindow(ctk.CTkToplevel):
         self.main_canvas.yview_moveto(old_yview[0])
         self._update_overview()
     
-    # ---------------
+
     # NEXT IMAGE
     # ---------------
     def next_image(self, event=None):
@@ -421,7 +453,7 @@ class PixelToGCPWindow(ctk.CTkToplevel):
         else:
             self.show_image(self.image_list[self.current_index])
     
-    # ---------------
+
     # SAVE OUTPUT
     # ---------------
     def save_output_csv(self):
