@@ -37,6 +37,28 @@ def resource_path(relative_path: str) -> str:
     return os.path.join(base_path, relative_path)
 
 
+def set_window_icon(window):
+    """
+    Set the window icon in a cross-platform way.
+    - Windows: uses iconbitmap() with a .ico file.
+    - Linux / macOS: uses iconphoto() with a .png file because
+      Tk on these platforms does not support .ico via iconbitmap().
+    Both paths are wrapped in try/except so a missing asset is silently ignored.
+    """
+    try:
+        if sys.platform == "win32":
+            window.iconbitmap(resource_path("launch_logo.ico"))
+        else:
+            from PIL import ImageTk
+            png_path = resource_path("launch_logo.png")
+            img = ImageTk.PhotoImage(file=png_path)
+            window.iconphoto(True, img)
+            # Keep a reference so the image is not garbage-collected
+            window._icon_image = img
+    except Exception:
+        pass  # Missing icon asset — not fatal
+
+
 def fit_geometry(window, design_w, design_h, resizable=True, margin=0.90):
     """
     Scale a window to fit the current screen while preserving
@@ -63,12 +85,13 @@ def fit_geometry(window, design_w, design_h, resizable=True, margin=0.90):
 # 2) Optional splash screen
 def show_splash(duration_ms=1000):
     splash = ctk.CTk()
-    splash.iconbitmap(resource_path("launch_logo.ico"))
+    set_window_icon(splash)
     splash.title("Loading...")
     fit_geometry(splash, 400, 280, resizable=False)
 
-    # read back actual size for the splash image
-    splash.update_idletasks()
+    # update() (not just update_idletasks()) forces a full render pass so that
+    # winfo_width/height() return the real pixel dimensions rather than 1.
+    splash.update()
     sw = splash.winfo_width()
     sh = splash.winfo_height()
 
@@ -80,8 +103,19 @@ def show_splash(duration_ms=1000):
     except Exception:
         ctk.CTkLabel(splash, text="Loading...", font=("Serif", 18, "bold")).pack(expand=True)
 
+    # Render the image before starting the timer
+    splash.update()
+
     splash.after(duration_ms, splash.destroy)
-    splash.mainloop()
+
+    # Drive the event loop manually instead of calling mainloop().
+    # mainloop() on a CTk root can tear down the Tk interpreter on destroy(),
+    # which prevents the launcher window from opening afterwards.
+    try:
+        while splash.winfo_exists():
+            splash.update()
+    except Exception:
+        pass  # Window was destroyed — expected exit path
 
 # 3) Set CustomTkinter appearance globally
 ctk.set_appearance_mode("Dark")
@@ -145,7 +179,7 @@ def launcher_window():
     dialog.title("GeoCamPal")
     fit_geometry(dialog, 600, 700, resizable=False)
     dialog.protocol("WM_DELETE_WINDOW", on_close)
-    dialog.iconbitmap(resource_path("launch_logo.ico"))
+    set_window_icon(dialog)
 
     frame = ctk.CTkFrame(dialog)
     frame.pack(fill="both", expand=True, padx=20, pady=20)
