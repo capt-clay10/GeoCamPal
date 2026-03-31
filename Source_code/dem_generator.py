@@ -236,18 +236,18 @@ class CreateDemWindow(ctk.CTkToplevel):
 
     # ————————————————————————— file‑dialog callbacks ——————————————————
     def browse_wl_csv(self):
-        path = filedialog.askopenfilename(filetypes=[("CSV files", "*.csv")])
+        path = filedialog.askopenfilename(parent= self,filetypes=[("CSV files", "*.csv")])
         if path:
             self.wl_csv_var.set(path)
 
     def browse_geojson_dir(self):
-        path = filedialog.askdirectory()
+        path = filedialog.askdirectory(parent= self)
         if path:
             self.geojson_dir_var.set(path)
             self._invalidate_caches()
 
     def browse_out_dir(self):
-        path = filedialog.askdirectory()
+        path = filedialog.askdirectory(parent= self)
         if path:
             self.out_dir_var.set(path)
             self.out_dir_display_label.configure(text=path)

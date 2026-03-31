@@ -910,13 +910,13 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
     # ——— browse callbacks ———
 
     def _browse_input(self):
-        d = filedialog.askdirectory(title="Select Image Folder")
+        d = filedialog.askdirectory(parent= self,title="Select Image Folder")
         if d:
             self.input_folder = d
             self.input_label.configure(text=d)
 
     def _browse_output(self):
-        d = filedialog.askdirectory(title="Select Output Folder")
+        d = filedialog.askdirectory(parent= self,title="Select Output Folder")
         if d:
             self.output_folder = d
             self.output_label.configure(text=d)
@@ -924,7 +924,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
     def _browse_ref_colour(self):
         """Let user pick one reference image for colour harmonisation."""
         init_dir = self.input_folder if self.input_folder else None
-        f = filedialog.askopenfilename(
+        f = filedialog.askopenfilename(parent= self,
             title="Select Reference Image for Colour",
             initialdir=init_dir,
             filetypes=[("Images", "*.jpg *.jpeg *.png *.bmp *.tif *.tiff"),

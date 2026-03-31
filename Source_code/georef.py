@@ -361,23 +361,29 @@ def compute_loo(df, method_key, K=None, dist=None, elev=0.0):
 # %%
 #  Simulated Annealing — find best GCP subset
 
-
 def run_sa_optimisation(df, method_key, K=None, dist=None, elev=0.0,
                         n_keep=None, max_iter=100000, temp=10000,
                         cooling=0.9999, log_fn=print):
     """
     Find the subset of GCPs that minimises mean LOO error.
     Returns: best_indices (np array), best_mean_error
+
+    Minimal, safe fix:
+      - keep a CURRENT state for annealing moves
+      - keep a separate BEST-EVER state for final output
     """
     n = len(df)
     if n_keep is None:
         n_keep = max(4, n - 2)  # drop at most 2 by default
     n_keep = min(n_keep, n)
     if n_keep < 4:
-        log_fn("[SA] Need at least 4 GCPs."); return np.arange(n), np.inf
+        log_fn("[SA] Need at least 4 GCPs.")
+        return np.arange(n), np.inf
 
     idx_all = np.arange(n)
-    best_sub = np.sort(np.random.choice(idx_all, n_keep, replace=False))
+
+    # --- initial subset ---
+    current_sub = np.sort(np.random.choice(idx_all, n_keep, replace=False))
 
     def _cost(sub):
         sub_df = df.iloc[sub].reset_index(drop=True)
@@ -385,38 +391,59 @@ def run_sa_optimisation(df, method_key, K=None, dist=None, elev=0.0,
         valid = errs[~np.isnan(errs)]
         return valid.mean() if len(valid) > 0 else 1e9
 
-    best_cost = _cost(best_sub)
-    log_fn(f"[SA] Starting: {n_keep}/{n} GCPs, initial cost={best_cost:.2f} m")
+    current_cost = _cost(current_sub)
+
+    # --- best-ever solution tracked separately ---
+    best_sub = current_sub.copy()
+    best_cost = current_cost
+
+    log_fn(f"[SA] Starting: {n_keep}/{n} GCPs, initial cost={current_cost:.2f} m")
 
     t0 = time.time()
     for it in range(max_iter):
-        new_sub = best_sub.copy()
-        # Swap one GCP in the subset with one outside
+        new_sub = current_sub.copy()
+
+        # Swap one kept GCP with one outside the subset
         outside = np.setdiff1d(idx_all, new_sub)
-        if len(outside) == 0: break
-        out_idx = random.choice(range(len(new_sub)))
-        in_idx = random.choice(outside)
+        if len(outside) == 0:
+            break
+
+        out_idx = random.randrange(len(new_sub))
+        in_idx = random.choice(list(outside))
         new_sub[out_idx] = in_idx
         new_sub = np.sort(new_sub)
 
         new_cost = _cost(new_sub)
-        dc = new_cost - best_cost
-        if dc < 0 or random.random() < np.exp(-dc / max(temp, 1e-10)):
-            best_sub = new_sub
+
+        # 1) update best-ever independently of acceptance
+        if new_cost < best_cost:
+            best_sub = new_sub.copy()
             best_cost = new_cost
+
+        # 2) SA acceptance uses CURRENT state, not BEST state
+        dc = new_cost - current_cost
+        if dc < 0 or random.random() < np.exp(-dc / max(temp, 1e-10)):
+            current_sub = new_sub
+            current_cost = new_cost
+
         temp *= cooling
 
-        if (it+1) % 20000 == 0:
-            log_fn(f"  [SA] iter {it+1}/{max_iter}  "
-                   f"temp={temp:.2f}  best={best_cost:.2f} m")
+        if (it + 1) % 20000 == 0:
+            log_fn(
+                f"  [SA] iter {it+1}/{max_iter}  "
+                f"temp={temp:.2f}  current={current_cost:.2f} m  "
+                f"best={best_cost:.2f} m"
+            )
 
     elapsed = time.time() - t0
     log_fn(f"[SA] Done in {elapsed:.1f}s — best mean LOO error: "
            f"{best_cost:.2f} m using {n_keep} GCPs")
+
     ids = df["GCP_ID"].values if "GCP_ID" in df.columns else np.arange(n)
     excluded = np.setdiff1d(idx_all, best_sub)
     if len(excluded) > 0:
         log_fn(f"[SA] Excluded: {[str(ids[i]) for i in excluded]}")
+
     return best_sub, best_cost
 
 
@@ -856,7 +883,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
     # ---- # ---- # ----
 
     def _browse_img(self):
-        p = filedialog.askopenfilename(
+        p = filedialog.askopenfilename(parent= self,
             filetypes=[("Images","*.jpg *.jpeg *.png *.bmp *.tif *.tiff")])
         if p:
             self._img_path = p
@@ -864,7 +891,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
             self._show(p, self._orig_lbl)
 
     def _load_homo(self):
-        p = filedialog.askopenfilename(filetypes=[("Text","*.txt")])
+        p = filedialog.askopenfilename(parent= self,filetypes=[("Text","*.txt")])
         if not p: return
         try:
             self._homo_epsg = None
@@ -883,7 +910,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
             messagebox.showerror("Error", f"Bad homography: {e}")
 
     def _load_gcp(self):
-        p = filedialog.askopenfilename(
+        p = filedialog.askopenfilename(parent= self,
             filetypes=[("CSV","*.csv"),("All","*.*")])
         if not p: return
         try:
@@ -911,7 +938,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
             messagebox.showerror("GCP Error", str(e))
 
     def _load_cal(self):
-        p = filedialog.askopenfilename(
+        p = filedialog.askopenfilename(parent= self,
             filetypes=[("Pickle","*.pkl"),("All","*.*")])
         if not p: return
         try:

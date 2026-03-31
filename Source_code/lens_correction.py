@@ -216,14 +216,14 @@ class LensCorrectionWindow(ctk.CTkToplevel):
     # ——— browse callbacks ———
 
     def _browse_input(self):
-        d = filedialog.askdirectory(title="Select Checkerboard Image Folder")
+        d = filedialog.askdirectory(parent= self,title="Select Checkerboard Image Folder")
         if d:
             self.input_folder = d
             n = len(self._collect_images(d))
             self.input_label.configure(text=f"{d}  ({n} images)")
 
     def _browse_output(self):
-        d = filedialog.askdirectory(title="Select Output Folder")
+        d = filedialog.askdirectory(parent= self,title="Select Output Folder")
         if d:
             self.output_folder = d
             self.output_label.configure(text=d)

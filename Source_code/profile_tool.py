@@ -405,19 +405,19 @@ class ProfileHovmullerWindow(ctk.CTkToplevel):
     # ——— browse callbacks ———
 
     def _browse_folder(self):
-        d = filedialog.askdirectory(title="Select Image Folder")
+        d = filedialog.askdirectory(parent= self,title="Select Image Folder")
         if d:
             self.image_folder = d
             self.folder_label.configure(text=d)
 
     def _browse_output(self):
-        d = filedialog.askdirectory(title="Select Output Folder")
+        d = filedialog.askdirectory(parent= self,title="Select Output Folder")
         if d:
             self.output_folder = d
             self.output_label.configure(text=d)
 
     def _load_sample(self):
-        p = filedialog.askopenfilename(
+        p = filedialog.askopenfilename(parent= self,
             title="Select Sample Image",
             filetypes=[("Images", "*.jpg *.jpeg *.png *.bmp *.tif *.tiff")])
         if not p:

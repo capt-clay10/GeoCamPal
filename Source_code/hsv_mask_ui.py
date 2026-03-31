@@ -763,14 +763,14 @@ class HSVMaskUIMixin:
 
 
     def browse_ml_mask_file(self):
-        path = filedialog.askopenfilename(
+        path = filedialog.askopenfilename(parent= self,
             filetypes=[("Mask/Image Files", "*.png;*.jpg;*.jpeg;*.bmp;*.tif;*.tiff")])
         if path:
             self.ml_mask_file_path.set(path)
             self.ml_mask_file_disp.set(self._shorten_path(path))  # show short path
 
     def browse_ml_mask_folder(self):
-        folder = filedialog.askdirectory()
+        folder = filedialog.askdirectory(parent= self)
         if folder:
             self.ml_mask_folder_path.set(folder)
             self.ml_mask_folder_disp.set(self._shorten_path(folder))  # show short path

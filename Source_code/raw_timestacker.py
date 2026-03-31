@@ -207,7 +207,7 @@ class ScrollZoomBBoxSelector(tk.Frame):
 
     def load_image(self, file_path=None):
         if file_path is None:
-            file_path = filedialog.askopenfilename(
+            file_path = filedialog.askopenfilename(parent= self,
                 title="Open Image",
                 filetypes=[("Image Files", "*.jpg *.jpeg *.png *.bmp *.tif *.gif")],
             )
@@ -622,17 +622,17 @@ class TimestackTool(ctk.CTkToplevel):
         self.resolution_entry.configure(state="normal" if self.add_resolution_manual.get() else "disabled")
 
     def browse_input_folder(self):
-        f = filedialog.askdirectory(title="Select Input Folder with Images")
+        f = filedialog.askdirectory(parent= self,title="Select Input Folder with Images")
         if f:
             self.input_folder.set(f)
 
     def select_output_folder(self):
-        f = filedialog.askdirectory(title="Select Output Folder for Raw Timestack")
+        f = filedialog.askdirectory(parent= self,title="Select Output Folder for Raw Timestack")
         if f:
             self.output_folder.set(f)
 
     def browse_batch_folder(self):
-        f = filedialog.askdirectory(title="Select Main Batch Folder (sub-folders per batch)")
+        f = filedialog.askdirectory(parent= self,title="Select Main Batch Folder (sub-folders per batch)")
         if f:
             self.batch_folder.set(f)
 

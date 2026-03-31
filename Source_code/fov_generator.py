@@ -789,7 +789,7 @@ class FOVGeneratorWindow(ctk.CTkToplevel):
     # ——— browse callbacks ———
 
     def _browse_basemap(self):
-        p = filedialog.askopenfilename(
+        p = filedialog.askopenfilename(parent= self,
             title="Select Basemap GeoTIFF",
             filetypes=[("GeoTIFF", "*.tif *.tiff")])
         if p:
@@ -797,7 +797,7 @@ class FOVGeneratorWindow(ctk.CTkToplevel):
             self.basemap_label.configure(text=os.path.basename(p))
 
     def _browse_dem(self):
-        p = filedialog.askopenfilename(
+        p = filedialog.askopenfilename(parent= self,
             title="Select DEM GeoTIFF",
             filetypes=[("GeoTIFF", "*.tif *.tiff")])
         if p:
@@ -805,7 +805,7 @@ class FOVGeneratorWindow(ctk.CTkToplevel):
             self.dem_label.configure(text=os.path.basename(p))
 
     def _browse_output(self):
-        d = filedialog.askdirectory(title="Select Output Folder")
+        d = filedialog.askdirectory(parent= self,title="Select Output Folder")
         if d:
             self.output_folder = d
             self.output_label.configure(text=d)

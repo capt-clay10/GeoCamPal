@@ -450,7 +450,7 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         print("Session reset. Ready for new data.\n--------------------------------\n")
 
     def load_raw_image(self):
-        file_path = filedialog.askopenfilename(title="Select Raw Time-Stack Image", filetypes=[("PNG Images", "*.png")])
+        file_path = filedialog.askopenfilename(parent= self,title="Select Raw Time-Stack Image", filetypes=[("PNG Images", "*.png")])
         if file_path:
             self.raw_image_path = file_path
             self.raw_image = Image.open(file_path)
@@ -465,7 +465,7 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         Load runup annotation from mask PNG, GeoJSON, or COCO JSON file.
         Automatically detects format based on file extension.
         """
-        file_path = filedialog.askopenfilename(
+        file_path = filedialog.askopenfilename(parent= self,
             title="Select Runup Annotation", 
             filetypes=[
                 ("All Supported", "*.png *.geojson *.json"),
@@ -765,7 +765,7 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         self.canvas_stats.draw()
 
     def select_output_folder(self):
-        folder = filedialog.askdirectory(title="Select Output Folder")
+        folder = filedialog.askdirectory(parent= self,title="Select Output Folder")
         if folder:
             self.output_folder = folder
             self.out_folder_label.configure(text=folder)
@@ -798,13 +798,13 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         messagebox.showinfo("Export Runup", f"Exported to:\n{out_path}")
 
     def select_batch_raw_folder(self):
-        folder = filedialog.askdirectory(title="Select Folder with Raw TS Images")
+        folder = filedialog.askdirectory(parent= self,title="Select Folder with Raw TS Images")
         if folder:
             self.batch_raw_folder = folder
             self.batch_raw_label.configure(text=folder)
 
     def select_batch_mask_folder(self):
-        folder = filedialog.askdirectory(title="Select Folder with Annotations (Masks/GeoJSON/JSON)")
+        folder = filedialog.askdirectory(parent= self,title="Select Folder with Annotations (Masks/GeoJSON/JSON)")
         if folder:
             self.batch_mask_folder = folder
             self.batch_mask_label.configure(text=folder)

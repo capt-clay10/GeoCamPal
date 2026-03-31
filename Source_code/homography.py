@@ -235,7 +235,7 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
         self.after(0, lambda: self.log(msg))
 
     def browse_input(self):
-        file_path = filedialog.askopenfilename(
+        file_path = filedialog.askopenfilename(parent= self,
             title="Select GCP CSV File",
             filetypes=(("CSV Files", "*.csv"), ("All Files", "*.*")),
         )
@@ -245,7 +245,7 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
             self.log(f"Selected input file: {file_path}")
 
     def browse_output(self):
-        folder = filedialog.askdirectory(title="Select Output Folder")
+        folder = filedialog.askdirectory(parent= self,title="Select Output Folder")
         if folder:
             self.output_folder = folder
             self.output_folder_label.configure(text=folder)
