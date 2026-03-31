@@ -336,15 +336,6 @@ class HSVMaskUIMixin:
             )
             self.lbl_ml_mask_path.grid(row=0, column=1, padx=5, pady=3, sticky="we")
 
-            self.btn_calc_edge_with_ml = ctk.CTkButton(
-                self.ml_opts_row, text="Extract Boundary with Mask", command=self.calculate_edge_with_ml_mask
-            )
-            self.btn_calc_edge_with_ml.grid(row=0, column=2, padx=8, pady=3, sticky="e")
-
-            self.btn_calc_poly_with_ml = ctk.CTkButton(
-                self.ml_opts_row, text="Extract Polygon with Mask", command=self.extract_polygon_with_ml_mask
-            )
-            self.btn_calc_poly_with_ml.grid(row=0, column=3, padx=4, pady=3, sticky="e")
 
         elif self.mode == "ml":
             self.ml_opts_row.grid_columnconfigure(1, weight=1)
@@ -367,15 +358,6 @@ class HSVMaskUIMixin:
             )
             self.entry_common_len.grid(row=0, column=3, padx=2, pady=3, sticky="w")
 
-            self.btn_calc_edge_with_ml = ctk.CTkButton(
-                self.ml_opts_row, text="Extract Boundary with Mask", command=self.calculate_edge_with_ml_mask
-            )
-            self.btn_calc_edge_with_ml.grid(row=0, column=4, padx=8, pady=3, sticky="e")
-
-            self.btn_calc_poly_with_ml = ctk.CTkButton(
-                self.ml_opts_row, text="Extract Polygon with Mask", command=self.extract_polygon_with_ml_mask
-            )
-            self.btn_calc_poly_with_ml.grid(row=0, column=5, padx=4, pady=3, sticky="e")
 
         # ── DROPDOWN 2: HSV Masking (checkbox + collapsible) ─────────────────────
         self.hsv_label_frame = ctk.CTkFrame(parent)
@@ -599,9 +581,9 @@ class HSVMaskUIMixin:
             btn_next.pack(side="left", padx=5)
 
         if self.mode in ("ml", "individual"):
-            btn_boundary = ctk.CTkButton(calc_frame, text="Extract Boundary", command=self.extract_boundary, fg_color="#0F52BA")
+            btn_boundary = ctk.CTkButton(calc_frame, text="Extract Boundary", command=self.extract_boundary_universal, fg_color="#0F52BA")
             btn_boundary.pack(side="left", padx=5)
-            btn_polygon = ctk.CTkButton(calc_frame, text="Extract Polygon", command=self.extract_polygon, fg_color="#0F52BA")
+            btn_polygon = ctk.CTkButton(calc_frame, text="Extract Polygon", command=self.extract_polygon_universal, fg_color="#0F52BA")
             btn_polygon.pack(side="left", padx=5)
             btn_cut_feature = ctk.CTkButton(
                 calc_frame, text="Edit Detected Feature", command=self.cut_detected_feature, fg_color="#0F52BA"
@@ -746,14 +728,38 @@ class HSVMaskUIMixin:
 
 
     # -------------- ML MASK TOGGLE & ACTIONS --------------
+
     def toggle_ml_mask_options(self):
-        """Show/hide the ML mask options row directly under the import row."""
+        """Show/hide the ML mask rows directly under the import row."""
         self.ml_row.pack_forget()
         self.ml_row.pack(side="top", fill="x", pady=(2, 0), before=self.aoi_check_frame)
     
         self.ml_opts_row.pack_forget()
         if self.use_ml_pred_mask.get():
             self.ml_opts_row.pack(side="top", fill="x", pady=(2, 5), before=self.aoi_check_frame)
+
+
+    def extract_boundary_universal(self):
+        """Use the ML-mask workflow when enabled, otherwise use the normal boundary extraction."""
+        if getattr(self, "use_ml_pred_mask", None) and self.use_ml_pred_mask.get():
+            if self.mode == "individual" and self.ml_mask_file_path.get().strip():
+                self.calculate_edge_with_ml_mask()
+                return
+            if self.mode == "ml" and self.ml_mask_folder_path.get().strip():
+                self.calculate_edge_with_ml_mask()
+                return
+        self.extract_boundary()
+
+    def extract_polygon_universal(self):
+        """Use the ML-mask workflow when enabled, otherwise use the normal polygon extraction."""
+        if getattr(self, "use_ml_pred_mask", None) and self.use_ml_pred_mask.get():
+            if self.mode == "individual" and self.ml_mask_file_path.get().strip():
+                self.extract_polygon_with_ml_mask()
+                return
+            if self.mode == "ml" and self.ml_mask_folder_path.get().strip():
+                self.extract_polygon_with_ml_mask()
+                return
+        self.extract_polygon()
 
 
     def browse_ml_mask_file(self):
