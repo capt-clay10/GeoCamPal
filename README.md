@@ -5,6 +5,8 @@
 ![Python](https://img.shields.io/badge/python-3.8%2B-blue?style=for-the-badge)
 
 > **GeoCamPal** is a **modular, GUI‑driven toolkit** for Geospatial image‑processing. From camera pre‑processing and image harmonisation, through homography‑assisted georeferencing, rich feature-identification helpers, image-analysis tools, to DEM creation and wave-run-up analysis.
+---
+<img width="593" height="721" alt="Image" src="https://github.com/user-attachments/assets/42b56fee-4534-447f-a951-31bb52b7f51c" />
 
 ---
 
