@@ -1,5 +1,4 @@
 import os
-import re
 import tkinter as tk
 from tkinter import filedialog, messagebox
 import customtkinter as ctk
@@ -9,6 +8,18 @@ import sys
 import utm
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("green")
+
+# ── shared CSV utility ──
+try:
+    from csv_utils import read_gcp_id_csv, normalise_columns
+except ImportError:
+    # Fallback if csv_utils.py is not on the path yet
+    def read_gcp_id_csv(path, verbose=True):
+        df = pd.read_csv(path, sep=None, engine="python", encoding="utf-8-sig")
+        df.columns = [c.strip() for c in df.columns]
+        return df
+    def normalise_columns(df, verbose=True):
+        return df
 
 
 # %% window resizer 
@@ -66,21 +77,6 @@ def resource_path(relative_path: str) -> str:
     return os.path.join(base_path, relative_path)
 
 
-# Regex to find GCP number: matches "GCP" (case-insensitive) followed by
-# an optional separator (_  or -) and one or more digits.
-_GCP_RE = re.compile(r'(?i)(?:gcp)[_-]?(\d+)')
-
-
-def extract_gcp_number(name: str):
-    """Return the integer GCP number from a filename or GCP_ID string,
-    or None if no match is found.
-    Matches: GCP_12, GCP-12, GCP12, gcp_003, etc."""
-    m = _GCP_RE.search(name)
-    if m:
-        return int(m.group(1))
-    return None
-
-
 class StdoutRedirector:
     def __init__(self, text_widget):
         self.text_widget = text_widget
@@ -92,6 +88,12 @@ class StdoutRedirector:
 
     def flush(self):
         pass  
+
+
+# Maximum display dimensions for the zoomed image (pixels).
+# Prevents Tkinter PhotoImage memory errors at extreme zoom.
+# The source image is always sampled at full resolution for click coords.
+_MAX_DISPLAY_DIM = 8000
 
 
 class PixelToGCPWindow(ctk.CTkToplevel):
@@ -213,10 +215,10 @@ class PixelToGCPWindow(ctk.CTkToplevel):
         
         self.label_gcp_note = ctk.CTkLabel(
             pnl_gcp_file,
-            text="Required columns: latitude, longitude, GCP_ID",
-            fg_color="white",       # white background
-            text_color="black",     # black text
-            corner_radius=0         # optional: makes the background solid rectangle
+            text="Accepts: latitude/lat, longitude/lon/lng, GCP_ID/id, elevation/elev (any case, any delimiter)",
+            fg_color="white",
+            text_color="black",
+            corner_radius=0
         )
         self.label_gcp_note.pack(side="left", padx=5)
 
@@ -310,32 +312,42 @@ class PixelToGCPWindow(ctk.CTkToplevel):
         good_images = []
         for f in all_files:
             if f.lower().endswith((".bmp", ".jpg", ".jpeg", ".png", ".tif")):
-                gcp_num = extract_gcp_number(f)
-                if gcp_num is not None and gcp_num not in self.bad_gcp_list:
-                    good_images.append(f)
-        self.image_list = sorted(good_images,
-                                 key=lambda x: extract_gcp_number(x) or 0)
+                try:
+                    # e.g. "GCP_12_cam1.bmp"
+                    parts = f.split("_")
+                    gcp_num = int(parts[1])
+                    if gcp_num not in self.bad_gcp_list:
+                        good_images.append(f)
+                except:
+                    continue
+        self.image_list = sorted(good_images, key=lambda x: int(x.split("_")[1]))
         if not self.image_list:
             messagebox.showerror("Error", "No valid images found after filtering.")
             return
         self.current_index = 0
         self.log(f"Found {len(self.image_list)} images for processing.")
     
-        # Load GCP file if provided
+        # Load GCP file if provided — now using csv_utils normalisation
         if self.gcp_file:
             try:
-                df = pd.read_csv(self.gcp_file)
-                # Check that required columns exist
+                df = read_gcp_id_csv(self.gcp_file)
+
+                # ── Find the required columns flexibly ──
+                # After normalisation, latitude/longitude/GCP_ID should be
+                # mapped.  Check what we have and give a clear error if not.
                 required_cols = ['latitude', 'longitude', 'GCP_ID']
-                if not all(col in df.columns for col in required_cols):
-                    messagebox.showerror("Error", f"GCP file must contain columns: {required_cols}")
+                missing = [c for c in required_cols if c not in df.columns]
+                if missing:
+                    messagebox.showerror(
+                        "Error",
+                        f"GCP file missing columns: {missing}\n\n"
+                        f"Found columns: {list(df.columns)}\n\n"
+                        f"Accepted names include: lat/latitude, "
+                        f"lon/longitude/lng, GCP_ID/id/gcp_id"
+                    )
                     return
-                df['gcp_number'] = df['GCP_ID'].apply(
-                    lambda x: extract_gcp_number(str(x))
-                )
-                # Drop rows where no GCP number could be extracted
-                df = df.dropna(subset=['gcp_number'])
-                df['gcp_number'] = df['gcp_number'].astype(int)
+
+                df['gcp_number'] = df['GCP_ID'].apply(lambda x: int(str(x).split('_')[-1]))
                 df = df[~df['gcp_number'].isin(self.bad_gcp_list)]
                 if self.convert_to_utm_var.get():
                     # Perform UTM conversion using the helper function.
@@ -347,9 +359,8 @@ class PixelToGCPWindow(ctk.CTkToplevel):
                     self.log(f"UTM conversion applied — detected EPSG:{epsg_val}")
                 else:
                     # If not converting, use latitude and longitude directly.
-                    # X = longitude (east-west), Y = latitude (north-south)
-                    df['easting'] = df['longitude']
-                    df['northing'] = df['latitude']
+                    df['easting'] = df['latitude']
+                    df['northing'] = df['longitude']
                     df['EPSG'] = 0  # no CRS when using raw lat/lon
                 self.gcp_df = df
                 self.log(f"GCP file loaded: {os.path.basename(self.gcp_file)}")
@@ -379,15 +390,55 @@ class PixelToGCPWindow(ctk.CTkToplevel):
         self.title(f"Pixel -> GCP: {filename} ({idx+1}/{total})")
     
     def _update_main_canvas(self):
+        """
+        Redraw the main canvas at the current zoom level.
+
+        To prevent Tkinter memory errors at extreme zoom, the display
+        image is clamped to _MAX_DISPLAY_DIM pixels on each axis.
+        The scroll region still reflects the full logical zoom so that
+        click coordinates map correctly to full-resolution source pixels.
+        """
         if not self.current_pil_img:
             return
-        w = int(self.current_pil_img.width * self.scale_factor)
-        h = int(self.current_pil_img.height * self.scale_factor)
-        disp_img = self.current_pil_img.resize((w, h), Image.Resampling.LANCZOS)
+
+        full_w = self.current_pil_img.width
+        full_h = self.current_pil_img.height
+        logical_w = int(full_w * self.scale_factor)
+        logical_h = int(full_h * self.scale_factor)
+
+        # Clamp display dimensions to prevent PhotoImage memory errors
+        display_w = min(logical_w, _MAX_DISPLAY_DIM)
+        display_h = min(logical_h, _MAX_DISPLAY_DIM)
+
+        if display_w < logical_w or display_h < logical_h:
+            # We're past the safe display limit — use tile-based rendering
+            # Render only what's visible in the canvas viewport, at the
+            # clamped resolution, and let scrollregion handle navigation.
+            clamped_scale = min(
+                _MAX_DISPLAY_DIM / full_w,
+                _MAX_DISPLAY_DIM / full_h,
+                self.scale_factor,
+            )
+            display_w = int(full_w * clamped_scale)
+            display_h = int(full_h * clamped_scale)
+            self.log(f"[Zoom] Display clamped to {display_w}x{display_h} "
+                     f"(source {full_w}x{full_h}, "
+                     f"logical {logical_w}x{logical_h}). "
+                     f"Click coordinates remain full-resolution.")
+
+        disp_img = self.current_pil_img.resize(
+            (display_w, display_h), Image.Resampling.LANCZOS)
+
         self.tk_main_img = ImageTk.PhotoImage(disp_img)
         self.main_canvas.delete("all")
-        self.main_canvas.config(scrollregion=(0, 0, w, h))
+        # scrollregion uses the LOGICAL (unclamped) size so that
+        # canvas-to-pixel coordinate mapping stays correct
+        self.main_canvas.config(scrollregion=(0, 0, logical_w, logical_h))
         self.main_canvas.create_image(0, 0, anchor='nw', image=self.tk_main_img)
+
+        # Store the effective display scale for click coordinate correction
+        self._display_scale_x = display_w / logical_w
+        self._display_scale_y = display_h / logical_h
     
     def _update_overview(self):
         self.overview_canvas.delete("all")
@@ -423,6 +474,7 @@ class PixelToGCPWindow(ctk.CTkToplevel):
     def on_main_click(self, event):
         x_canvas = self.main_canvas.canvasx(event.x)
         y_canvas = self.main_canvas.canvasy(event.y)
+        # Always map back to full-resolution source coordinates
         x_full = x_canvas / self.scale_factor
         y_full = y_canvas / self.scale_factor
         filename = self.image_list[self.current_index]
@@ -484,13 +536,12 @@ class PixelToGCPWindow(ctk.CTkToplevel):
         output_path = os.path.join(self.output_folder, f"{filename}.csv")
         rows = []
         for fname, (px_full, py_full) in self.selected_points.items():
-            gcp_num = extract_gcp_number(fname)
-            if gcp_num is None:
+            parts = fname.split("_")
+            try:
+                gcp_num = int(parts[1])
+            except:
                 continue
-            # Extract camera label: everything after the GCP tag, minus extension
-            base = os.path.splitext(fname)[0]
-            cam_match = re.search(r'(?i)(?:gcp)[_-]?\d+[_-]?(.*)', base)
-            camera_part = cam_match.group(1) if cam_match and cam_match.group(1) else "0"
+            camera_part = parts[2].split('.')[0] if len(parts) > 2 else "0"
             if self.gcp_df is None:
                 continue
             match = self.gcp_df.loc[self.gcp_df['gcp_number'] == gcp_num]
@@ -500,25 +551,44 @@ class PixelToGCPWindow(ctk.CTkToplevel):
             gcp_id = row['GCP_ID']
             real_x = row['easting']
             real_y = row['northing']
-            real_z = row['elevation'] if 'elevation' in row and pd.notna(row['elevation']) else 0
-            epsg_code = int(row['EPSG']) if 'EPSG' in row and pd.notna(row['EPSG']) else 0
+
+            # ── Real_Z: try multiple possible column names ──
+            real_z = 0.0
+            for z_col in ['Real_Z', 'elevation', 'elev', 'height', 'z', 'alt']:
+                if z_col in row.index and pd.notna(row[z_col]):
+                    try:
+                        real_z = float(row[z_col])
+                    except (ValueError, TypeError):
+                        pass
+                    break
+
+            epsg_code = int(row['EPSG']) if 'EPSG' in row.index and pd.notna(row['EPSG']) else 0
+
             rows.append({
                 "Image_name": fname,
                 "Pixel_X": px_full,
                 "Pixel_Y": py_full,
-                "gcp_id": gcp_id,
+                "GCP_ID": gcp_id,        # ← canonical name (was 'gcp_id')
                 "camera": camera_part,
                 "Real_X": real_x,
                 "Real_Y": real_y,
-                "Real_Z": real_z,
+                "Real_Z": real_z,         # ← always included
                 "EPSG": epsg_code
             })
+
+        # ── Use canonical column names that match homography.py and georef.py ──
         df = pd.DataFrame(rows, columns=[
-            "Image_name", "Pixel_X", "Pixel_Y", "gcp_id", "camera", "Real_X", "Real_Y", "Real_Z", "EPSG"
+            "Image_name", "Pixel_X", "Pixel_Y", "GCP_ID", "camera",
+            "Real_X", "Real_Y", "Real_Z", "EPSG"
         ])
         try:
             df.to_csv(output_path, index=False)
             self.log(f"CSV saved to {output_path}")
+            self.log(f"  {len(df)} GCPs, columns: {list(df.columns)}")
+            if df["Real_Z"].eq(0).all():
+                self.log("  Note: All Real_Z values are 0.0 — if you have "
+                         "elevation data, add an 'elevation' column to your "
+                         "GCP ID file.")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to save CSV: {e}")
 

@@ -10,10 +10,21 @@ import sys
 import time
 import threading
 
+# ── shared CSV utility ──
+try:
+    from csv_utils import read_gcp_csv, check_required_columns
+except ImportError:
+    # Fallback if csv_utils.py is not on the path yet
+    def read_gcp_csv(path, verbose=True):
+        return pd.read_csv(path)
+
+    def check_required_columns(df, required, source="CSV"):
+        return [c for c in required if c not in df.columns]
+
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("green")
 
-# %% window resizer 
+# %% window resizer
 
 def fit_geometry(window, design_w, design_h, resizable=True, margin=0.90):
     """
@@ -72,7 +83,7 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
         super().__init__(master=master, *args, **kwargs)
         self.title("Create Homography Matrix")
         #self.geometry("850x800")
-        fit_geometry(self, 850, 800, resizable = True)
+        fit_geometry(self, 850, 800, resizable=True)
 
         try:
             self.iconbitmap(resource_path("launch_logo.ico"))
@@ -105,9 +116,10 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
 
         self.label_note = ctk.CTkLabel(
             self.panel1,
-            text="Note: File must include columns GCP_ID, Pixel_X, Pixel_Y, Real_X, Real_Y",
+            text="File must atleast include columns GCP_ID, Pixel_X, Pixel_Y, Real_X, Real_Y",
             fg_color="white",
             text_color="black",
+            font = ("Arial", 10),
             corner_radius=0
         )
         self.label_note.pack(side="left", padx=10, pady=5)
@@ -247,7 +259,6 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
             self.lbl_adv_info.configure(text="")
             self.advanced_frame.forget()
 
-
     @staticmethod
     def normalize_points(points: np.ndarray):
         centroid = points.mean(axis=0)
@@ -276,17 +287,22 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
 
         self.log("Reading GCP file...")
         try:
-            gcp_data = pd.read_csv(self.input_file)
+            gcp_data = read_gcp_csv(self.input_file)
         except Exception as e:
             self.log(f"Error reading CSV file: {e}")
             return
 
         required = ["GCP_ID", "Pixel_X", "Pixel_Y", "Real_X", "Real_Y"]
-        for col in required:
-            if col not in gcp_data.columns:
-                self.log(f"Missing required column: {col}")
-                messagebox.showerror("Error", f"Missing required column: {col}")
-                return
+        missing = check_required_columns(gcp_data, required)
+
+        if missing:
+            self.log(f"Missing required columns: {missing}")
+            messagebox.showerror(
+                "Error",
+                f"Missing required columns: {missing}\n\n"
+                f"Found columns: {list(gcp_data.columns)}"
+            )
+            return
 
         # -------------- exclude by numeric parts ----------------
         if self.exclude_var.get():
@@ -374,8 +390,7 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
         report += f"Mean error: {errors.mean():.3f} m\n"
         self.log(report)
 
-
-    # %%             Simulated-annealing helpers 
+    # %%             Simulated-annealing helpers
 
     def compute_homography_and_errors(
         self, pixel_points, utm_points, subset_indices, ransac_thresh=0.5
@@ -510,7 +525,6 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
             return
         self.log(f"Best homography matrix exported to: {path}")
         messagebox.showinfo("Success", "Best homography matrix exported successfully.")
-
 
 
 # %%                                     Main

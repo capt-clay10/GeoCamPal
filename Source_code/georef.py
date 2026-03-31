@@ -1,11 +1,22 @@
-import os
-import sys
-import time
-import glob
-import threading
-import concurrent.futures                 
+"""
+georef.py — GeoCamPal Unified Georeferencing Module
+
+Workflow:
+  1. Choose image
+  2. Choose method (Homography / Camera Projection / TPS / Poly1 / Poly2)
+  3. Load required inputs (varies by method)
+  4. Initial Georeferencing → full preview
+  5. Select AOI (interactive box or manual pixel coords)
+  6. Compute Accuracy (LOO cross-validation per GCP)
+  7. Optimise GCPs (SA) or manually exclude bad ones
+  8. Secondary Georeferencing (refined GCPs + scale)
+  9. Batch process (single folder or subfolders) with validation
+"""
+
+import os, sys, time, glob, re, pickle, threading, concurrent.futures, random
 import numpy as np
 import cv2
+import pandas as pd
 from PIL import Image, ImageTk
 import customtkinter as ctk
 import tkinter as tk
@@ -13,1217 +24,1574 @@ from tkinter import filedialog, messagebox
 from osgeo import gdal, osr
 osr.DontUseExceptions()
 
+try:
+    from csv_utils import read_gcp_csv, normalise_columns
+except ImportError:
+    def read_gcp_csv(p, verbose=True):
+        df = pd.read_csv(p, sep=None, engine="python", encoding="utf-8-sig")
+        df.columns = [c.strip() for c in df.columns]
+        if "Real_Z" not in df.columns: df["Real_Z"] = 0.0
+        if "EPSG" not in df.columns: df["EPSG"] = 0
+        return df
+    def normalise_columns(df, verbose=True): return df
+
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("green")
 
-# %% window resizer 
-
-def fit_geometry(window, design_w, design_h, resizable=True, margin=0.90):
-    """
-    Scale a window to fit the current screen while preserving
-    the aspect ratio of the original design size.
-    Centers the result on screen.  Never upscales beyond the design size.
-
-    Parameters
-    ----------
-    window      : Tk / CTk / CTkToplevel instance
-    design_w/h  : the "intended" pixel size (the old hardcoded values)
-    resizable   : whether the user can drag-resize afterward
-    margin      : fraction of screen to occupy at most (0.90 = 90 %)
-    """
-    screen_w = window.winfo_screenwidth()
-    screen_h = window.winfo_screenheight()
-
-    max_w = int(screen_w * margin)
-    max_h = int(screen_h * margin)
-
-    scale = min(max_w / design_w, max_h / design_h, 1.0)
-
-    final_w = int(design_w * scale)
-    final_h = int(design_h * scale)
-
-    x = (screen_w - final_w) // 2
-    y = max(0, (screen_h - final_h) // 2)
-
-    window.geometry(f"{final_w}x{final_h}+{x}+{y}")
-    window.resizable(resizable, resizable)
+# ── Constants ──
+MAX_BATCH_WORKERS = max(1, min(4, os.cpu_count() or 1))
+MIN_GEOTIFF_SIZE  = 10_000
+MAX_RETRIES       = 10
+METHODS = ["Homography", "Camera Projection", "Thin Plate Spline",
+           "Polynomial Ord-1", "Polynomial Ord-2"]
+_METHOD_KEY = {"Homography": "homo", "Camera Projection": "proj",
+               "Thin Plate Spline": "tps", "Polynomial Ord-1": "poly1",
+               "Polynomial Ord-2": "poly2"}
 
 
-# %% ------------------------------------------------------------------------------------------------------------ helpers ------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-def resource_path(relative_path: str) -> str:
-    """Return absolute path to bundled resources (handles PyInstaller)."""
-    try:                       # PyInstaller puts files in a temp folder
-        base_path = sys._MEIPASS
-    except Exception:
-        base_path = os.path.dirname(__file__)
-    return os.path.join(base_path, relative_path)
+# %%
+#  Helpers
 
+
+def fit_geometry(win, dw, dh, resizable=True, margin=0.90):
+    sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+    sc = min(margin*sw/dw, margin*sh/dh, 1.0)
+    fw, fh = int(dw*sc), int(dh*sc)
+    win.geometry(f"{fw}x{fh}+{(sw-fw)//2}+{max(0,(sh-fh)//2)}")
+    win.resizable(resizable, resizable)
+
+def resource_path(rp):
+    try: bp = sys._MEIPASS
+    except: bp = os.path.dirname(__file__)
+    return os.path.join(bp, rp)
 
 class StdoutRedirector:
-    """Redirect print/traceback output to a Tk Text widget."""
-    def __init__(self, text_widget):
-        self.text_widget = text_widget
-
-    def write(self, message):
-        self.text_widget.insert(tk.END, message)
-        self.text_widget.see(tk.END)
-
-    def flush(self):
-        pass
+    def __init__(self, w): self.w = w
+    def write(self, m): self.w.insert(tk.END, m); self.w.see(tk.END)
+    def flush(self): pass
 
 
-MAX_BATCH_WORKERS = max(1, min(4, os.cpu_count() or 1))
+# ── GeoTIFF validation ──
 
-# Minimum valid GeoTIFF size threshold (in bytes) - files smaller than this are considered corrupted
-MIN_VALID_GEOTIFF_SIZE = 10_000  # 10 KB - absolute minimum floor
-
-# Maximum retries per individual file before giving up
-MAX_RETRIES_PER_FILE = 10
-
-
-def validate_geotiff(filepath: str, min_size: int = MIN_VALID_GEOTIFF_SIZE) -> tuple[bool, str]:
-    """
-    Validate a GeoTIFF file for corruption.
-    
-    Returns:
-        tuple: (is_valid: bool, reason: str)
-    """
-    if not os.path.exists(filepath):
-        return False, "File does not exist"
-    
-    file_size = os.path.getsize(filepath)
-    if file_size < min_size:
-        return False, f"File too small ({file_size:,} bytes < {min_size:,} bytes threshold)"
-    
-    # Try to open with GDAL for deeper validation
+def validate_geotiff(fp, min_size=MIN_GEOTIFF_SIZE):
+    if not os.path.exists(fp): return False, "Missing"
+    if os.path.getsize(fp) < min_size: return False, "Too small"
     try:
-        ds = gdal.Open(filepath)
-        if ds is None:
-            return False, "GDAL could not open file"
-        
-        width = ds.RasterXSize
-        height = ds.RasterYSize
-        bands = ds.RasterCount
-        
-        # Check for obviously corrupt dimensions
-        if width <= 1 or height <= 1:
-            ds = None
-            return False, f"Invalid dimensions: {width}x{height}"
-        
-        if bands < 1:
-            ds = None
-            return False, f"Invalid band count: {bands}"
-        
-        ds = None
-        return True, "Valid"
-    
-    except Exception as e:
-        return False, f"GDAL validation error: {str(e)}"
+        ds = gdal.Open(fp)
+        if ds is None: return False, "GDAL fail"
+        w, h = ds.RasterXSize, ds.RasterYSize; ds = None
+        return (w > 1 and h > 1), f"dims {w}x{h}"
+    except Exception as e: return False, str(e)
+
+def sweep_and_validate(folder):
+    tifs = glob.glob(os.path.join(folder, "*.tif"))
+    if not tifs: return []
+    sizes = [os.path.getsize(f) for f in tifs if os.path.exists(f)]
+    if not sizes: return []
+    s = sorted(sizes); med = s[len(s)//2]
+    thr = max(MIN_GEOTIFF_SIZE, int(med * 0.5))
+    return [(fp, r) for fp in tifs for ok, r in [validate_geotiff(fp, thr)] if not ok]
+
+def _estimate_gsd(df):
+    px, utm = df[["Pixel_X","Pixel_Y"]].values, df[["Real_X","Real_Y"]].values
+    ratios = [np.hypot(*(utm[i]-utm[j]))/np.hypot(*(px[i]-px[j]))
+              for i in range(len(df)) for j in range(i+1, len(df))
+              if np.hypot(*(px[i]-px[j])) > 10]
+    return float(np.median(ratios)) if ratios else 0.25
 
 
-def calculate_adaptive_threshold(file_sizes: list[int], median_fraction: float = 0.5) -> int:
-    """
-    Calculate an adaptive minimum file size threshold based on the median file size.
-    
-    Files significantly smaller than the median are likely corrupted.
-    
-    Args:
-        file_sizes: List of file sizes in bytes
-        median_fraction: Fraction of median to use as threshold (default 0.5 = 50% of median)
-    
-    Returns:
-        Adaptive threshold in bytes
-    """
-    if not file_sizes:
-        return MIN_VALID_GEOTIFF_SIZE
-    
-    sorted_sizes = sorted(file_sizes)
-    n = len(sorted_sizes)
-    
-    # Calculate median
-    if n % 2 == 0:
-        median_size = (sorted_sizes[n // 2 - 1] + sorted_sizes[n // 2]) / 2
-    else:
-        median_size = sorted_sizes[n // 2]
-    
-    # Threshold is 50% of median (files less than half the typical size are suspect)
-    # But never less than the absolute minimum floor
-    adaptive_threshold = max(MIN_VALID_GEOTIFF_SIZE, int(median_size * median_fraction))
-    
-    return adaptive_threshold
+# %%
+#  Core backends
 
 
-def sweep_and_validate_batch(output_folder: str, 
-                              use_adaptive_threshold: bool = True) -> list[tuple[str, str]]:
-    """
-    Sweep through all TIF files in a folder and identify corrupted ones.
-    
-    Args:
-        output_folder: Path to the output folder containing TIF files
-        use_adaptive_threshold: If True, calculate threshold from median file size
-    
-    Returns:
-        List of tuples: (filepath, reason) for each corrupted file
-    """
-    tif_files = glob.glob(os.path.join(output_folder, "*.tif"))
-    
-    if not tif_files:
-        return []
-    
-    # Collect file sizes for adaptive thresholding
-    file_sizes = []
-    for f in tif_files:
+# ── Homography ──
+
+def _homo_compute(pixel_pts, utm_pts):
+    """Compute homography from GCPs with normalisation + RANSAC."""
+    def _norm(pts):
+        c = pts.mean(axis=0); s = pts - c
+        d = np.sqrt((s**2).sum(axis=1)).mean()
+        sc = np.sqrt(2) / d if d > 0 else 1
+        T = np.array([[sc,0,-sc*c[0]],[0,sc,-sc*c[1]],[0,0,1]])
+        h = np.hstack([pts, np.ones((len(pts),1))])
+        return (T @ h.T).T, T
+    pn, Tp = _norm(pixel_pts.astype(np.float32))
+    un, Tu = _norm(utm_pts.astype(np.float32))
+    Hn, _ = cv2.findHomography(pn[:,:2], un[:,:2], cv2.RANSAC, 0.5)
+    if Hn is None: return None
+    H = np.linalg.inv(Tu) @ Hn @ Tp
+    if abs(H[2,2]) > 1e-6 and abs(H[2,2]-1) > 1e-3: H /= H[2,2]
+    return H
+
+def _homo_warp_full(img, H, scale):
+    """Warp full image with homography, north-up."""
+    h, w = img.shape[:2]
+    corners = np.array([[0,0],[w-1,0],[w-1,h-1],[0,h-1]], np.float32).reshape(-1,1,2)
+    tc = cv2.perspectiveTransform(corners, H)
+    mn = np.floor(tc.min(axis=(0,1))).astype(int)
+    mx = np.ceil(tc.max(axis=(0,1))).astype(int)
+    ow, oh = int((mx[0]-mn[0])*scale), int((mx[1]-mn[1])*scale)
+    if ow <= 0 or oh <= 0: raise ValueError(f"Bad dims {ow}x{oh}")
+    T = np.array([[1,0,-mn[0]*scale],[0,1,mx[1]*scale],[0,0,1]], np.float64)
+    Hs = H.copy(); Hs[0] *= scale; Hs[1] *= -scale
+    Hf = T @ Hs
+    warped = cv2.warpPerspective(img, Hf, (ow, oh), flags=cv2.INTER_LANCZOS4)
+    # GeoTransform: (ulx, dx, 0, uly, 0, -dy)
+    gt = (float(mn[0]), 1.0/scale, 0.0, float(mx[1]), 0.0, -1.0/scale)
+    return warped, Hf, gt
+
+def _homo_warp_aoi(img, H, scale, aoi_px, preview_shape):
+    """Warp image with homography, cropped to AOI pixel bounds on preview."""
+    x1, y1, x2, y2 = aoi_px
+    # First do full warp to get Hf
+    warped_full, Hf, gt_full = _homo_warp_full(img, H, scale)
+    # Crop to AOI
+    ix1, iy1 = max(0, int(x1)), max(0, int(y1))
+    ix2, iy2 = min(warped_full.shape[1], int(x2)), min(warped_full.shape[0], int(y2))
+    cropped = warped_full[iy1:iy2, ix1:ix2]
+    # Update GeoTransform for the crop offset
+    ulx = gt_full[0] + ix1 * gt_full[1]
+    uly = gt_full[3] + iy1 * gt_full[5]
+    gt = (ulx, gt_full[1], 0.0, uly, 0.0, gt_full[5])
+    return cropped, gt
+
+
+# ── Projection (CIRN-style) ──
+
+def _scale_K(K, cal_wh, img_wh):
+    Ks = K.astype(np.float64).copy()
+    Ks[0,0] *= img_wh[0]/cal_wh[0]; Ks[0,2] *= img_wh[0]/cal_wh[0]
+    Ks[1,1] *= img_wh[1]/cal_wh[1]; Ks[1,2] *= img_wh[1]/cal_wh[1]
+    return Ks
+
+def _solve_extrinsics(pixel_pts, world_pts, K, dist):
+    K64 = K.astype(np.float64); d64 = dist.ravel().astype(np.float64)
+    img = pixel_pts.astype(np.float64).reshape(-1,1,2)
+    centroid = world_pts.astype(np.float64).mean(axis=0)
+    obj = (world_pts.astype(np.float64) - centroid)
+    ok = False
+    for method in [cv2.SOLVEPNP_ITERATIVE, cv2.SOLVEPNP_SQPNP, cv2.SOLVEPNP_EPNP]:
         try:
-            file_sizes.append(os.path.getsize(f))
-        except:
-            pass
-    
-    if use_adaptive_threshold and file_sizes:
-        threshold = calculate_adaptive_threshold(file_sizes)
-        median_size = sorted(file_sizes)[len(file_sizes) // 2]
-        print(f"[Validation] Median file size: {median_size / 1024 / 1024:.2f} MB | "
-              f"Threshold (50% of median): {threshold / 1024 / 1024:.2f} MB")
+            ok, rvec, tvec = cv2.solvePnP(obj, img, K64, d64, flags=method)
+            if ok: break
+        except cv2.error: continue
+    if not ok: raise RuntimeError("solvePnP failed — check GCPs and calibration.")
+    rvec, tvec = cv2.solvePnPRefineLM(obj, img, K64, d64, rvec, tvec)
+    proj, _ = cv2.projectPoints(obj, rvec, tvec, K64, d64)
+    errors = np.linalg.norm(proj.reshape(-1,2) - pixel_pts.astype(np.float64), axis=1)
+    return rvec, tvec, centroid, errors
+
+def _build_grid(x0, x1, y0, y1, res, elev):
+    xs = np.arange(x0, x1 + res*0.01, res)
+    ys = np.arange(y1, y0 - res*0.01, -res)
+    gx, gy = np.meshgrid(xs, ys)
+    return gx, gy, np.full_like(gx, elev)
+
+def _rectify_image(img, K, dist, rvec, tvec, centroid, gx, gy, gz):
+    hs, ws = img.shape[:2]; oh, ow = gx.shape
+    flat = np.column_stack([gx.ravel()-centroid[0], gy.ravel()-centroid[1],
+                            gz.ravel()-centroid[2]]).astype(np.float64)
+    proj, _ = cv2.projectPoints(flat, rvec, tvec,
+                                K.astype(np.float64), dist.ravel().astype(np.float64))
+    p = proj.reshape(-1,2)
+    mx = p[:,0].reshape(oh, ow).astype(np.float32)
+    my = p[:,1].reshape(oh, ow).astype(np.float32)
+    R, _ = cv2.Rodrigues(rvec)
+    behind = (R @ flat.T + tvec.reshape(3,1))[2,:].reshape(oh, ow) <= 0
+    rect = cv2.remap(img, mx, my, cv2.INTER_LANCZOS4,
+                     borderMode=cv2.BORDER_CONSTANT, borderValue=(0,0,0))
+    valid = (mx>=0)&(mx<ws)&(my>=0)&(my<hs)&~behind
+    alpha = (valid*255).astype(np.uint8); rect[~valid] = 0
+    return rect, alpha
+
+def _back_project_pixel(px, py, K, dist, rvec, tvec, centroid, elev):
+    """Back-project a pixel to world coordinates at a given elevation."""
+    pts = np.array([[[float(px), float(py)]]], dtype=np.float64)
+    p_norm = cv2.undistortPoints(pts, K.astype(np.float64),
+                                dist.ravel().astype(np.float64))
+    d_cam = np.array([p_norm[0,0,0], p_norm[0,0,1], 1.0])
+    R, _ = cv2.Rodrigues(rvec)
+    d_world = R.T @ d_cam
+    C = (-R.T @ tvec.ravel())
+    z_target = elev - centroid[2]
+    if abs(d_world[2]) < 1e-10: return None
+    s = (z_target - C[2]) / d_world[2]
+    if s <= 0: return None
+    P = C + s * d_world + centroid
+    return P[:2]
+
+
+# ── GCP Warp (GDAL: TPS / Poly) ──
+
+def _make_gdal_gcps(df):
+    gcps = []
+    for _, row in df.iterrows():
+        g = gdal.GCP()
+        g.GCPX = float(row["Real_X"]); g.GCPY = float(row["Real_Y"])
+        g.GCPZ = float(row.get("Real_Z", 0))
+        g.GCPPixel = float(row["Pixel_X"]); g.GCPLine = float(row["Pixel_Y"])
+        g.Id = str(row.get("GCP_ID", ""))
+        gcps.append(g)
+    epsg = int(df["EPSG"].iloc[0]) if "EPSG" in df.columns else 0
+    return gcps, epsg
+
+def _gdal_warp(src_path, dst_path, gcps, srs_wkt, epsg,
+               method, pxsize, te, lock=None):
+    def _do():
+        gdal.UseExceptions()
+        src = gdal.Open(src_path, gdal.GA_ReadOnly)
+        if src is None: raise RuntimeError(f"Cannot open {src_path}")
+        mem = gdal.GetDriverByName("MEM").CreateCopy("", src, 0); src = None
+        mem.SetGCPs(gcps, srs_wkt)
+        kw = dict(dstSRS=f"EPSG:{epsg}", resampleAlg=gdal.GRA_Lanczos,
+                  outputType=gdal.GDT_Byte, xRes=pxsize, yRes=pxsize,
+                  outputBounds=te,
+                  creationOptions=["ALPHA=YES","COMPRESS=DEFLATE","TILED=YES"],
+                  multithread=True)
+        if method == "tps": kw["tps"] = True
+        elif method == "poly1": kw["polynomialOrder"] = 1
+        elif method == "poly2": kw["polynomialOrder"] = 2
+        r = gdal.Warp(dst_path, mem, options=gdal.WarpOptions(**kw))
+        if r is None: raise RuntimeError("gdal.Warp returned None")
+        r.FlushCache(); r = None; mem = None
+    if lock:
+        with lock: _do()
+    else: _do()
+
+
+# ── GeoTIFF writing ──
+
+def _write_geotiff(path, bgr, alpha, gt, epsg, lock=None):
+    """Write a north-up RGBA GeoTIFF with given GeoTransform."""
+    h, w = bgr.shape[:2]
+    def _do():
+        drv = gdal.GetDriverByName("GTiff")
+        ds = drv.Create(path, w, h, 4, gdal.GDT_Byte,
+                        ["COMPRESS=DEFLATE","TILED=YES","ALPHA=YES"])
+        if ds is None: return False
+        ds.SetGeoTransform(gt)
+        srs = osr.SpatialReference(); srs.ImportFromEPSG(int(epsg))
+        ds.SetProjection(srs.ExportToWkt())
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        for i in range(3): ds.GetRasterBand(i+1).WriteArray(rgb[:,:,i])
+        ds.GetRasterBand(4).WriteArray(alpha)
+        ds.FlushCache(); ds = None; return True
+    if lock:
+        with lock: return _do()
+    return _do()
+
+
+# %%
+#  LOO Cross-Validation  (per-GCP accuracy in metres)
+
+
+def _loo_homography(df):
+    """Leave-one-out for homography: per-GCP world-coordinate error in metres."""
+    px = df[["Pixel_X","Pixel_Y"]].values.astype(np.float32)
+    utm = df[["Real_X","Real_Y"]].values.astype(np.float32)
+    n = len(df); errs = np.full(n, np.nan)
+    for i in range(n):
+        mask = np.ones(n, bool); mask[i] = False
+        H = _homo_compute(px[mask], utm[mask])
+        if H is None: continue
+        pt = np.array([[px[i]]], np.float32)
+        pred = cv2.perspectiveTransform(pt, H).reshape(2)
+        errs[i] = np.linalg.norm(pred - utm[i])
+    return errs
+
+def _loo_projection(df, K, dist, elev):
+    """Leave-one-out for projection: per-GCP world-coordinate error in metres."""
+    px = df[["Pixel_X","Pixel_Y"]].values.astype(np.float64)
+    wp = df[["Real_X","Real_Y","Real_Z"]].values.astype(np.float64)
+    n = len(df); errs = np.full(n, np.nan)
+    for i in range(n):
+        mask = np.ones(n, bool); mask[i] = False
+        try:
+            rv, tv, cen, _ = _solve_extrinsics(px[mask], wp[mask], K, dist)
+            pred = _back_project_pixel(px[i,0], px[i,1], K, dist,
+                                       rv, tv, cen, elev)
+            if pred is not None:
+                errs[i] = np.linalg.norm(pred - wp[i,:2])
+        except: pass
+    return errs
+
+def _loo_tps_poly(df, method):
+    """Leave-one-out for TPS/Poly: per-GCP error in metres using scipy/numpy."""
+    px = df[["Pixel_X","Pixel_Y"]].values.astype(np.float64)
+    utm = df[["Real_X","Real_Y"]].values.astype(np.float64)
+    n = len(df); errs = np.full(n, np.nan)
+    for i in range(n):
+        mask = np.ones(n, bool); mask[i] = False
+        tr_px, tr_utm = px[mask], utm[mask]
+        try:
+            if method == "tps":
+                from scipy.interpolate import RBFInterpolator
+                rx = RBFInterpolator(tr_px, tr_utm[:,0], kernel="thin_plate_spline")
+                ry = RBFInterpolator(tr_px, tr_utm[:,1], kernel="thin_plate_spline")
+                pred = np.array([rx(px[[i]])[0], ry(px[[i]])[0]])
+            else:
+                order = 1 if method == "poly1" else 2
+                x, y = tr_px[:,0], tr_px[:,1]
+                if order == 1:
+                    F = np.c_[np.ones(len(x)), x, y]
+                else:
+                    F = np.c_[np.ones(len(x)), x, y, x*y, x**2, y**2]
+                xt, yt = px[i,0], px[i,1]
+                if order == 1:
+                    Ft = np.array([[1, xt, yt]])
+                else:
+                    Ft = np.array([[1, xt, yt, xt*yt, xt**2, yt**2]])
+                cx, *_ = np.linalg.lstsq(F, tr_utm[:,0], rcond=None)
+                cy, *_ = np.linalg.lstsq(F, tr_utm[:,1], rcond=None)
+                pred = np.array([(Ft @ cx)[0], (Ft @ cy)[0]])
+            errs[i] = np.linalg.norm(pred - utm[i])
+        except: pass
+    return errs
+
+def compute_loo(df, method_key, K=None, dist=None, elev=0.0):
+    """Unified LOO dispatcher. Returns per-GCP error array in metres."""
+    if method_key == "homo":
+        return _loo_homography(df)
+    elif method_key == "proj":
+        return _loo_projection(df, K, dist, elev)
     else:
-        threshold = MIN_VALID_GEOTIFF_SIZE
-    
-    corrupted_files = []
-    for filepath in tif_files:
-        is_valid, reason = validate_geotiff(filepath, min_size=threshold)
-        if not is_valid:
-            corrupted_files.append((filepath, reason))
-    
-    return corrupted_files  # ≤ 4 workers
+        return _loo_tps_poly(df, method_key)
 
 
-# %% main window class 
+# %%
+#  Simulated Annealing — find best GCP subset
+
+
+def run_sa_optimisation(df, method_key, K=None, dist=None, elev=0.0,
+                        n_keep=None, max_iter=100000, temp=10000,
+                        cooling=0.9999, log_fn=print):
+    """
+    Find the subset of GCPs that minimises mean LOO error.
+    Returns: best_indices (np array), best_mean_error
+    """
+    n = len(df)
+    if n_keep is None:
+        n_keep = max(4, n - 2)  # drop at most 2 by default
+    n_keep = min(n_keep, n)
+    if n_keep < 4:
+        log_fn("[SA] Need at least 4 GCPs."); return np.arange(n), np.inf
+
+    idx_all = np.arange(n)
+    best_sub = np.sort(np.random.choice(idx_all, n_keep, replace=False))
+
+    def _cost(sub):
+        sub_df = df.iloc[sub].reset_index(drop=True)
+        errs = compute_loo(sub_df, method_key, K, dist, elev)
+        valid = errs[~np.isnan(errs)]
+        return valid.mean() if len(valid) > 0 else 1e9
+
+    best_cost = _cost(best_sub)
+    log_fn(f"[SA] Starting: {n_keep}/{n} GCPs, initial cost={best_cost:.2f} m")
+
+    t0 = time.time()
+    for it in range(max_iter):
+        new_sub = best_sub.copy()
+        # Swap one GCP in the subset with one outside
+        outside = np.setdiff1d(idx_all, new_sub)
+        if len(outside) == 0: break
+        out_idx = random.choice(range(len(new_sub)))
+        in_idx = random.choice(outside)
+        new_sub[out_idx] = in_idx
+        new_sub = np.sort(new_sub)
+
+        new_cost = _cost(new_sub)
+        dc = new_cost - best_cost
+        if dc < 0 or random.random() < np.exp(-dc / max(temp, 1e-10)):
+            best_sub = new_sub
+            best_cost = new_cost
+        temp *= cooling
+
+        if (it+1) % 20000 == 0:
+            log_fn(f"  [SA] iter {it+1}/{max_iter}  "
+                   f"temp={temp:.2f}  best={best_cost:.2f} m")
+
+    elapsed = time.time() - t0
+    log_fn(f"[SA] Done in {elapsed:.1f}s — best mean LOO error: "
+           f"{best_cost:.2f} m using {n_keep} GCPs")
+    ids = df["GCP_ID"].values if "GCP_ID" in df.columns else np.arange(n)
+    excluded = np.setdiff1d(idx_all, best_sub)
+    if len(excluded) > 0:
+        log_fn(f"[SA] Excluded: {[str(ids[i]) for i in excluded]}")
+    return best_sub, best_cost
+
+
+# %%
+#  Interactive AOI Selector
+
+
+class InteractiveAOISelector(ctk.CTkToplevel):
+    """
+    Zoomable/pannable window for drawing an AOI rectangle on the
+    initial georef preview.  Returns pixel coordinates (x1,y1,x2,y2)
+    in the preview image space via the callback.
+    """
+    _MZ = 0.05; _XZ = 20.0; _ZS = 1.15
+
+    def __init__(self, master, preview_rgb, on_done):
+        """
+        preview_rgb : numpy array (H,W,3) RGB — the initial georef preview
+        on_done     : callback(x1, y1, x2, y2) in preview pixel coords
+        """
+        super().__init__(master)
+        self.title("Select AOI — draw a rectangle, then Confirm")
+        self.resizable(True, True)
+        try: self.iconbitmap(resource_path("launch_logo.ico"))
+        except: pass
+
+        self._rgb = preview_rgb
+        self._cb = on_done
+        ih, iw = preview_rgb.shape[:2]
+        self._iw, self._ih = iw, ih
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        iz = min(0.85*sw/iw, 0.80*sh/ih, 1.0)
+        self._z = iz; self._ox = 0.0; self._oy = 0.0
+        self._sel = None; self._ds = None
+
+        ww = min(int(iw*iz)+20, int(sw*0.9))
+        wh = min(int(ih*iz)+80, int(sh*0.88))
+        self.geometry(f"{ww}x{wh}+{(sw-ww)//2}+{max(0,(sh-wh)//2)}")
+
+        tk.Label(self, text="L-drag: select | Wheel: zoom | "
+                 "Mid-drag: pan | R-click: clear",
+                 bg="#1a1a2e", fg="#aac", font=("Consolas", 9)
+                 ).pack(side="top", fill="x")
+        self._c = tk.Canvas(self, bg="#0a0a14", cursor="crosshair",
+                            highlightthickness=0)
+        self._c.pack(side="top", fill="both", expand=True)
+
+        bf = ctk.CTkFrame(self); bf.pack(side="bottom", fill="x", padx=4, pady=4)
+        self._sl = ctk.CTkLabel(bf, text="No selection", text_color="gray")
+        self._sl.pack(side="left", padx=10)
+        ctk.CTkButton(bf, text="Clear", width=80, fg_color="#555",
+                      command=self._clr).pack(side="right", padx=6)
+        ctk.CTkButton(bf, text="Confirm", width=120, fg_color="#2E7D32",
+                      command=self._cfm).pack(side="right", padx=6)
+
+        self._pil = Image.fromarray(preview_rgb)
+        c = self._c
+        c.bind("<ButtonPress-1>", self._lp)
+        c.bind("<B1-Motion>", self._ld)
+        c.bind("<ButtonRelease-1>", self._lr)
+        c.bind("<ButtonPress-2>", self._mp)
+        c.bind("<B2-Motion>", self._mm)
+        c.bind("<ButtonPress-3>", lambda e: self._clr())
+        for ev in ("<MouseWheel>","<Button-4>","<Button-5>"):
+            c.bind(ev, self._wh)
+        c.bind("<Configure>", lambda e: self._dr())
+        self.bind("<Return>", lambda e: self._cfm())
+        self.bind("<Escape>", lambda e: self.destroy())
+        self._dr(); self.focus_set()
+
+    def _i2c(self, x, y):
+        return (x-self._ox)*self._z, (y-self._oy)*self._z
+    def _c2i(self, x, y):
+        return x/self._z+self._ox, y/self._z+self._oy
+
+    def _dr(self):
+        c = self._c; cw, ch = c.winfo_width(), c.winfo_height()
+        if cw < 2: return
+        a, b = self._c2i(0, 0); d, e = self._c2i(cw, ch)
+        sa, sb = max(0, int(a)), max(0, int(b))
+        sd, se = min(self._iw, int(d)+1), min(self._ih, int(e)+1)
+        if sd <= sa or se <= sb: return
+        cr = self._pil.crop((sa, sb, sd, se))
+        dw = max(1, int((sd-sa)*self._z))
+        dh = max(1, int((se-sb)*self._z))
+        r = cr.resize((dw, dh),
+                      Image.NEAREST if self._z >= 2 else Image.BILINEAR)
+        cx, cy = self._i2c(sa, sb)
+        self._tk = ImageTk.PhotoImage(r)
+        c.delete("all")
+        c.create_image(int(cx), int(cy), anchor="nw", image=self._tk)
+        # North arrow
+        ax, ay = cw-36, 48; nr = 18
+        c.create_oval(ax-nr, ay-nr, ax+nr, ay+nr,
+                      fill="#1a1a2e", outline="#aac")
+        c.create_polygon(ax, ay-nr+4, ax-5, ay+4, ax+5, ay+4,
+                         fill="#e0e0ff", outline="#aac")
+        c.create_text(ax, ay-nr-8, text="N", fill="#e0e0ff",
+                      font=("Arial", 9, "bold"))
+        # Selection rectangle
+        if self._sel:
+            a2, b2, d2, e2 = self._sel
+            ca, cb2 = self._i2c(a2, b2); cd2, ce2 = self._i2c(d2, e2)
+            c.create_rectangle(ca, cb2, cd2, ce2, outline="#FFD700",
+                               width=2, fill="#FFD700", stipple="gray25")
+            for hx, hy in [(ca,cb2),(cd2,cb2),(cd2,ce2),(ca,ce2)]:
+                c.create_oval(hx-4, hy-4, hx+4, hy+4,
+                              fill="#FFD700", outline="#000")
+
+    def _lp(self, e):
+        self._ds = self._c2i(e.x, e.y); self._sel = None; self._dr()
+    def _ld(self, e):
+        if not self._ds: return
+        ix, iy = self._c2i(e.x, e.y); sx, sy = self._ds
+        self._sel = (min(sx,ix), min(sy,iy), max(sx,ix), max(sy,iy))
+        self._dr(); self._ul()
+    def _lr(self, e):
+        self._ds = None
+        if self._sel:
+            a, b, d, e2 = self._sel
+            if abs(d-a) < 2 or abs(e2-b) < 2: self._sel = None
+        self._ul()
+
+    _pl = None
+    def _mp(self, e): self._pl = (e.x, e.y)
+    def _mm(self, e):
+        if not self._pl: return
+        self._ox -= (e.x-self._pl[0])/self._z
+        self._oy -= (e.y-self._pl[1])/self._z
+        self._pl = (e.x, e.y); self._dr()
+    def _wh(self, e):
+        f = self._ZS if (e.num == 4 or e.delta > 0) else 1/self._ZS
+        nz = max(self._MZ, min(self._XZ, self._z*f))
+        if nz == self._z: return
+        ix, iy = self._c2i(e.x, e.y); self._z = nz
+        self._ox = ix - e.x/nz; self._oy = iy - e.y/nz; self._dr()
+    def _clr(self):
+        self._sel = None; self._dr()
+        self._sl.configure(text="No selection", text_color="gray")
+    def _ul(self):
+        if not self._sel:
+            self._sl.configure(text="No selection", text_color="gray")
+            return
+        a, b, d, e = self._sel
+        self._sl.configure(
+            text=f"({a:.0f},{b:.0f}) -> ({d:.0f},{e:.0f})  "
+                 f"[{d-a:.0f} x {e-b:.0f} px]",
+            text_color="#FFD700")
+    def _cfm(self):
+        if not self._sel:
+            messagebox.showwarning("", "Draw a rectangle first.", parent=self)
+            return
+        a, b, d, e = self._sel
+        # Clamp to image bounds
+        a = max(0, min(a, self._iw-1))
+        b = max(0, min(b, self._ih-1))
+        d = max(0, min(d, self._iw-1))
+        e = max(0, min(e, self._ih-1))
+        print(f"[AOI] Preview pixels: ({a:.0f},{b:.0f}) -> ({d:.0f},{e:.0f})")
+        self._cb(a, b, d, e)
+        self.destroy()
+
+
+# %%
+#  Main GUI
+
+
 class GeoReferenceModule(ctk.CTkToplevel):
 
-    # ------------------------------------------------------------------------------------ init / UI scaffolding ------------------------------------------------------------------------------------------------------------------------
-    def __init__(self, master=None, *args, **kwargs):
-        super().__init__(master=master, *args, **kwargs)
+    def __init__(self, master=None, **kw):
+        super().__init__(master=master, **kw)
         self.title("Georeferencing Tool")
-        #self.geometry("1200x800")
-        fit_geometry(self, 1200, 800, resizable=True)
+        fit_geometry(self, 1250, 900, resizable=True)
+        try: self.iconbitmap(resource_path("launch_logo.ico"))
+        except: pass
 
-        try:
-            self.iconbitmap(resource_path("launch_logo.ico"))
-        except Exception as e:
-            print("Warning: Could not load window icon:", e)
+        # ── State ──
+        self._img_path = ""
+        self._method_key = "homo"  # homo|proj|tps|poly1|poly2
+        self._H = None                  # homography matrix
+        self._homo_epsg = None
+        self._K = None; self._dist = None; self._cal_img_size = None
+        self._gcp_df = None; self._gcp_epsg = None
+        self._elev = 0.0
+        self._rvec = None; self._tvec = None; self._centroid = None
+        self._grid_x = self._grid_y = self._grid_z = None
+        self._preview_bgr = None   # initial georef preview (BGR)
+        self._preview_gt = None    # GeoTransform of preview
+        self._preview_Hf = None    # composite warp matrix (homography only)
+        self._aoi = None           # (x1,y1,x2,y2) in preview pixels
+        self._excluded_gcps = []   # list of GCP_ID strings to exclude
+        self._scale = 4.0
+        self.image_list = []; self.output_folder = ""
+        self.input_folder = ""; self._use_subfolders = False
+        self.user_epsg = None
+        self._lock = threading.Lock()
+        self.executor = None
 
-        # ---------------- state ----------------
-        self.H: np.ndarray | None = None
-        self.matrix_epsg: int | None = None
-        self.image_list = []
-        self.input_folder = ""
-        self.output_folder = ""
-        self.batch_main_folder = ""
-        self.scale_factor = 4
-        self.user_epsg: int | None = None
-        self.executor: concurrent.futures.ThreadPoolExecutor | None = None
-        self._gdal_write_lock = threading.Lock()  # Lock for GDAL write operations
+        self._build_ui()
+        self.protocol("WM_DELETE_WINDOW", self._close)
 
-        # ---------------- UI -------------------
-        self.initialize_components()
-
-        # -------- console ------
-        self.grid_rowconfigure(6, weight=0)
-        console_frame = ctk.CTkFrame(self)
-        console_frame.grid(row=6, column=0, sticky="nsew", padx=5, pady=5)
-        console_text = tk.Text(console_frame, wrap="word", height=8)
-        console_text.pack(fill="both", expand=True, padx=5, pady=5)
-        sys.stdout = StdoutRedirector(console_text)
-        sys.stderr = sys.stdout
-        print("Here you may see console outputs\n--------------------------------\n")
-
-        # graceful close
-        self.protocol("WM_DELETE_WINDOW", self._on_close)
-
-    # ---------------- graceful shutdown  ----------------
-    def _on_close(self):
+    def _close(self):
         if self.executor:
             self.executor.shutdown(wait=False, cancel_futures=True)
         self.destroy()
 
-    # ------------------------------------------------------------ ETA string ------------------------------------------------------------------------------------------------------------—
     @staticmethod
-    def _eta_string(start_ts: float, frac_done: float) -> str:
-        if frac_done <= 0:
-            return "ETA: —"
-        elapsed = time.time() - start_ts
-        remaining = elapsed * (1 / frac_done - 1)
-        if remaining >= 3600:
-            return f"ETA: {remaining / 3600:.1f} h"
-        if remaining >= 60:
-            return f"ETA: {remaining / 60:.1f} min"
-        return f"ETA: {int(remaining)} s"
+    def _eta(t0, f):
+        if f <= 0: return "ETA: ~"
+        r = (time.time()-t0)*(1/f-1)
+        if r >= 3600: return f"ETA: {r/3600:.1f}h"
+        if r >= 60: return f"ETA: {r/60:.1f}min"
+        return f"ETA: {int(r)}s"
 
-    # ---------------------------------------------------------------
-    def initialize_components(self):
-        # grid rows: 0–top images | 1–file | 2–AOI | 3–crop | 4–final(single)
-        #            5–batch(main–folder) | 6–console
+    def _show(self, src, lbl):
+        img = Image.fromarray(src) if isinstance(src, np.ndarray) else Image.open(src)
+        img.thumbnail((500, 380))
+        ci = ctk.CTkImage(light_image=img, dark_image=img, size=img.size)
+        lbl.configure(image=ci, text=""); lbl.image = ci
+
+    # ---- # ---- # ----
+    #  UI Construction
+    # ---- # ---- # ----
+
+    def _build_ui(self):
         self.grid_columnconfigure(0, weight=1)
-        for r in range(5):
-            self.grid_rowconfigure(r, weight=1)
+        for r in (0,): self.grid_rowconfigure(r, weight=1)
+        for r in range(1, 6): self.grid_rowconfigure(r, weight=0)
+        self.grid_rowconfigure(6, weight=0)
 
-        # ---- TOP IMAGES  ----------------------------
-        self.top_panel = ctk.CTkFrame(self)
-        self.top_panel.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
+        # ── Row 0: Preview panels ──
+        pf = ctk.CTkFrame(self)
+        pf.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
+        self._orig_lbl = self._mkp(pf, "Original")
+        self._init_lbl = self._mkp(pf, "Initial Georef")
+        self._sec_lbl  = self._mkp(pf, "Secondary Georef")
 
-        self.orig_frame = ctk.CTkFrame(self.top_panel, width=400, height=400)
-        self.orig_frame.pack_propagate(False)
-        self.orig_frame.pack(side="left", fill="both", expand=True, padx=5, pady=5)
-        self.orig_label = ctk.CTkLabel(self.orig_frame, text="Original Image")
-        self.orig_label.pack(fill="both", expand=True)
+        # ── Row 1: Method + Image + Inputs ──
+        r1 = ctk.CTkFrame(self)
+        r1.grid(row=1, column=0, sticky="ew", padx=5, pady=2)
 
-        self.geo_frame = ctk.CTkFrame(self.top_panel, width=400, height=400)
-        self.geo_frame.pack_propagate(False)
-        self.geo_frame.pack(side="left", fill="both", expand=True, padx=5, pady=5)
-        self.geo_label = ctk.CTkLabel(self.geo_frame, text="Initial Georeferenced Image")
-        self.geo_label.pack(fill="both", expand=True)
+        ctk.CTkLabel(r1, text="Method:", font=("Arial", 12, "bold")
+                     ).pack(side="left", padx=(8,2))
+        self._method_var = ctk.StringVar(value=METHODS[0])
+        self._method_dd = ctk.CTkOptionMenu(
+            r1, values=METHODS, variable=self._method_var,
+            command=self._on_method_change, width=180)
+        self._method_dd.pack(side="left", padx=4)
 
-        self.cropped_frame = ctk.CTkFrame(self.top_panel, width=400, height=400)
-        self.cropped_frame.pack_propagate(False)
-        self.cropped_frame.pack(side="left", fill="both", expand=True, padx=5, pady=5)
-        self.cropped_label = ctk.CTkLabel(self.cropped_frame, text="Cropped Georeferenced Image")
-        self.cropped_label.pack(fill="both", expand=True)
+        ctk.CTkButton(r1, text="Browse Image", command=self._browse_img
+                      ).pack(side="left", padx=6)
+        self._img_lbl = ctk.CTkLabel(r1, text="No image", text_color="gray")
+        self._img_lbl.pack(side="left", padx=4)
 
-        # ---- 1  FILE CONTROLS -------------------------
-        self.control_panel = ctk.CTkFrame(self)
-        self.control_panel.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
+        # Dynamic input frames (one per method group, shown/hidden)
+        self._inp_homo = ctk.CTkFrame(r1)
+        ctk.CTkButton(self._inp_homo, text="Load Homography (.txt)",
+                      command=self._load_homo).pack(side="left", padx=4)
+        self._homo_lbl = ctk.CTkLabel(self._inp_homo, text="—", text_color="gray")
+        self._homo_lbl.pack(side="left", padx=4)
 
-        self.file_frame = ctk.CTkFrame(self.control_panel)
-        self.file_frame.pack(side="left", padx=10, pady=5)
+        self._inp_gcp = ctk.CTkFrame(r1)
+        ctk.CTkButton(self._inp_gcp, text="Load GCP CSV",
+                      command=self._load_gcp, fg_color="#2E7D32"
+                      ).pack(side="left", padx=4)
+        self._gcp_lbl = ctk.CTkLabel(self._inp_gcp, text="—", text_color="gray")
+        self._gcp_lbl.pack(side="left", padx=4)
 
-        self.image_entry = ctk.CTkEntry(self.file_frame, width=300)
-        self.image_entry.pack(side="left", padx=5)
-        ctk.CTkButton(self.file_frame, text="Browse Image", command=self.load_image).pack(side="left", padx=5)
+        self._inp_proj = ctk.CTkFrame(r1)
+        ctk.CTkButton(self._inp_proj, text="Load Calibration (.pkl)",
+                      command=self._load_cal).pack(side="left", padx=4)
+        self._cal_lbl = ctk.CTkLabel(self._inp_proj, text="—", text_color="gray")
+        self._cal_lbl.pack(side="left", padx=4)
+        ctk.CTkLabel(self._inp_proj, text="Elev (m):").pack(side="left", padx=(8,2))
+        self._elev_ent = ctk.CTkEntry(self._inp_proj, width=60,
+                                      placeholder_text="0.0")
+        self._elev_ent.pack(side="left", padx=2)
 
-        self.homo_entry = ctk.CTkEntry(self.file_frame, width=300)
-        self.homo_entry.pack(side="left", padx=5)
-        ctk.CTkButton(self.file_frame, text="Load Homography", command=self.load_homography).pack(side="left", padx=5)
+        # ── Row 2: Actions ──
+        r2 = ctk.CTkFrame(self)
+        r2.grid(row=2, column=0, sticky="ew", padx=5, pady=2)
 
-        ctk.CTkButton(self.control_panel, text="Initial Georeferencing",
-                      command=self.perform_initial_georeferencing, fg_color="#6693F5").pack(side="left", padx=10)
+        ctk.CTkButton(r2, text="Initial Georeferencing",
+                      command=self._initial_georef, fg_color="#0F52BA",
+                      font=("Arial", 12, "bold")).pack(side="left", padx=6)
 
-        # ---- 2  AOI  ----------------------------------
-        self.aoi_panel = ctk.CTkFrame(self)
-        self.aoi_panel.grid(row=2, column=0, sticky="nsew", padx=5, pady=5)
+        ctk.CTkButton(r2, text="Select AOI Interactively",
+                      command=self._select_aoi, fg_color="#2E7D32"
+                      ).pack(side="left", padx=6)
 
-        self.aoi_var = ctk.StringVar(value="bottom_left")
-        for idx, (txt, val) in enumerate([
-            ("Bottom Left", "bottom_left"), ("Bottom Right", "bottom_right"),
-            ("Top Left", "top_left"), ("Top Right", "top_right"), ("Manual", "manual")]):
-            ctk.CTkRadioButton(self.aoi_panel, text=txt, variable=self.aoi_var,
-                               value=val).grid(row=0, column=idx, padx=5, pady=5, sticky="w")
+        ctk.CTkLabel(r2, text="or manual (x1,y1,x2,y2):").pack(
+            side="left", padx=(8,2))
+        self._aoi_ent = ctk.CTkEntry(r2, width=200,
+                                     placeholder_text="preview pixel coords")
+        self._aoi_ent.pack(side="left", padx=2)
+        ctk.CTkButton(r2, text="Set", command=self._set_manual_aoi,
+                      width=50).pack(side="left", padx=2)
 
-        ctk.CTkButton(self.aoi_panel, text="Secondary Georeferencing",
-                      command=self.perform_secondary_georeferencing, fg_color="#6693F5").grid(row=0, column=5, padx=5, pady=5, sticky="w")
+        self._aoi_status = ctk.CTkLabel(r2, text="AOI: not set",
+                                        text_color="gray")
+        self._aoi_status.pack(side="left", padx=8)
 
-        self.manual_entry = ctk.CTkEntry(self.aoi_panel, width=300,
-                                         placeholder_text="x1,y1,x2,y2,x3,y3,x4,y4")
-        self.manual_entry.grid(row=0, column=6, padx=5, pady=5, sticky="w")
-        self.manual_entry.grid_remove()
-        self.aoi_var.trace_add("write", self.toggle_manual_entry)
+        # ── Row 3: Accuracy + GCP mgmt + Secondary ──
+        r3 = ctk.CTkFrame(self)
+        r3.grid(row=3, column=0, sticky="ew", padx=5, pady=2)
 
-        # ---- 3  CROP ---------------------------------
-        self.crop_panel = ctk.CTkFrame(self)
-        self.crop_panel.grid(row=3, column=0, sticky="nsew", padx=5, pady=5)
+        ctk.CTkButton(r3, text="Compute Accuracy",
+                      command=self._compute_accuracy, fg_color="#6693F5"
+                      ).pack(side="left", padx=6)
+        ctk.CTkButton(r3, text="Optimise GCPs (SA)",
+                      command=self._run_sa, fg_color="#37474F"
+                      ).pack(side="left", padx=4)
 
-        crop_labels = ["South Crop (min_y)", "North Extend (max_y)",
-                       "East Adjust (max_x)", "West Extend (min_x)"]
-        self.crop_entries = []
-        col = 0
-        for lbl in crop_labels:
-            ctk.CTkLabel(self.crop_panel, text=lbl).grid(row=0, column=col, padx=5)
-            col += 1
-            ent = ctk.CTkEntry(self.crop_panel, width=80)
-            ent.grid(row=0, column=col, padx=5)
-            self.crop_entries.append(ent)
-            col += 1
+        ctk.CTkLabel(r3, text="Exclude GCPs:").pack(side="left", padx=(10,2))
+        self._excl_ent = ctk.CTkEntry(r3, width=140,
+                                      placeholder_text="e.g. 5,7,11")
+        self._excl_ent.pack(side="left", padx=2)
 
-        ctk.CTkLabel(self.crop_panel, text="Scale Factor").grid(row=0, column=col, padx=5)
-        col += 1
-        self.scale_entry = ctk.CTkEntry(self.crop_panel, width=80)
-        self.scale_entry.grid(row=0, column=col, padx=5)
-        col += 1
-        ctk.CTkButton(self.crop_panel, text="Show Crop", command=self.show_crop, fg_color="#6693F5").grid(row=0, column=col, padx=5)
+        ctk.CTkLabel(r3, text="|", text_color="gray").pack(side="left", padx=6)
 
-        # ---- 4  SINGLE–FOLDER FINAL  ------
-        self.final_panel = ctk.CTkFrame(self)
-        self.final_panel.grid(row=4, column=0, sticky="nsew", padx=5, pady=5)
+        ctk.CTkLabel(r3, text="Scale:").pack(side="left", padx=(4,2))
+        self._scale_ent = ctk.CTkEntry(r3, width=55)
+        self._scale_ent.insert(0, "4")
+        self._scale_ent.pack(side="left", padx=2)
 
-        self.input_folder_label = ctk.CTkLabel(self.final_panel, text="Input Folder: Not selected")
-        self.input_folder_label.pack(side="left", padx=5)
-        ctk.CTkButton(self.final_panel, text="Browse Input Folder", command=self.load_folder).pack(side="left", padx=5)
+        self._rec_scale_lbl = ctk.CTkLabel(r3, text="", text_color="gray",
+                                           font=("Arial", 10))
+        self._rec_scale_lbl.pack(side="left", padx=4)
 
-        self.output_folder_label = ctk.CTkLabel(self.final_panel, text="Output Folder: Not selected")
-        self.output_folder_label.pack(side="left", padx=5)
-        ctk.CTkButton(self.final_panel, text="Browse Output Folder", command=self.select_output_folder, fg_color="#8C7738").pack(side="left", padx=5)
+        ctk.CTkButton(r3, text="Secondary Georeferencing",
+                      command=self._secondary_georef, fg_color="#0F52BA",
+                      font=("Arial", 12, "bold")).pack(side="left", padx=8)
 
-        self.epsg_entry = ctk.CTkEntry(self.final_panel, width=100,
-                                       placeholder_text="EPSG (optional)")
-        self.epsg_entry.pack(side="left", padx=5)
+        # ── Row 4: Batch processing ──
+        r4 = ctk.CTkFrame(self)
+        r4.grid(row=4, column=0, sticky="ew", padx=5, pady=2)
 
-        ctk.CTkButton(self.final_panel, text="Final Georeferencing",
-                      command=self.process_all_images, fg_color="#0F52BA").pack(side="left", padx=5)
+        ctk.CTkButton(r4, text="Browse Input Folder",
+                      command=self._browse_in).pack(side="left", padx=4)
+        self._in_lbl = ctk.CTkLabel(r4, text="—", text_color="gray")
+        self._in_lbl.pack(side="left", padx=4)
 
-        self.progress = ctk.CTkProgressBar(self.final_panel, width=220)
-        self.progress.set(0)
-        self.progress.pack(side="left", padx=8)
-        self.progress_eta = ctk.CTkLabel(self.final_panel, text="ETA: —")
-        self.progress_eta.pack(side="left", padx=5)
+        self._subfolder_var = tk.BooleanVar(value=False)
+        ctk.CTkCheckBox(r4, text="Include subfolders",
+                        variable=self._subfolder_var
+                        ).pack(side="left", padx=8)
 
-        # ---- 5  BATCH–MAIN–FOLDER PANEL (single bar + ETA) -------
-        self.batch_panel = ctk.CTkFrame(self)
-        self.batch_panel.grid(row=5, column=0, sticky="nsew", padx=5, pady=5)
+        ctk.CTkButton(r4, text="Browse Output Folder",
+                      command=self._browse_out, fg_color="#8C7738"
+                      ).pack(side="left", padx=4)
+        self._out_lbl = ctk.CTkLabel(r4, text="—", text_color="gray")
+        self._out_lbl.pack(side="left", padx=4)
 
-        self.batch_main_label = ctk.CTkLabel(self.batch_panel, text="Main Folder: Not selected")
-        self.batch_main_label.pack(side="left", padx=5)
-        ctk.CTkButton(self.batch_panel, text="Browse Main Folder",
-                      command=self.select_batch_main_folder).pack(side="left", padx=5)
-        ctk.CTkButton(self.batch_panel, text="Start Batch Process",
-                      command=self.start_batch_process, fg_color="#0F52BA").pack(side="left", padx=5)
+        self._epsg_ent = ctk.CTkEntry(r4, width=80,
+                                      placeholder_text="EPSG")
+        self._epsg_ent.pack(side="left", padx=4)
 
-        self.batch_progress = ctk.CTkProgressBar(self.batch_panel, width=220)
-        self.batch_progress.set(0)
-        self.batch_progress.pack(side="left", padx=8)
-        self.batch_eta_label = ctk.CTkLabel(self.batch_panel, text="ETA: —")
-        self.batch_eta_label.pack(side="left", padx=5)
-        
-        # ---- RESET BUTTON (red, bottom right) ----
-        self.reset_button = ctk.CTkButton(
-            self.batch_panel, 
-            text="⟲ Reset", 
-            command=self.reset_module,
-            width=80,
-            fg_color="#8B0000",      # Dark red
-            hover_color="#B22222",   # Firebrick red on hover
-            text_color="white"
-        )
-        self.reset_button.pack(side="right", padx=10)
+        ctk.CTkButton(r4, text="Process All", fg_color="#0F52BA",
+                      command=self._process_all,
+                      font=("Arial", 12, "bold")).pack(side="left", padx=6)
 
-    def toggle_manual_entry(self, *args):
-        if self.aoi_var.get() == "manual":
-            self.manual_entry.grid()
-        else:
-            self.manual_entry.grid_remove()
+        self._prog = ctk.CTkProgressBar(r4, width=160)
+        self._prog.set(0); self._prog.pack(side="left", padx=6)
+        self._eta_lbl = ctk.CTkLabel(r4, text="ETA: ~")
+        self._eta_lbl.pack(side="left", padx=4)
 
-    def reset_module(self):
-        """Reset the module to initial state - clear all images, settings, and entries."""
-        # Confirm reset with user
-        if not messagebox.askyesno("Confirm Reset", 
-                                    "Are you sure you want to reset?\n\n"
-                                    "This will clear all images, settings, and entries."):
-            return
-        
-        # ---- Reset state variables ----
-        self.H = None
-        self.matrix_epsg = None
-        self.image_list = []
-        self.input_folder = ""
-        self.output_folder = ""
-        self.batch_main_folder = ""
-        self.user_epsg = None
-        
-        # ---- Clear image panels ----
-        self.orig_label.configure(image=None, text="Original Image")
-        self.orig_label.image = None
-        self.geo_label.configure(image=None, text="Initial Georeferenced Image")
-        self.geo_label.image = None
-        self.cropped_label.configure(image=None, text="Cropped Georeferenced Image")
-        self.cropped_label.image = None
-        
-        # ---- Clear entry fields ----
-        self.image_entry.delete(0, "end")
-        self.homo_entry.delete(0, "end")
-        self.manual_entry.delete(0, "end")
-        self.epsg_entry.delete(0, "end")
-        self.scale_entry.delete(0, "end")
-        
-        # Clear crop entries
-        for entry in self.crop_entries:
-            entry.delete(0, "end")
-        
-        # ---- Reset labels ----
-        self.input_folder_label.configure(text="Input Folder: Not selected")
-        self.output_folder_label.configure(text="Output Folder: Not selected")
-        self.batch_main_label.configure(text="Main Folder: Not selected")
-        
-        # ---- Reset progress bars and ETA ----
-        self.progress.set(0)
-        self.progress_eta.configure(text="ETA: —")
-        self.batch_progress.set(0)
-        self.batch_eta_label.configure(text="ETA: —")
-        
-        # ---- Reset AOI selection to default ----
-        self.aoi_var.set("bottom_left")
-        self.manual_entry.grid_remove()
-        
-        print("\n" + "="*50)
-        print("Module has been reset to initial state")
+        ctk.CTkButton(r4, text="Reset", command=self._reset, width=60,
+                      fg_color="#8B0000", hover_color="#B22222"
+                      ).pack(side="right", padx=8)
+
+        # ── Row 5: Console ──
+        cf = ctk.CTkFrame(self)
+        cf.grid(row=5, column=0, sticky="nsew", padx=5, pady=5)
+        self.grid_rowconfigure(5, weight=0)
+        ct = tk.Text(cf, wrap="word", height=9)
+        ct.pack(fill="both", expand=True, padx=5, pady=5)
+        sys.stdout = StdoutRedirector(ct)
+        sys.stderr = sys.stdout
+        print("GeoCamPal — Georeferencing Tool")
+        print("="*50)
+        print("\nWorkflow:")
+        print("  1. Choose a georef method from the dropdown")
+        print("  2. Browse your image and load required input files")
+        print("  3. Click 'Initial Georeferencing' for a full preview")
+        print("  4. Select your Area of Interest (AOI)")
+        print("  5. Click 'Compute Accuracy' for per-GCP error report")
+        print("  6. Exclude bad GCPs or click 'Optimise' (SA)")
+        print("  7. Click 'Secondary Georeferencing' for final preview")
+        print("  8. Set input/output folders and 'Process All' for batch")
         print("="*50 + "\n")
 
-    def load_image(self):
-        path = filedialog.askopenfilename(
-            filetypes=[("Image Files", "*.jpg *.jpeg *.png *.bmp *.tif")])
-        if path:
-            self.image_entry.delete(0, "end")
-            self.image_entry.insert(0, path)
-            self.show_image(path, self.orig_label)
+        # Show initial method inputs
+        self._on_method_change(METHODS[0])
 
-    def load_homography(self):
-        path = filedialog.askopenfilename(filetypes=[("Text Files", "*.txt")])
-        if path:
+    @staticmethod
+    def _mkp(parent, text):
+        fr = ctk.CTkFrame(parent, width=370, height=340)
+        fr.pack_propagate(False)
+        fr.pack(side="left", fill="both", expand=True, padx=4, pady=4)
+        lbl = ctk.CTkLabel(fr, text=text); lbl.pack(fill="both", expand=True)
+        return lbl
+
+    # ---- # ---- # ----
+    #  Method switching
+    # ---- # ---- # ----
+
+    def _on_method_change(self, choice):
+        self._method_key = _METHOD_KEY[choice]
+        # Hide all input panels
+        for w in (self._inp_homo, self._inp_gcp, self._inp_proj):
+            w.pack_forget()
+        # Show what's needed
+        if self._method_key == "homo":
+            self._inp_homo.pack(side="left", padx=4)
+            print(f"\n[Method] Homography selected")
+            print(f"  Required: Homography matrix (.txt from homography sub-module)")
+            print(f"  Optional: GCP CSV (for accuracy computation)")
+        elif self._method_key == "proj":
+            self._inp_proj.pack(side="left", padx=4)
+            self._inp_gcp.pack(side="left", padx=4)
+            print(f"\n[Method] Camera Projection (CIRN-style) selected")
+            print(f"  Required: Lens calibration (.pkl from lens correction)")
+            print(f"            GCP CSV (.csv from pixel-to-GCP sub-module)")
+            print(f"            Rectification elevation (metres, auto-filled from GCPs)")
+        else:  # tps, poly1, poly2
+            self._inp_gcp.pack(side="left", padx=4)
+            names = {"tps": "Thin Plate Spline", "poly1": "Polynomial Ord-1",
+                     "poly2": "Polynomial Ord-2"}
+            print(f"\n[Method] {names[self._method_key]} selected")
+            print(f"  Required: GCP CSV (.csv from pixel-to-GCP sub-module)")
+            if self._method_key == "poly2":
+                print(f"  Note: Polynomial Ord-2 requires at least 6 GCPs")
+
+
+    # ---- # ---- # ----
+    #  Input loading
+    # ---- # ---- # ----
+
+    def _browse_img(self):
+        p = filedialog.askopenfilename(
+            filetypes=[("Images","*.jpg *.jpeg *.png *.bmp *.tif *.tiff")])
+        if p:
+            self._img_path = p
+            self._img_lbl.configure(text=os.path.basename(p), text_color="#81C784")
+            self._show(p, self._orig_lbl)
+
+    def _load_homo(self):
+        p = filedialog.askopenfilename(filetypes=[("Text","*.txt")])
+        if not p: return
+        try:
+            self._homo_epsg = None
+            with open(p) as f:
+                line = f.readline()
+                if '#' in line and 'EPSG:' in line:
+                    m = re.search(r'EPSG:(\d+)', line)
+                    if m: self._homo_epsg = int(m.group(1))
+            self._H = np.loadtxt(p).reshape(3, 3)
+            self._homo_lbl.configure(text=os.path.basename(p), text_color="#81C784")
+            if self._homo_epsg:
+                if not self._epsg_ent.get().strip():
+                    self._epsg_ent.insert(0, str(self._homo_epsg))
+                print(f"[CRS] EPSG:{self._homo_epsg} from homography")
+        except Exception as e:
+            messagebox.showerror("Error", f"Bad homography: {e}")
+
+    def _load_gcp(self):
+        p = filedialog.askopenfilename(
+            filetypes=[("CSV","*.csv"),("All","*.*")])
+        if not p: return
+        try:
+            df = read_gcp_csv(p)
+            for c in ("Pixel_X","Pixel_Y","Real_X","Real_Y"):
+                if c not in df.columns:
+                    messagebox.showerror("Error",
+                        f"Missing column '{c}' after normalisation.\n"
+                        f"Found: {list(df.columns)}")
+                    return
+            self._gcp_df = df
+            self._gcp_epsg = int(df["EPSG"].iloc[0]) if "EPSG" in df.columns and df["EPSG"].iloc[0] > 0 else None
+            gsd = _estimate_gsd(df)
+            if self._gcp_epsg and not self._epsg_ent.get().strip():
+                self._epsg_ent.insert(0, str(self._gcp_epsg))
+            mz = df["Real_Z"].mean()
+            if not self._elev_ent.get().strip():
+                self._elev_ent.insert(0, f"{mz:.1f}")
+            self._gcp_lbl.configure(
+                text=f"{len(df)} GCPs (GSD~{gsd:.3f} m/px)",
+                text_color="#81C784")
+            print(f"[GCP] {len(df)} GCPs loaded, EPSG:{self._gcp_epsg}, "
+                  f"GSD~{gsd:.4f}, mean_Z={mz:.1f}")
+        except Exception as e:
+            messagebox.showerror("GCP Error", str(e))
+
+    def _load_cal(self):
+        p = filedialog.askopenfilename(
+            filetypes=[("Pickle","*.pkl"),("All","*.*")])
+        if not p: return
+        try:
+            with open(p, "rb") as f: d = pickle.load(f)
+            for k in ("camera_matrix","dist_coeff"):
+                if k not in d: raise KeyError(f"Missing '{k}'")
+            self._K = d["camera_matrix"].astype(np.float64)
+            self._dist = d["dist_coeff"].ravel().astype(np.float64)
+            self._cal_img_size = d.get("image_size")
+            fx = self._K[0,0]
+            self._cal_lbl.configure(
+                text=f"{os.path.basename(p)} (fx={fx:.0f})",
+                text_color="#81C784")
+            print(f"[Cal] Loaded: fx={fx:.1f}  fy={self._K[1,1]:.1f}")
+        except Exception as e:
+            messagebox.showerror("Calibration Error", str(e))
+
+    def _get_K_for(self, wh):
+        K = self._K.copy()
+        if self._cal_img_size:
+            cal = self._cal_img_size
+            if isinstance(cal,(list,tuple)) and len(cal)==2:
+                cwh = (cal[1],cal[0]) if cal[0]>cal[1] else (cal[0],cal[1])
+                if cwh != wh:
+                    K = _scale_K(K, cwh, wh)
+                    print(f"[Cal] K scaled: {cwh} -> {wh}")
+        return K
+
+    def _get_working_df(self):
+        """Return GCP DataFrame with excluded GCPs removed."""
+        if self._gcp_df is None: return None
+        df = self._gcp_df.copy()
+        # Parse exclude entry
+        excl_str = self._excl_ent.get().strip()
+        if excl_str:
             try:
-                # Parse EPSG from comment header if present
-                self.matrix_epsg = None
-                with open(path, 'r') as f:
-                    first_line = f.readline().strip()
-                    if first_line.startswith('#') and 'EPSG:' in first_line:
-                        import re
-                        match = re.search(r'EPSG:(\d+)', first_line)
-                        if match:
-                            self.matrix_epsg = int(match.group(1))
-                            print(f"[CRS] EPSG:{self.matrix_epsg} detected "
-                                  f"from homography matrix")
+                nums = [int(x.strip()) for x in excl_str.split(",") if x.strip()]
+                excl_ids = [f"GCP_{n}" for n in nums]
+                df = df[~df["GCP_ID"].isin(excl_ids)].reset_index(drop=True)
+                if len(excl_ids) > 0:
+                    print(f"[GCP] Excluding: {excl_ids} "
+                          f"({len(df)} remaining)")
+            except: pass
+        return df
 
-                self.H = np.loadtxt(path).reshape(3, 3)
-                self.homo_entry.delete(0, "end")
-                self.homo_entry.insert(0, path)
+    def _get_elev(self):
+        try: return float(self._elev_ent.get() or 0)
+        except: return 0.0
 
-                # Auto-fill EPSG entry if empty and we found one
-                if self.matrix_epsg and not self.epsg_entry.get().strip():
-                    self.epsg_entry.insert(0, str(self.matrix_epsg))
-                    print(f"[CRS] Auto-filled EPSG entry with "
-                          f"{self.matrix_epsg}")
-            except Exception as e:
-                messagebox.showerror(
-                    "Error", f"Invalid homography matrix: {str(e)}")
+    def _get_scale(self):
+        try: return float(self._scale_ent.get() or 4)
+        except: return 4.0
 
-    def show_image(self, path, label):
+    def _resolve_epsg(self):
         try:
-            img = Image.open(path)
-        except Exception as e:
-            messagebox.showerror("Error", f"Unable to open image: {str(e)}")
-            return
-        # Using thumbnail() may downsize the image; adjust if full display is needed.
-        img.thumbnail((500, 400))
-        ctk_img = ctk.CTkImage(light_image=img, dark_image=img, size=img.size)
-        label.configure(image=ctk_img)
-        label.image = ctk_img
+            self.user_epsg = int(self._epsg_ent.get()); return True
+        except: pass
+        if self._gcp_epsg:
+            self.user_epsg = self._gcp_epsg; return True
+        if self._homo_epsg:
+            self.user_epsg = self._homo_epsg; return True
+        messagebox.showerror("Error", "No EPSG. Enter one manually.")
+        return False
 
-    # --- INITIAL GEOREFERENCING (using full image corners) ---
-    def perform_initial_georeferencing(self):
-        if not self.image_entry.get() or self.H is None:
-            messagebox.showerror("Error", "Load an image and homography first")
-            return
-        try:
-            img = cv2.imread(self.image_entry.get())
-            if img is None:
-                raise ValueError("Unable to read image")
-            h, w = img.shape[:2]
-            full_corners = np.array([[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]],
-                                    dtype=np.float32).reshape(-1, 1, 2)
-            transformed = self.warp_image(img, full_corners)
-            self.show_georeferenced(transformed)
-        except Exception as e:
-            messagebox.showerror("Error", str(e))
+    # ---- # ---- # ----
+    #  Step 4: Initial Georeferencing
+    # ---- # ---- # ----
 
-    # --- SECONDARY GEOREFERENCING (using AOI) ---
-    def perform_secondary_georeferencing(self):
-        if not self.image_entry.get() or self.H is None:
-            messagebox.showerror("Error", "Load an image and homography first")
-            return
-        try:
-            img = cv2.imread(self.image_entry.get())
-            if img is None:
-                raise ValueError("Unable to read image")
-            h, w = img.shape[:2]
-            original_corners = self.get_original_corners(h, w)
-            transformed = self.warp_image_with_crop(img, original_corners)
-            self.show_georeferenced(transformed)
-        except Exception as e:
-            messagebox.showerror("Error", str(e))
-
-    # --- Get AOI Corners based on selection ---
-    def get_original_corners(self, h, w):
-        aoi_type = self.aoi_var.get()
-        if aoi_type == "manual":
-            return self.parse_manual_corners()
-        elif aoi_type == "bottom_left":
-            return np.array([[0, int(h * 0.5)], [w - 1, int(h * 0.5)],
-                             [w - 1, h - 1], [0, h - 1]],
-                            dtype=np.float32).reshape(-1, 1, 2)
-        elif aoi_type == "bottom_right":
-            return np.array([[int(w * 0.5), int(h * 0.5)], [w - 1, int(h * 0.5)],
-                             [w - 1, h - 1], [int(w * 0.5), h - 1]],
-                            dtype=np.float32).reshape(-1, 1, 2)
-        elif aoi_type == "top_left":
-            return np.array([[0, 0], [int(w * 0.5), 0],
-                             [int(w * 0.5), int(h * 0.5)], [0, int(h * 0.5)]],
-                            dtype=np.float32).reshape(-1, 1, 2)
-        elif aoi_type == "top_right":
-            return np.array([[int(w * 0.5), 0], [w - 1, 0],
-                             [w - 1, int(h * 0.5)], [int(w * 0.5), int(h * 0.5)]],
-                            dtype=np.float32).reshape(-1, 1, 2)
-        else:
-            return np.array([[0, 0], [w - 1, 0],
-                             [w - 1, h - 1], [0, h - 1]],
-                            dtype=np.float32).reshape(-1, 1, 2)
-
-    def parse_manual_corners(self):
-        try:
-            vals = list(map(float, self.manual_entry.get().split(",")))
-            if len(vals) != 8:
-                raise ValueError("Must provide 8 comma-separated numbers")
-            return np.array(vals, dtype=np.float32).reshape(4, 1, 2)
-        except Exception as e:
-            raise ValueError(f"Invalid manual corner coordinates: {e}")
-
-    # --- Warp image using given corners (for initial georeferencing) ---
-    def warp_image(self, img, original_corners):
-        h, w = img.shape[:2]
-        transformed = cv2.perspectiveTransform(original_corners, self.H)
-        min_coords = np.floor(transformed.min(axis=(0, 1))).astype(int)
-        max_coords = np.ceil(transformed.max(axis=(0, 1))).astype(int)
-        # Use scale factor from the scale entry if provided, else default self.scale_factor
-        try:
-            scale = float(self.scale_entry.get())
-        except:
-            scale = self.scale_factor
-
-        # --- Scale factor diagnostic ---
-        geo_width  = max_coords[0] - min_coords[0]
-        geo_height = max_coords[1] - min_coords[1]
-        if geo_width > 0 and geo_height > 0:
-            native_scale = max(w / geo_width, h / geo_height)
-            print(f"[Info] Recommended scale factor ≈ {native_scale:.1f} (preserves full input resolution)")
-            if scale >= native_scale:
-                print(f"[Info] Current scale {scale:.1f} — full detail preserved ✓")
-            elif scale >= native_scale * 0.5:
-                detail_pct = (scale / native_scale) * 100
-                print(f"[Info] Current scale {scale:.1f} — ~{detail_pct:.0f}% of native detail")
-            else:
-                detail_pct = (scale / native_scale) * 100
-                print(f"[Warning] Current scale {scale:.1f} is well below native ({native_scale:.1f}). "
-                      f"Output retains ~{detail_pct:.0f}% of input detail.")
-
-        output_width = int((max_coords[0] - min_coords[0]) * scale)
-        output_height = int((max_coords[1] - min_coords[1]) * scale)
-
-        # --- Dimension validation ---
-        if output_width <= 0 or output_height <= 0:
-            raise ValueError(f"Invalid output dimensions {output_width}x{output_height}. "
-                             f"Check scale factor and homography matrix.")
-
-        translation = np.array([
-            [1, 0, -min_coords[0] * scale],
-            [0, 1, -min_coords[1] * scale],
-            [0, 0, 1]
-        ], dtype=np.float32)
-        H_scaled = self.H.copy()
-        H_scaled[:2] *= scale
-        H_final = translation @ H_scaled
-        warped = cv2.warpPerspective(
-            img, H_final, (output_width, output_height), flags=cv2.INTER_LANCZOS4)
-        return cv2.cvtColor(warped, cv2.COLOR_BGR2RGB)
-
-    # --- Warp image with cropping adjustments (for secondary georeferencing and preview) ---
-    def warp_image_with_crop(self, img, original_corners):
-        h, w = img.shape[:2]
-        transformed = cv2.perspectiveTransform(original_corners, self.H)
-        min_coords = np.floor(transformed.min(axis=(0, 1))).astype(int)
-        max_coords = np.ceil(transformed.max(axis=(0, 1))).astype(int)
-        # Read crop adjustment factors (default 0)
-        try:
-            crop_south = float(self.crop_entries[0].get())
-        except:
-            crop_south = 0.0
-        try:
-            crop_north = float(self.crop_entries[1].get())
-        except:
-            crop_north = 0.0
-        try:
-            crop_east = float(self.crop_entries[2].get())
-        except:
-            crop_east = 0.0
-        try:
-            crop_west = float(self.crop_entries[3].get())
-        except:
-            crop_west = 0.0
-
-        min_y = min_coords[1] + \
-            int((max_coords[1] - min_coords[1]) * crop_south)
-        max_y = max_coords[1] + \
-            int((max_coords[1] - min_coords[1]) * crop_north)
-        max_x = max_coords[0] - \
-            int((max_coords[0] - min_coords[0]) * crop_east)
-        min_x = min_coords[0] - \
-            int((max_coords[0] - min_coords[0]) * crop_west)
-
-        try:
-            scale = float(self.scale_entry.get())
-        except:
-            scale = self.scale_factor
-
-        # --- Scale factor diagnostic ---
-        geo_width  = max_x - min_x
-        geo_height = max_y - min_y
-        if geo_width > 0 and geo_height > 0:
-            native_scale = max(w / geo_width, h / geo_height)
-            print(f"[Info] Recommended scale factor ≈ {native_scale:.1f} (preserves full input resolution)")
-            if scale >= native_scale:
-                print(f"[Info] Current scale {scale:.1f} — full detail preserved ✓")
-            elif scale >= native_scale * 0.5:
-                detail_pct = (scale / native_scale) * 100
-                print(f"[Info] Current scale {scale:.1f} — ~{detail_pct:.0f}% of native detail")
-            else:
-                detail_pct = (scale / native_scale) * 100
-                print(f"[Warning] Current scale {scale:.1f} is well below native ({native_scale:.1f}). "
-                      f"Output retains ~{detail_pct:.0f}% of input detail.")
-
-        output_width = int((max_x - min_x) * scale)
-        output_height = int((max_y - min_y) * scale)
-
-        # --- Dimension validation ---
-        if output_width <= 0 or output_height <= 0:
-            raise ValueError(f"Invalid output dimensions {output_width}x{output_height}. "
-                             f"Check crop values and scale factor.")
-
-        translation = np.array([
-            [1, 0, -min_x * scale],
-            [0, 1, -min_y * scale],
-            [0, 0, 1]
-        ], dtype=np.float32)
-        H_scaled = self.H.copy()
-        H_scaled[:2] *= scale
-        H_final = translation @ H_scaled
-        warped = cv2.warpPerspective(
-            img, H_final, (output_width, output_height), flags=cv2.INTER_LANCZOS4)
-        return cv2.cvtColor(warped, cv2.COLOR_BGR2RGB)
-
-    # --- Show initial georeferenced image in the middle panel ---
-    def show_georeferenced(self, image_array):
-        img = Image.fromarray(image_array)
-        # Adjust thumbnail if needed; note that this may not show full resolution.
-        img.thumbnail((500, 400))
-        ctk_img = ctk.CTkImage(light_image=img, dark_image=img, size=img.size)
-        self.geo_label.configure(image=ctk_img)
-        self.geo_label.image = ctk_img
-
-    # --- Show cropped georeferenced image in the right panel (when "Show Crop" is clicked) ---
-    def show_crop(self):
-        if not self.image_entry.get() or self.H is None:
-            messagebox.showerror("Error", "Load an image and homography first")
-            return
-        try:
-            img = cv2.imread(self.image_entry.get())
-            if img is None:
-                raise ValueError("Unable to read image")
-            h, w = img.shape[:2]
-            original_corners = self.get_original_corners(h, w)
-            cropped_img = self.warp_image_with_crop(img, original_corners)
-            self.show_cropped_georeferenced(cropped_img)
-        except Exception as e:
-            messagebox.showerror("Error", str(e))
-
-    def show_cropped_georeferenced(self, image_array):
-        img = Image.fromarray(image_array)
-        img.thumbnail((500, 400))
-        ctk_img = ctk.CTkImage(light_image=img, dark_image=img, size=img.size)
-        self.cropped_label.configure(image=ctk_img)
-        self.cropped_label.image = ctk_img
-    # --- Load folder for batch processing -------------------------
-    def load_folder(self):
-        folder = filedialog.askdirectory()
-        if folder:
-            self.input_folder = folder
-            self.image_list = sorted(glob.glob(os.path.join(folder, "*.bmp")) +
-                                     glob.glob(os.path.join(folder, "*.jpg")) +
-                                     glob.glob(os.path.join(folder, "*.jpeg")) +
-                                     glob.glob(os.path.join(folder, "*.png")) +
-                                     glob.glob(os.path.join(folder, "*.tif")))
-            self.input_folder_label.configure(text=f"Input Folder: {folder}")
-            messagebox.showinfo("Info", f"Loaded {len(self.image_list)} images")
-
-    def select_output_folder(self):
-        folder = filedialog.askdirectory()
-        if folder:
-            self.output_folder = folder
-            self.output_folder_label.configure(text=f"Output Folder: {folder}")
-
-    # ------------------------------------------------------------------------ georeference_and_save_image ------------------------------------------------------------------------------------------------—
-    def georeference_and_save_image(self, img_path: str, output_path: str) -> bool:
-        """Same as before but uses self.user_epsg (validated once)."""
-        img = cv2.imread(img_path)
+    def _initial_georef(self):
+        if not self._img_path:
+            messagebox.showerror("Error", "Browse an image first."); return
+        img = cv2.imread(self._img_path)
         if img is None:
-            print(f"Unable to read {img_path}")
-            return False
-
-        h, w = img.shape[:2]
-        original_corners = self.get_original_corners(h, w)
-        transformed = cv2.perspectiveTransform(original_corners, self.H)
-        min_coords = np.floor(transformed.min(axis=(0, 1))).astype(int)
-        max_coords = np.ceil(transformed.max(axis=(0, 1))).astype(int)
-
-        # crop factors
-        try:
-            crop_south = float(self.crop_entries[0].get() or 0)
-            crop_north = float(self.crop_entries[1].get() or 0)
-            crop_east  = float(self.crop_entries[2].get() or 0)
-            crop_west  = float(self.crop_entries[3].get() or 0)
-        except ValueError:
-            crop_south = crop_north = crop_east = crop_west = 0
-
-        min_y = min_coords[1] + int((max_coords[1]-min_coords[1]) * crop_south)
-        max_y = max_coords[1] + int((max_coords[1]-min_coords[1]) * crop_north)
-        max_x = max_coords[0] - int((max_coords[0]-min_coords[0]) * crop_east)
-        min_x = min_coords[0] - int((max_coords[0]-min_coords[0]) * crop_west)
+            messagebox.showerror("Error", "Cannot read image."); return
+        mk = self._method_key
+        scale = self._get_scale()
 
         try:
-            scale = float(self.scale_entry.get())
-        except ValueError:
-            scale = self.scale_factor
+            if mk == "homo":
+                if self._H is None:
+                    messagebox.showerror("Error", "Load homography first."); return
+                warped, Hf, gt = _homo_warp_full(img, self._H, scale)
+                self._preview_bgr = warped
+                self._preview_gt = gt
+                self._preview_Hf = Hf
+                # Suggest optimal scale
+                h, w = img.shape[:2]
+                tc = cv2.perspectiveTransform(
+                    np.array([[0,0],[w-1,0],[w-1,h-1],[0,h-1]], np.float32).reshape(-1,1,2),
+                    self._H)
+                mn = tc.min(axis=(0,1)); mx = tc.max(axis=(0,1))
+                ns = max(w/(mx[0]-mn[0]), h/(mx[1]-mn[1]))
+                self._rec_scale_lbl.configure(text=f"(recommended ~{ns:.1f})")
 
-        output_width  = int((max_x - min_x) * scale)
-        output_height = int((max_y - min_y) * scale)
+            elif mk == "proj":
+                if self._K is None:
+                    messagebox.showerror("Error", "Load calibration first."); return
+                df = self._get_working_df()
+                if df is None or len(df) < 4:
+                    messagebox.showerror("Error", "Need >= 4 GCPs."); return
+                hi, wi = img.shape[:2]
+                K = self._get_K_for((wi, hi))
+                elev = self._get_elev()
+                px = df[["Pixel_X","Pixel_Y"]].values
+                wp = df[["Real_X","Real_Y","Real_Z"]].values
+                rv, tv, cen, errs = _solve_extrinsics(px, wp, K, self._dist)
+                self._rvec, self._tvec, self._centroid = rv, tv, cen
+                rms = np.sqrt((errs**2).mean())
+                print(f"[Solve] RMS reproj: {rms:.1f} px")
+                # Grid from GCP extent
+                ex, ey = df["Real_X"].values, df["Real_Y"].values
+                mg = 0.20
+                dx, dy = (ex.max()-ex.min())*mg, (ey.max()-ey.min())*mg
+                gsd = _estimate_gsd(df)
+                gx, gy, gz = _build_grid(
+                    ex.min()-dx, ex.max()+dx, ey.min()-dy, ey.max()+dy,
+                    gsd, elev)
+                self._grid_x, self._grid_y, self._grid_z = gx, gy, gz
+                rect, alpha = _rectify_image(img, K, self._dist,
+                                             rv, tv, cen, gx, gy, gz)
+                self._preview_bgr = rect
+                self._preview_gt = (float(gx[0,0]), gsd, 0,
+                                    float(gy[0,0]), 0, -gsd)
+                ns = max(wi/(gx.shape[1]), hi/(gx.shape[0]))
+                self._rec_scale_lbl.configure(text=f"(GSD={gsd:.4f} m/px)")
 
-        # --- Dimension validation (prevents OpenCV crash) ---
-        if output_width <= 0 or output_height <= 0:
-            print(f"[Skip] Invalid output dimensions {output_width}x{output_height} for {img_path}")
-            return False
-        if output_width * output_height > 400_000_000:  # ~400 MP sanity cap
-            print(f"[Skip] Output too large ({output_width}x{output_height}) for {img_path}")
-            return False
+            else:  # tps, poly1, poly2
+                df = self._get_working_df()
+                if df is None or len(df) < 4:
+                    messagebox.showerror("Error", "Need >= 4 GCPs."); return
+                if mk == "poly2" and len(df) < 6:
+                    messagebox.showerror("Error", "Poly-2 needs >= 6 GCPs."); return
+                if not self._resolve_epsg(): return
+                gcps, epsg = _make_gdal_gcps(df)
+                srs = osr.SpatialReference(); srs.ImportFromEPSG(epsg)
+                gsd = _estimate_gsd(df)
+                ex, ey = df["Real_X"].values, df["Real_Y"].values
+                mg = max(50, (ex.max()-ex.min())*0.05)
+                te = [ex.min()-mg, ey.min()-mg, ex.max()+mg, ey.max()+mg]
+                import tempfile
+                tmp = tempfile.NamedTemporaryFile(suffix=".tif", delete=False)
+                tmp.close()
+                _gdal_warp(self._img_path, tmp.name, gcps, srs.ExportToWkt(),
+                           epsg, mk, gsd, te)
+                ds = gdal.Open(tmp.name)
+                self._preview_gt = ds.GetGeoTransform()
+                # Read as BGR
+                bands = min(ds.RasterCount, 3)
+                arr = np.zeros((ds.RasterYSize, ds.RasterXSize, 3), np.uint8)
+                for i in range(bands):
+                    arr[:,:,i] = ds.GetRasterBand(i+1).ReadAsArray()
+                # RGB -> BGR for consistency
+                self._preview_bgr = arr[:,:,::-1].copy()
+                ds = None
+                os.unlink(tmp.name)
+                self._rec_scale_lbl.configure(text=f"(GSD={gsd:.4f} m/px)")
 
-        translation = np.array([[1, 0, -min_x * scale],
-                                [0, 1, -min_y * scale],
-                                [0, 0, 1                     ]], dtype=np.float32)
+            # Show preview
+            rgb = cv2.cvtColor(self._preview_bgr, cv2.COLOR_BGR2RGB)
+            self._show(rgb, self._init_lbl)
+            h, w = self._preview_bgr.shape[:2]
+            print(f"[Initial] Preview: {w}x{h}")
+            print(f"\n[Next] Select your Area of Interest (AOI):")
+            print(f"  - Click 'Select AOI Interactively' to draw a box")
+            print(f"  - Or type pixel coords (x1,y1,x2,y2) and click 'Set'")
+            print(f"  - Skip AOI to use the full extent")
 
-        H_scaled      = self.H.copy();  H_scaled[:2] *= scale
-        H_final       = translation @ H_scaled
-        warped        = cv2.warpPerspective(img, H_final,
-                                            (output_width, output_height),
-                                            flags=cv2.INTER_LANCZOS4)
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+            import traceback; traceback.print_exc()
 
-        # auto-crop dark borders
-        gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
-        _, thresh = cv2.threshold(gray, 1, 255, cv2.THRESH_BINARY)
-        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL,
-                                       cv2.CHAIN_APPROX_SIMPLE)
-        if contours:
-            x_crop, y_crop, w_crop, h_crop = cv2.boundingRect(contours[0])
-            warped = warped[y_crop:y_crop+h_crop, x_crop:x_crop+w_crop]
-        else:
-            x_crop = y_crop = 0
+    # ---- # ---- # ----
+    #  Step 5: AOI Selection
+    # ---- # ---- # ----
 
-        # ---- write GeoTIFF (protected by lock for thread safety) ----------------
-        gcps = []
-        adj_corners = cv2.perspectiveTransform(original_corners, H_final).reshape(-1, 2)
-        for (px, py), (utm_x, utm_y) in zip(adj_corners, transformed.reshape(-1, 2)):
-            g = gdal.GCP()
-            g.GCPX, g.GCPY = float(utm_x), float(utm_y)
-            g.GCPPixel, g.GCPLine = float(px - x_crop), float(py - y_crop)
-            gcps.append(g)
+    def _select_aoi(self):
+        if self._preview_bgr is None:
+            messagebox.showerror("Error",
+                "Run Initial Georeferencing first."); return
+        rgb = cv2.cvtColor(self._preview_bgr, cv2.COLOR_BGR2RGB)
+        def _on_aoi(x1, y1, x2, y2):
+            self._aoi = (x1, y1, x2, y2)
+            self._aoi_ent.delete(0, "end")
+            self._aoi_ent.insert(0, f"{x1:.0f},{y1:.0f},{x2:.0f},{y2:.0f}")
+            self._aoi_status.configure(
+                text=f"AOI: {x2-x1:.0f}x{y2-y1:.0f} px", text_color="#81C784")
+            self._show_aoi_crop()
+            print("[Next] Click 'Compute Accuracy' to check per-GCP "
+                  "errors, or 'Secondary Georeferencing' to apply.")
+        InteractiveAOISelector(self, rgb, _on_aoi)
 
-        srs = osr.SpatialReference();  srs.ImportFromEPSG(self.user_epsg)
-        
-        # Use lock to serialize GDAL file creation (prevents race conditions)
-        with self._gdal_write_lock:
-            driver = gdal.GetDriverByName("GTiff")
-            dst_ds = driver.Create(output_path, warped.shape[1], warped.shape[0],
-                                   4, gdal.GDT_Byte, options=["ALPHA=YES"])
-            if dst_ds is None:
-                print(f"GDAL failed to create file: {output_path}")
-                return False
-            
-            # Use GeoTransform if derivable (preferred by GIS software),
-            # otherwise fall back to GCPs. Never set both — GDAL discards
-            # GCPs when a GeoTransform is present.
-            gt = gdal.GCPsToGeoTransform(gcps)
-            if gt:
-                dst_ds.SetGeoTransform(gt)
-                dst_ds.SetProjection(srs.ExportToWkt())
-            else:
-                dst_ds.SetGCPs(gcps, srs.ExportToWkt())
+    def _set_manual_aoi(self):
+        try:
+            vals = [float(v.strip()) for v in self._aoi_ent.get().split(",")]
+            if len(vals) != 4: raise ValueError("Need 4 values")
+            self._aoi = tuple(vals)
+            self._aoi_status.configure(
+                text=f"AOI: {vals[2]-vals[0]:.0f}x{vals[3]-vals[1]:.0f} px",
+                text_color="#81C784")
+            self._show_aoi_crop()
+            print("[AOI] Manual AOI set from entry.")
+            print("[Next] Click 'Compute Accuracy' or 'Secondary Georeferencing'.")
+        except Exception as e:
+            messagebox.showerror("Error", f"Bad AOI: {e}")
 
-            rgb = cv2.cvtColor(warped, cv2.COLOR_BGR2RGB)
-            for i in range(3):
-                dst_ds.GetRasterBand(i+1).WriteArray(rgb[..., i])
-            alpha = np.where(np.all(rgb == [0,0,0], axis=-1), 0, 255).astype(np.uint8)
-            dst_ds.GetRasterBand(4).WriteArray(alpha)
-            dst_ds.FlushCache()
-            dst_ds = None
-        
-        return True
-
-
-    def process_all_images(self):
-        if not self.image_list or self.H is None:
-            messagebox.showerror("Error", "Load a folder and homography first")
+    def _show_aoi_crop(self):
+        """Show the AOI-cropped region of the initial georef preview."""
+        if self._preview_bgr is None or self._aoi is None:
             return
+        x1, y1, x2, y2 = [int(v) for v in self._aoi]
+        h, w = self._preview_bgr.shape[:2]
+        x1, y1 = max(0, x1), max(0, y1)
+        x2, y2 = min(w, x2), min(h, y2)
+        if x2 <= x1 or y2 <= y1:
+            print("[AOI] Warning: selection is empty after clamping.")
+            return
+        crop = self._preview_bgr[y1:y2, x1:x2]
+        rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+        self._show(rgb, self._init_lbl)
+
+    # ---- # ---- # ----
+    #  Step 6: Compute Accuracy (LOO)
+    # ---- # ---- # ----
+
+    def _compute_accuracy(self):
+        mk = self._method_key
+        if mk == "homo":
+            if self._H is None:
+                messagebox.showerror("Error", "Load homography first."); return
+            # For homography, we need GCPs — they're embedded in the H
+            # but not stored.  Need the GCP CSV.
+            df = self._get_working_df()
+            if df is None:
+                messagebox.showerror("Error",
+                    "Load a GCP CSV for accuracy computation."); return
+        else:
+            df = self._get_working_df()
+            if df is None or len(df) < 4:
+                messagebox.showerror("Error", "Need >= 4 GCPs."); return
+            if mk == "proj" and self._K is None:
+                messagebox.showerror("Error", "Load calibration first."); return
+
+        def _run():
+            print(f"\n{'='*55}")
+            print(f"  LOO Cross-Validation  ({self._method_var.get()})")
+            print(f"  Each GCP is held out in turn; the model is solved")
+            print(f"  from the remaining GCPs, then the held-out GCP's")
+            print(f"  world position is predicted.  Error = distance")
+            print(f"  between predicted and true position in METRES.")
+            print(f"{'='*55}")
+            K = self._K if mk == "proj" else None
+            d = self._dist if mk == "proj" else None
+            if mk == "proj":
+                img = cv2.imread(self._img_path)
+                if img is not None:
+                    K = self._get_K_for((img.shape[1], img.shape[0]))
+            errs = compute_loo(df, mk, K, d, self._get_elev())
+            ids = df["GCP_ID"].values if "GCP_ID" in df.columns else np.arange(len(df))
+            print(f"\n  {'GCP':<12} {'Error (m)':>10}")
+            print(f"  {'~'*24}")
+            for gid, e in zip(ids, errs):
+                flag = "  <-- outlier" if (not np.isnan(e) and e > 50) else ""
+                e_str = f"{e:.2f}" if not np.isnan(e) else "n/a"
+                print(f"  {str(gid):<12} {e_str:>10}{flag}")
+            valid = errs[~np.isnan(errs)]
+            if len(valid) > 0:
+                print(f"  {'~'*24}")
+                print(f"  Mean:  {valid.mean():.2f} m")
+                print(f"  RMS:   {np.sqrt((valid**2).mean()):.2f} m")
+                print(f"  Max:   {valid.max():.2f} m")
+                worst = np.nanargmax(errs)
+                print(f"\n  Worst: {ids[worst]} ({errs[worst]:.2f} m)")
+                if valid.mean() > 20:
+                    print(f"\n  [Tip] Mean error > 20 m. Consider excluding "
+                          f"outlier GCPs or trying a different method.")
+            print(f"{'='*55}")
+            print(f"\n[Next] Exclude bad GCPs in the entry field (comma-"
+                  f"separated numbers),\n       or click 'Optimise GCPs (SA)'"
+                  f" to find the best subset automatically.\n"
+                  f"       Then click 'Secondary Georeferencing'.\n")
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    # ---- # ---- # ----
+    #  Step 7: SA Optimisation
+    # ---- # ---- # ----
+
+    def _run_sa(self):
+        df = self._get_working_df()
+        if df is None or len(df) < 5:
+            messagebox.showerror("Error",
+                "Need >= 5 GCPs for SA optimisation."); return
+        mk = self._method_key
+        K = self._K if mk == "proj" else None
+        d = self._dist if mk == "proj" else None
+        if mk == "proj" and self._img_path:
+            img = cv2.imread(self._img_path)
+            if img is not None:
+                K = self._get_K_for((img.shape[1], img.shape[0]))
+        elev = self._get_elev()
+
+        def _run():
+            best_idx, best_err = run_sa_optimisation(
+                df, mk, K, d, elev, log_fn=print)
+            # Auto-fill exclude entry with the dropped GCPs
+            all_idx = set(range(len(df)))
+            kept = set(best_idx.tolist())
+            dropped = all_idx - kept
+            if dropped:
+                ids = df["GCP_ID"].values if "GCP_ID" in df.columns else np.arange(len(df))
+                excl_nums = []
+                for i in dropped:
+                    gid = str(ids[i])
+                    # Extract number from GCP_ID like "GCP_5"
+                    parts = gid.split("_")
+                    try: excl_nums.append(parts[-1])
+                    except: excl_nums.append(gid)
+                excl_str = ",".join(excl_nums)
+                self.after(0, lambda: (
+                    self._excl_ent.delete(0, "end"),
+                    self._excl_ent.insert(0, excl_str),
+                ))
+                print(f"[SA] Auto-filled exclude list: {excl_str}")
+                print(f"     Click 'Secondary Georeferencing' to use "
+                      f"the optimised subset.")
+
+        threading.Thread(target=_run, daemon=True).start()
+
+
+    # ---- # ---- # ----
+    #  Step 8: Secondary Georeferencing
+    # ---- # ---- # ----
+
+    def _secondary_georef(self):
+        if self._preview_bgr is None:
+            messagebox.showerror("Error", "Run Initial Georeferencing first.")
+            return
+        if not self._img_path:
+            messagebox.showerror("Error", "No image loaded."); return
+
+        img = cv2.imread(self._img_path)
+        if img is None:
+            messagebox.showerror("Error", "Cannot read image."); return
+
+        mk = self._method_key
+        scale = self._get_scale()
+        aoi = self._aoi  # may be None (full extent)
+
         try:
-            self.user_epsg = int(self.epsg_entry.get())
-            if self.matrix_epsg and self.user_epsg != self.matrix_epsg:
-                print(f"[CRS] User EPSG:{self.user_epsg} overrides "
-                      f"matrix EPSG:{self.matrix_epsg}")
-        except ValueError:
-            if self.matrix_epsg:
-                self.user_epsg = self.matrix_epsg
-                print(f"[CRS] Using EPSG:{self.matrix_epsg} from "
-                      f"homography matrix")
+            if mk == "homo":
+                if self._H is None:
+                    messagebox.showerror("Error", "Load homography."); return
+                warped, Hf, gt = _homo_warp_full(img, self._H, scale)
+                if aoi:
+                    x1, y1, x2, y2 = [int(v) for v in aoi]
+                    # Scale AOI from preview coords to new scale
+                    old_h, old_w = self._preview_bgr.shape[:2]
+                    new_h, new_w = warped.shape[:2]
+                    sx, sy = new_w/old_w, new_h/old_h
+                    x1, y1 = int(x1*sx), int(y1*sy)
+                    x2, y2 = int(x2*sx), int(y2*sy)
+                    x1, y1 = max(0, x1), max(0, y1)
+                    x2, y2 = min(new_w, x2), min(new_h, y2)
+                    warped = warped[y1:y2, x1:x2]
+                    gt = (gt[0]+x1*gt[1], gt[1], 0, gt[3]+y1*gt[5], 0, gt[5])
+                self._preview_bgr = warped
+                self._preview_gt = gt
+                self._preview_Hf = Hf
+
+            elif mk == "proj":
+                df = self._get_working_df()
+                if df is None or len(df) < 4:
+                    messagebox.showerror("Error", "Need >= 4 GCPs."); return
+                hi, wi = img.shape[:2]
+                K = self._get_K_for((wi, hi))
+                elev = self._get_elev()
+                px = df[["Pixel_X","Pixel_Y"]].values
+                wp = df[["Real_X","Real_Y","Real_Z"]].values
+                rv, tv, cen, errs = _solve_extrinsics(px, wp, K, self._dist)
+                self._rvec, self._tvec, self._centroid = rv, tv, cen
+                rms = np.sqrt((errs**2).mean())
+                print(f"[Solve] RMS reproj: {rms:.1f} px  ({len(df)} GCPs)")
+
+                # Grid extent — use AOI if set, else GCP bounds
+                if aoi and self._preview_gt:
+                    gt = self._preview_gt
+                    x1, y1, x2, y2 = aoi
+                    utm_x0 = gt[0] + x1 * gt[1]
+                    utm_x1 = gt[0] + x2 * gt[1]
+                    utm_y0 = gt[3] + y2 * gt[5]  # y2 is lower in pixels = smaller northing
+                    utm_y1 = gt[3] + y1 * gt[5]  # y1 is upper = larger northing
+                else:
+                    ex, ey = df["Real_X"].values, df["Real_Y"].values
+                    mg = 0.20
+                    dx, dy = (ex.max()-ex.min())*mg, (ey.max()-ey.min())*mg
+                    utm_x0, utm_x1 = ex.min()-dx, ex.max()+dx
+                    utm_y0, utm_y1 = ey.min()-dy, ey.max()+dy
+
+                gsd = _estimate_gsd(df) / (scale / 4.0) if scale != 4 else _estimate_gsd(df)
+                gx, gy, gz = _build_grid(utm_x0, utm_x1, utm_y0, utm_y1, gsd, elev)
+                self._grid_x, self._grid_y, self._grid_z = gx, gy, gz
+                rect, alpha = _rectify_image(img, K, self._dist, rv, tv, cen,
+                                             gx, gy, gz)
+                self._preview_bgr = rect
+                self._preview_gt = (float(gx[0,0]), gsd, 0, float(gy[0,0]), 0, -gsd)
+                fill = 100*np.count_nonzero(alpha)/alpha.size
+                print(f"[Secondary] {gx.shape[1]}x{gx.shape[0]} @ {gsd:.4f} m/px  "
+                      f"fill={fill:.1f}%")
+
+            else:  # tps, poly1, poly2
+                df = self._get_working_df()
+                if df is None or len(df) < 4:
+                    messagebox.showerror("Error", "Need >= 4 GCPs."); return
+                if not self._resolve_epsg(): return
+                gcps, epsg = _make_gdal_gcps(df)
+                srs = osr.SpatialReference(); srs.ImportFromEPSG(epsg)
+                gsd = _estimate_gsd(df)
+
+                if aoi and self._preview_gt:
+                    gt = self._preview_gt
+                    x1, y1, x2, y2 = aoi
+                    te = [gt[0]+x1*gt[1], gt[3]+max(y1,y2)*gt[5],
+                          gt[0]+x2*gt[1], gt[3]+min(y1,y2)*gt[5]]
+                else:
+                    ex, ey = df["Real_X"].values, df["Real_Y"].values
+                    mg = max(50, (ex.max()-ex.min())*0.05)
+                    te = [ex.min()-mg, ey.min()-mg, ex.max()+mg, ey.max()+mg]
+
+                import tempfile
+                tmp = tempfile.NamedTemporaryFile(suffix=".tif", delete=False)
+                tmp.close()
+                _gdal_warp(self._img_path, tmp.name, gcps, srs.ExportToWkt(),
+                           epsg, mk, gsd, te)
+                ds = gdal.Open(tmp.name)
+                self._preview_gt = ds.GetGeoTransform()
+                arr = np.zeros((ds.RasterYSize, ds.RasterXSize, 3), np.uint8)
+                for i in range(min(3, ds.RasterCount)):
+                    arr[:,:,i] = ds.GetRasterBand(i+1).ReadAsArray()
+                self._preview_bgr = arr[:,:,::-1].copy()
+                ds = None; os.unlink(tmp.name)
+
+            rgb = cv2.cvtColor(self._preview_bgr, cv2.COLOR_BGR2RGB)
+            self._show(rgb, self._sec_lbl)
+            h, w = self._preview_bgr.shape[:2]
+            print(f"[Secondary] Preview: {w}x{h}")
+
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+            import traceback; traceback.print_exc()
+
+    # ---- # ---- # ----
+    #  Single-image save (for batch)
+    # ---- # ---- # ----
+
+    def _save_single(self, img_path, out_path):
+        """Georeference one image and write GeoTIFF. Uses current settings."""
+        img = cv2.imread(img_path)
+        if img is None: return False
+        mk = self._method_key
+
+        if mk == "homo":
+            scale = self._get_scale()
+            warped, Hf, gt = _homo_warp_full(img, self._H, scale)
+            if self._aoi and self._preview_bgr is not None:
+                old_h, old_w = self._preview_bgr.shape[:2]
+                new_h, new_w = warped.shape[:2]
+                sx, sy = new_w/old_w, new_h/old_h
+                x1, y1, x2, y2 = self._aoi
+                x1, y1 = max(0, int(x1*sx)), max(0, int(y1*sy))
+                x2, y2 = min(new_w, int(x2*sx)), min(new_h, int(y2*sy))
+                warped = warped[y1:y2, x1:x2]
+                gt = (gt[0]+x1*gt[1], gt[1], 0, gt[3]+y1*gt[5], 0, gt[5])
+            # Alpha from non-black pixels
+            gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
+            alpha = np.where(gray > 1, 255, 0).astype(np.uint8)
+            return _write_geotiff(out_path, warped, alpha, gt,
+                                  self.user_epsg, self._lock)
+
+        elif mk == "proj":
+            hi, wi = img.shape[:2]
+            K = self._get_K_for((wi, hi))
+            rect, alpha = _rectify_image(
+                img, K, self._dist, self._rvec, self._tvec, self._centroid,
+                self._grid_x, self._grid_y, self._grid_z)
+            gt = (float(self._grid_x[0,0]),
+                  self._preview_gt[1], 0,
+                  float(self._grid_y[0,0]),
+                  0, self._preview_gt[5])
+            return _write_geotiff(out_path, rect, alpha, gt,
+                                  self.user_epsg, self._lock)
+
+        else:  # tps, poly1, poly2
+            df = self._get_working_df()
+            gcps, epsg = _make_gdal_gcps(df)
+            srs = osr.SpatialReference(); srs.ImportFromEPSG(epsg)
+            gsd = abs(self._preview_gt[1]) if self._preview_gt else _estimate_gsd(df)
+            if self._aoi and self._preview_gt:
+                gt = self._preview_gt
+                x1, y1, x2, y2 = self._aoi
+                te = [gt[0]+x1*gt[1], gt[3]+max(y1,y2)*gt[5],
+                      gt[0]+x2*gt[1], gt[3]+min(y1,y2)*gt[5]]
             else:
-                messagebox.showerror(
-                    "Error",
-                    "No EPSG code available.\n\n"
-                    "Enter one manually, or use a homography matrix "
-                    "with embedded CRS.")
-                return
+                ex, ey = df["Real_X"].values, df["Real_Y"].values
+                mg = max(50, (ex.max()-ex.min())*0.05)
+                te = [ex.min()-mg, ey.min()-mg, ex.max()+mg, ey.max()+mg]
+            _gdal_warp(img_path, out_path, gcps, srs.ExportToWkt(),
+                       epsg, mk, gsd, te, self._lock)
+            return True
+
+    # ---- # ---- # ----
+    #  Step 9: Batch Processing
+    # ---- # ---- # ----
+
+    def _browse_in(self):
+        f = filedialog.askdirectory()
+        if f:
+            self.input_folder = f
+            self._in_lbl.configure(text=os.path.basename(f), text_color="#81C784")
+
+    def _browse_out(self):
+        f = filedialog.askdirectory()
+        if f:
+            self.output_folder = f
+            self._out_lbl.configure(text=os.path.basename(f), text_color="#81C784")
+
+    def _collect_images(self, folder):
+        exts = ["*.jpg","*.jpeg","*.png","*.bmp","*.tif","*.tiff"]
+        imgs = []
+        for e in exts: imgs.extend(glob.glob(os.path.join(folder, e)))
+        return sorted(set(imgs))
+
+    def _process_all(self):
+        if not self.input_folder:
+            messagebox.showerror("Error", "Select input folder."); return
+        if not self.output_folder:
+            messagebox.showerror("Error", "Select output folder."); return
+        if not self._resolve_epsg(): return
+
+        mk = self._method_key
+        if mk == "homo" and self._H is None:
+            messagebox.showerror("Error", "Load homography."); return
+        if mk == "proj" and (self._rvec is None or self._grid_x is None):
+            messagebox.showerror("Error",
+                "Run Initial or Secondary Georeferencing first."); return
+        if mk in ("tps","poly1","poly2") and self._gcp_df is None:
+            messagebox.showerror("Error", "Load GCPs."); return
+
+        use_sub = self._subfolder_var.get()
 
         def _worker():
-            total, start_ts = len(self.image_list), time.time()
-            # Track input->output mapping for validation
-            img_to_input = {}
-            
-            for idx, path in enumerate(self.image_list, 1):
+            # Build file list
+            if use_sub:
+                subs = sorted([f.path for f in os.scandir(self.input_folder)
+                               if f.is_dir()])
+                if not subs:
+                    print("[Batch] No subfolders found. Processing top-level.")
+                    subs = [self.input_folder]
+            else:
+                subs = [self.input_folder]
+
+            all_jobs = []  # (input_path, output_path)
+            for sub in subs:
+                imgs = self._collect_images(sub)
+                if not imgs: continue
+                if use_sub and sub != self.input_folder:
+                    out_sub = os.path.join(self.output_folder,
+                                           os.path.basename(sub))
+                    os.makedirs(out_sub, exist_ok=True)
+                else:
+                    out_sub = self.output_folder
+                for ip in imgs:
+                    bn = os.path.splitext(os.path.basename(ip))[0]
+                    op = os.path.join(out_sub, f"{bn}.tif")
+                    all_jobs.append((ip, op))
+
+            if not all_jobs:
+                self.after(0, lambda: messagebox.showerror("Error",
+                    "No images found.")); return
+
+            n = len(all_jobs); t0 = time.time(); m2i = {}
+            print(f"\n[Batch] Processing {n} image(s)...")
+            self.after(0, lambda: self._prog.set(0))
+
+            for i, (ip, op) in enumerate(all_jobs, 1):
                 try:
-                    base = os.path.splitext(os.path.basename(path))[0]
-                    out  = os.path.join(self.output_folder, f"{base}.tif")
-                    self.georeference_and_save_image(path, out)
-                    img_to_input[out] = path
+                    self._save_single(ip, op)
+                    m2i[op] = ip
                 except Exception as e:
-                    print(f"Error processing {path}: {e}")
-                frac = idx / total
-                self.after(0, lambda f=frac: self.progress.set(f))
-                self.after(0, lambda t=self._eta_string(start_ts, frac): self.progress_eta.configure(text=t))
-            
-            # ========== VALIDATION AND REPROCESSING ==========
-            print("\n[Validation] Starting validation sweep...")
-            self.after(0, lambda: self.progress_eta.configure(text="Validating..."))
-            
-            # Track retry count per file
-            file_retry_counts = {}  # output_path -> retry_count
-            permanently_failed = []  # Files that failed after MAX_RETRIES_PER_FILE attempts
-            permanently_failed_paths = set()  # Fast lookup set
-            
-            validation_round = 0
-            max_validation_rounds = 20  # Safety limit
-            
-            while validation_round < max_validation_rounds:
-                validation_round += 1
-                corrupted_files = sweep_and_validate_batch(self.output_folder, use_adaptive_threshold=True)
-                
-                # Filter out permanently failed files
-                corrupted_files = [(p, r) for p, r in corrupted_files 
-                                   if p not in permanently_failed_paths]
-                
-                if not corrupted_files:
-                    print("[Validation] All files validated successfully!")
-                    break
-                
-                print(f"\n[Validation] Round {validation_round}: Found {len(corrupted_files)} corrupted file(s)")
-                
-                files_to_retry = []
-                for corrupted_path, reason in corrupted_files:
-                    current_retries = file_retry_counts.get(corrupted_path, 0)
-                    
-                    if current_retries >= MAX_RETRIES_PER_FILE:
-                        if corrupted_path not in permanently_failed_paths:
-                            permanently_failed.append((corrupted_path, reason))
-                            permanently_failed_paths.add(corrupted_path)
-                            print(f"  [GAVE UP] {os.path.basename(corrupted_path)} - "
-                                  f"failed after {MAX_RETRIES_PER_FILE} attempts")
+                    print(f"  Error: {os.path.basename(ip)}: {e}")
+                f = i / n
+                self.after(0, lambda f=f: self._prog.set(f))
+                self.after(0, lambda t=self._eta(t0, f):
+                           self._eta_lbl.configure(text=t))
+
+            # ── Validation sweep ──
+            print("\n[Validation] Checking outputs...")
+            self.after(0, lambda: self._eta_lbl.configure(text="Validating..."))
+            rc = {}; pf = []; pfs = set()
+            # Collect all output folders
+            out_folders = set(os.path.dirname(op) for _, op in all_jobs)
+            for _ in range(20):
+                bad = []
+                for folder in out_folders:
+                    bad.extend(sweep_and_validate(folder))
+                bad = [(p, r) for p, r in bad if p not in pfs]
+                if not bad:
+                    print("[Validation] All files OK!"); break
+                for cp, reason in bad:
+                    if rc.get(cp, 0) >= MAX_RETRIES:
+                        if cp not in pfs: pf.append((cp, reason)); pfs.add(cp)
                     else:
-                        files_to_retry.append((corrupted_path, reason))
-                        print(f"  - {os.path.basename(corrupted_path)}: {reason} "
-                              f"(attempt {current_retries + 1}/{MAX_RETRIES_PER_FILE})")
-                
-                if not files_to_retry:
-                    print(f"\n[Validation] No more files to retry.")
-                    break
-                
-                # Reprocess files
-                for corrupted_path, reason in files_to_retry:
-                    input_path = img_to_input.get(corrupted_path)
-                    if input_path and os.path.exists(input_path):
-                        try:
-                            print(f"[Reprocess] {os.path.basename(corrupted_path)}...")
-                            if os.path.exists(corrupted_path):
-                                os.remove(corrupted_path)
-                            self.georeference_and_save_image(input_path, corrupted_path)
-                            file_retry_counts[corrupted_path] = file_retry_counts.get(corrupted_path, 0) + 1
-                        except Exception as e:
-                            print(f"[Reprocess] Failed: {e}")
-                            file_retry_counts[corrupted_path] = file_retry_counts.get(corrupted_path, 0) + 1
-                    else:
-                        permanently_failed.append((corrupted_path, "Input file not found"))
-                        permanently_failed_paths.add(corrupted_path)
-            
-            # Final summary
-            if permanently_failed:
-                print(f"\n" + "="*60)
-                print(f"[WARNING] {len(permanently_failed)} FILE(S) COULD NOT BE PROCESSED:")
-                print("="*60)
-                for path, reason in permanently_failed:
-                    print(f"  ✗ {os.path.basename(path)}: {reason}")
-                print("="*60 + "\n")
-                
-                failed_names = "\n".join([os.path.basename(p) for p, _ in permanently_failed[:10]])
-                if len(permanently_failed) > 10:
-                    failed_names += f"\n... and {len(permanently_failed) - 10} more"
+                        inp = m2i.get(cp)
+                        if inp and os.path.exists(inp):
+                            try:
+                                if os.path.exists(cp): os.remove(cp)
+                                self._save_single(inp, cp)
+                            except: pass
+                            rc[cp] = rc.get(cp, 0) + 1
+                        else:
+                            pf.append((cp, "Input not found")); pfs.add(cp)
+
+            elapsed = time.time() - t0
+            m, s = divmod(int(elapsed), 60)
+            print(f"\n[Batch] Complete in {m}m {s}s")
+
+            self.after(0, lambda: self._prog.set(1.0))
+            self.after(0, lambda: self._eta_lbl.configure(text="Done"))
+
+            if pf:
+                ns = "\n".join(os.path.basename(p) for p, _ in pf[:10])
                 self.after(0, lambda: messagebox.showwarning(
-                    "Some Files Failed", 
-                    f"{len(permanently_failed)} file(s) could not be processed after "
-                    f"{MAX_RETRIES_PER_FILE} attempts each:\n\n{failed_names}"
-                ))
-            
-            # ========== END VALIDATION ==========
-            
-            self.after(0, lambda: self.progress_eta.configure(text="Done"))
-            if not permanently_failed:
-                self.after(0, lambda: messagebox.showinfo("Complete", "Processing finished and validated!"))
+                    "Some Failed", f"{len(pf)} file(s) failed:\n\n{ns}"))
+            else:
+                ok = n - len(pf)
+                self.after(0, lambda: messagebox.showinfo(
+                    "Complete", f"All {ok} files processed and validated!"))
 
         threading.Thread(target=_worker, daemon=True).start()
 
+    # ---- # ---- # ----
+    #  Reset
+    # ---- # ---- # ----
 
-    
-    def select_batch_main_folder(self):
-        folder = filedialog.askdirectory()
-        if folder:
-            self.batch_main_folder = folder
-            self.batch_main_label.configure(text=f"Main Folder: {folder}")
-    
-    def start_batch_process(self):
-        if not self.batch_main_folder:
-            messagebox.showerror("Error", "Please select a MAIN folder first.")
-            return
-        if not self.output_folder:
-            messagebox.showerror("Error", "Please select an OUTPUT folder.")
-            return
-        if self.H is None:
-            messagebox.showerror("Error", "Load a homography matrix first.")
-            return
-        try:
-            self.user_epsg = int(self.epsg_entry.get())
-            if self.matrix_epsg and self.user_epsg != self.matrix_epsg:
-                print(f"[CRS] User EPSG:{self.user_epsg} overrides "
-                      f"matrix EPSG:{self.matrix_epsg}")
-        except ValueError:
-            if self.matrix_epsg:
-                self.user_epsg = self.matrix_epsg
-                print(f"[CRS] Using EPSG:{self.matrix_epsg} from "
-                      f"homography matrix")
-            else:
-                messagebox.showerror(
-                    "Error",
-                    "No EPSG code available.\n\n"
-                    "Enter one manually, or use a homography matrix "
-                    "with embedded CRS.")
-                return
+    def _reset(self):
+        if not messagebox.askyesno("Reset", "Clear everything?"): return
+        self._img_path = ""; self._H = None; self._homo_epsg = None
+        self._K = None; self._dist = None; self._cal_img_size = None
+        self._gcp_df = None; self._gcp_epsg = None
+        self._rvec = self._tvec = self._centroid = None
+        self._grid_x = self._grid_y = self._grid_z = None
+        self._preview_bgr = None; self._preview_gt = None
+        self._preview_Hf = None; self._aoi = None
+        self._excluded_gcps = []; self._scale = 4.0
+        self.image_list = []; self.output_folder = ""
+        self.input_folder = ""; self.user_epsg = None
+        for lbl, txt in [(self._orig_lbl,"Original"),
+                         (self._init_lbl,"Initial Georef"),
+                         (self._sec_lbl,"Secondary Georef")]:
+            lbl.configure(image=None, text=txt); lbl.image = None
+        for lbl in [self._img_lbl, self._homo_lbl, self._gcp_lbl,
+                    self._cal_lbl, self._in_lbl, self._out_lbl]:
+            lbl.configure(text="~", text_color="gray")
+        for ent in [self._aoi_ent, self._excl_ent, self._epsg_ent,
+                    self._elev_ent]:
+            ent.delete(0, "end")
+        self._scale_ent.delete(0, "end"); self._scale_ent.insert(0, "4")
+        self._aoi_status.configure(text="AOI: not set", text_color="gray")
+        self._rec_scale_lbl.configure(text="")
+        self._prog.set(0); self._eta_lbl.configure(text="ETA: ~")
+        self._subfolder_var.set(False)
+        print("\n" + "="*50 + "\n  Reset complete\n" + "="*50 + "\n")
 
-        print(f"Batch process has started (≤ {MAX_BATCH_WORKERS} workers)\n")
 
-        def _batch_thread():
-            all_subs = [f.path for f in os.scandir(self.batch_main_folder) if f.is_dir()]
-            if not all_subs:
-                self.after(0, lambda: messagebox.showerror("Error", "No sub-folders found."))
-                return
-
-            processed = {d for d in os.listdir(self.output_folder)
-                           if os.path.isdir(os.path.join(self.output_folder, d))}
-            todo = [s for s in sorted(all_subs) if os.path.basename(s) not in processed]
-
-            if (skipped := len(all_subs) - len(todo)):
-                print(f"[Batch] Skipping {skipped} sub-folder(s) already done.\n")
-            if not todo:
-                self.after(0, lambda: self.batch_progress.set(1.0))
-                self.after(0, lambda: self.batch_eta_label.configure(text="Done"))
-                self.after(0, lambda: messagebox.showinfo("Batch Complete", "All sub-folders already processed."))
-                return
-
-            total, start_ts = len(todo), time.time()
-            self.after(0, lambda: self.batch_progress.set(0))
-            
-            # Track input->output mapping for validation/reprocessing
-            img_to_input = {}  # output_path -> input_path
-
-            def _process_sub(sub):
-                """Process a subfolder and return list of (input_path, output_path) tuples."""
-                processed_files = []
-                imgs = sorted(glob.glob(os.path.join(sub, "*.[jp][pn]*g")) +
-                              glob.glob(os.path.join(sub, "*.tif")) +
-                              glob.glob(os.path.join(sub, "*.bmp")))
-                if not imgs:
-                    print(f"[Batch] Skipping empty folder: {sub}")
-                    return processed_files
-                out_sub = os.path.join(self.output_folder, os.path.basename(sub))
-                os.makedirs(out_sub, exist_ok=True)
-                for img in imgs:
-                    try:
-                        out = os.path.join(out_sub,
-                                           os.path.splitext(os.path.basename(img))[0] + ".tif")
-                        self.georeference_and_save_image(img, out)
-                        processed_files.append((img, out))
-                    except Exception as e: 
-                        print(f"[Batch] Error in {img}: {e}")
-                return processed_files
-
-            # pool inside the background thread
-            self.executor = concurrent.futures.ThreadPoolExecutor(
-                max_workers=MAX_BATCH_WORKERS, thread_name_prefix="batch")
-            with self.executor as executor:
-                fut2sub = {executor.submit(_process_sub, s): s for s in todo}
-                for idx, fut in enumerate(concurrent.futures.as_completed(fut2sub), 1):
-                    if fut.exception():
-                        print(f"[Batch] Exception in {fut2sub[fut]}: {fut.exception()}")
-                    else:
-                        # Collect processed file mappings
-                        for inp, out in (fut.result() or []):
-                            img_to_input[out] = inp
-                    frac = idx / total
-                    self.after(0, lambda f=frac: self.batch_progress.set(f))
-                    if idx:
-                        remaining = (total - idx) / (idx / (time.time() - start_ts))
-                    else:
-                        remaining = 0
-                    m, s = divmod(int(remaining), 60)
-                    eta_text = f"ETA: {m}m {s}s" if m else f"ETA: {s}s"
-                    self.after(0, lambda t=eta_text: self.batch_eta_label.configure(text=t))
-            self.executor = None
-            
-            elapsed = time.time() - start_ts
-            m, s = divmod(elapsed, 60)
-            print(f"\nInitial batch process complete in {int(m)} min {s:.1f} s.")
-            
-            # ========== VALIDATION AND REPROCESSING SWEEP ==========
-            print("\n[Validation] Starting post-processing validation sweep...")
-            self.after(0, lambda: self.batch_eta_label.configure(text="Validating..."))
-            
-            # Track retry count per file
-            file_retry_counts = {}  # output_path -> retry_count
-            permanently_failed = []  # Files that failed after MAX_RETRIES_PER_FILE attempts
-            permanently_failed_paths = set()  # Fast lookup set
-            
-            validation_round = 0
-            max_validation_rounds = 20  # Safety limit to prevent infinite loops
-            
-            while validation_round < max_validation_rounds:
-                validation_round += 1
-                
-                # Sweep all output subfolders
-                corrupted_files = []
-                out_subs = [f.path for f in os.scandir(self.output_folder) if f.is_dir()]
-                
-                for out_sub in out_subs:
-                    sub_corrupted = sweep_and_validate_batch(out_sub, use_adaptive_threshold=True)
-                    corrupted_files.extend(sub_corrupted)
-                
-                # Filter out files that have already permanently failed
-                corrupted_files = [(p, r) for p, r in corrupted_files 
-                                   if p not in permanently_failed_paths]
-                
-                if not corrupted_files:
-                    print(f"[Validation] All files validated successfully!")
-                    break
-                
-                print(f"\n[Validation] Round {validation_round}: Found {len(corrupted_files)} corrupted file(s)")
-                
-                # Reprocess corrupted files (sequentially to avoid race conditions)
-                files_to_retry = []
-                for corrupted_path, reason in corrupted_files:
-                    # Check retry count for this file
-                    current_retries = file_retry_counts.get(corrupted_path, 0)
-                    
-                    if current_retries >= MAX_RETRIES_PER_FILE:
-                        # This file has exceeded max retries - mark as permanently failed
-                        if corrupted_path not in permanently_failed_paths:
-                            permanently_failed.append((corrupted_path, reason))
-                            permanently_failed_paths.add(corrupted_path)
-                            print(f"  [GAVE UP] {os.path.basename(corrupted_path)} - "
-                                  f"failed after {MAX_RETRIES_PER_FILE} attempts")
-                    else:
-                        files_to_retry.append((corrupted_path, reason))
-                        print(f"  - {os.path.basename(corrupted_path)}: {reason} "
-                              f"(attempt {current_retries + 1}/{MAX_RETRIES_PER_FILE})")
-                
-                if not files_to_retry:
-                    # All remaining corrupted files have exceeded retry limit
-                    print(f"\n[Validation] No more files to retry.")
-                    break
-                
-                # Reprocess files that haven't exceeded retry limit
-                reprocessed = 0
-                for corrupted_path, reason in files_to_retry:
-                    input_path = img_to_input.get(corrupted_path)
-                    if input_path and os.path.exists(input_path):
-                        try:
-                            print(f"[Reprocess] {os.path.basename(corrupted_path)}...")
-                            # Delete corrupted file first
-                            if os.path.exists(corrupted_path):
-                                os.remove(corrupted_path)
-                            # Reprocess
-                            self.georeference_and_save_image(input_path, corrupted_path)
-                            reprocessed += 1
-                            # Increment retry count
-                            file_retry_counts[corrupted_path] = file_retry_counts.get(corrupted_path, 0) + 1
-                        except Exception as e:
-                            print(f"[Reprocess] Failed to reprocess {corrupted_path}: {e}")
-                            file_retry_counts[corrupted_path] = file_retry_counts.get(corrupted_path, 0) + 1
-                    else:
-                        print(f"[Reprocess] Cannot find input for {corrupted_path}")
-                        permanently_failed.append((corrupted_path, "Input file not found"))
-                        permanently_failed_paths.add(corrupted_path)
-                
-                print(f"[Validation] Reprocessed {reprocessed} file(s)")
-            
-            # Final summary
-            if permanently_failed:
-                print(f"\n" + "="*60)
-                print(f"[WARNING] {len(permanently_failed)} FILE(S) COULD NOT BE PROCESSED:")
-                print("="*60)
-                for path, reason in permanently_failed:
-                    print(f"  ✗ {os.path.basename(path)}")
-                    print(f"    Reason: {reason}")
-                    print(f"    Full path: {path}")
-                print("="*60)
-                print("These files may have issues with the source image or parameters.")
-                print("Consider checking them manually.\n")
-                
-                # Show message box with failed files
-                failed_names = "\n".join([os.path.basename(p) for p, _ in permanently_failed[:10]])
-                if len(permanently_failed) > 10:
-                    failed_names += f"\n... and {len(permanently_failed) - 10} more"
-                self.after(0, lambda: messagebox.showwarning(
-                    "Some Files Failed", 
-                    f"{len(permanently_failed)} file(s) could not be processed after "
-                    f"{MAX_RETRIES_PER_FILE} attempts each:\n\n{failed_names}\n\n"
-                    "Check the console for details."
-                ))
-            
-            if validation_round >= max_validation_rounds:
-                print(f"\n[WARNING] Reached maximum validation rounds ({max_validation_rounds}). Stopping.")
-            
-            # ========== END VALIDATION ==========
-          
-            self.after(0, lambda: self.batch_progress.set(1.0))
-            self.after(0, lambda: self.batch_eta_label.configure(text="Done"))
-            
-            if not permanently_failed:
-                self.after(0, lambda: messagebox.showinfo("Batch Complete", "All files processed and validated successfully!"))
-            
-            print("\nBatch process complete\n")
-
-        threading.Thread(target=_batch_thread, daemon=True).start()
-
-    # initialise_components and other helper methods … keep original code here
-    # ---------------------------------------------------------------------
+# %%
+#  Entry point
 
 
 def main():
-    root = ctk.CTk()
-    root.withdraw()
+    root = ctk.CTk(); root.withdraw()
     GeoReferenceModule(master=root).mainloop()
-
 
 if __name__ == "__main__":
     main()
