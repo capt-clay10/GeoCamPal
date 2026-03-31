@@ -83,6 +83,7 @@ class HSVMaskEditingMixin:
         self.edit_canvas.bind("f", self._btn_freehand)
         self.edit_canvas.bind("e", self._btn_create_edge)
         self.edit_canvas.bind("p", self._btn_create_polygon)
+        self.edit_canvas.bind("c", self._btn_continue_line)
 
         # make sure the canvas keeps focus so single-letter keys work
         self.edit_canvas.bind("<Button-1>", lambda e: self.edit_canvas.focus_set(), add="+")
@@ -101,7 +102,7 @@ class HSVMaskEditingMixin:
 
     def _unbind_edit_shortcuts(self):
         if hasattr(self, "edit_canvas"):
-            for seq in ("d", "m", "f", "e", "p",
+            for seq in ("d", "m", "f", "e", "p", "c",
                         "<Double-Button-1>", "<Double-1>",
                         "u", "U", "r", "R"):
                 try:
@@ -141,6 +142,10 @@ class HSVMaskEditingMixin:
         self.create_new_polygon()
         self._refocus_canvas()
 
+    def _btn_continue_line(self, *_, **__):
+        self.continue_line()
+        self._refocus_canvas()
+
     def _btn_mode_delete(self, *_, **__):
         self.set_vertex_mode("delete")
         self._refocus_canvas()
@@ -169,23 +174,27 @@ class HSVMaskEditingMixin:
             return
         self._pending_preview = False
 
-        # fast path: operate on cached zoom-sized base, cheap math
-        base = self._ensure_scaled_base_for_zoom(high_quality=False)
-        preview = self._apply_edit_ops_fast(base, high_quality=False)
-        self._set_edit_preview(preview)
+        # Apply adjustments to the small proxy (fast, max ~2000 px)
+        self._apply_adjustments_to_proxy(high_quality=False)
+        # Invalidate viewport cache so _render_viewport picks up the adjusted proxy
+        self._invalidate_viewport_cache()
+        self._render_viewport(high_quality=False)
+        self._refresh_overlays()
 
         if self._pending_preview:
             self._preview_after_id = self.after(33, self._flush_preview)
 
     def _on_adjust_commit(self, _evt=None):
         """Mouse released — do one nicer pass (still at current zoom)."""
-        base = self._ensure_scaled_base_for_zoom(high_quality=True)
-        preview = self._apply_edit_ops_fast(base, high_quality=True)
-        self._set_edit_preview(preview)
+        self._apply_adjustments_to_proxy(high_quality=True)
+        self._invalidate_viewport_cache()
+        self._render_viewport(high_quality=True)
+        self._refresh_overlays()
 
     def _invalidate_zoom_cache(self):
         self._zoom_cache["zoom"] = None
         self._zoom_cache["img"] = None
+        self._invalidate_viewport_cache()
 
     def _ensure_scaled_base_for_zoom(self, high_quality=False):
         """
@@ -322,6 +331,25 @@ class HSVMaskEditingMixin:
         self.edit_canvas_container.grid_rowconfigure(0, weight=1)
         self.edit_canvas_container.grid_columnconfigure(0, weight=1)
 
+        # --- Viewport rendering state for this edit session ---
+        self._adjusted_proxy = None
+        self._vp_render_bounds = None
+        self._vp_render_zoom = None
+        self._scroll_job = None
+        self._bg_photo_ref = None
+
+        # Intercept scroll commands so viewport re-renders on pan/scroll
+        def _yscroll_cb(first, last):
+            v_scroll.set(first, last)
+            self._on_scroll_update()
+
+        def _xscroll_cb(first, last):
+            h_scroll.set(first, last)
+            self._on_scroll_update()
+
+        self.edit_canvas.configure(yscrollcommand=_yscroll_cb,
+                                   xscrollcommand=_xscroll_cb)
+
         # Bindings for editing
         self.edit_canvas.bind("<Configure>", self.redraw_canvas)
         self.edit_canvas.bind("<MouseWheel>", self.on_mousewheel)
@@ -339,98 +367,119 @@ class HSVMaskEditingMixin:
         except Exception:
             pass
 
-        # Control buttons
-        self.control_frame = ctk.CTkFrame(self.top_center_frame)
-        self.control_frame.pack(side="bottom", fill="x", pady=5)
+        # ── Expand the display window while in edit mode ──
+        try:
+            disp_win = self.image_display_window
+            screen_w = disp_win.winfo_screenwidth()
+            screen_h = disp_win.winfo_screenheight()
+            # use up to 95% of screen when editing
+            new_w = min(int(screen_w * 0.95), max(1400, disp_win.winfo_width()))
+            new_h = min(int(screen_h * 0.92), max(900, disp_win.winfo_height()))
+            x = max(0, (screen_w - new_w) // 2)
+            y = max(0, (screen_h - new_h) // 2)
+            disp_win.geometry(f"{new_w}x{new_h}+{x}+{y}")
+        except Exception:
+            pass
 
-        mode_frame = ctk.CTkFrame(self.control_frame)
-        mode_frame.pack(side="top", pady=2)
-
-        # Delete / Move vertex mode
-        self.btn_delete_mode = ctk.CTkButton(
-            mode_frame, text="Delete Vertex", command=self._btn_mode_delete
+        # ── Control buttons – use scrollable frame for small-screen safety ──
+        self.control_frame = ctk.CTkScrollableFrame(
+            self.top_center_frame, height=180, orientation="vertical"
         )
-        self.btn_delete_mode.pack(side="left", padx=3)
+        self.control_frame.pack(side="bottom", fill="x", pady=2)
+
+        # Adaptive button width helper
+        BTN_W = 105     # compact width so all buttons fit on 1200-px screens
+        BTN_H = 28
+        BTN_FONT = ("Arial", 11)
+
+        # ── ROW 1: Create Line, Create Polygon, Add/Move Vertex, Continue Line, Freehand ──
+        row1 = ctk.CTkFrame(self.control_frame)
+        row1.pack(side="top", fill="x", pady=2)
+
+        ctk.CTkButton(row1, text="Create Line", width=BTN_W, height=BTN_H,
+                       font=BTN_FONT, command=self._btn_create_edge
+                       ).pack(side="left", padx=2, pady=1)
+        ctk.CTkButton(row1, text="Create Polygon", width=BTN_W, height=BTN_H,
+                       font=BTN_FONT, command=self._btn_create_polygon
+                       ).pack(side="left", padx=2, pady=1)
         self.btn_add_mode = ctk.CTkButton(
-            mode_frame, text="Add/Move Vertex", command=self._btn_mode_add
-        )
-        self.btn_add_mode.pack(side="left", padx=3)
+            row1, text="Add/Move Vertex", width=BTN_W, height=BTN_H,
+            font=BTN_FONT, command=self._btn_mode_add)
+        self.btn_add_mode.pack(side="left", padx=2, pady=1)
+        ctk.CTkButton(row1, text="Continue Line", width=BTN_W, height=BTN_H,
+                       font=BTN_FONT, command=self._btn_continue_line
+                       ).pack(side="left", padx=2, pady=1)
+        ctk.CTkButton(row1, text="Freehand", width=BTN_W, height=BTN_H,
+                       font=BTN_FONT, command=self._btn_freehand
+                       ).pack(side="left", padx=2, pady=1)
 
-        # Freehand drawing
-        btn_freehand = ctk.CTkButton(mode_frame, text="Freehand", command=self._btn_freehand)
-        btn_freehand.pack(side="left", padx=3)
+        # ── ROW 2: Zoom In, Zoom Out, Undo, Redo, Delete Vertex, Reset, Delete All ──
+        row2 = ctk.CTkFrame(self.control_frame)
+        row2.pack(side="top", fill="x", pady=2)
 
-        # Create new edge / polygon
-        btn_create_edge = ctk.CTkButton(
-            mode_frame, text="Create New Edge", command=self._btn_create_edge
-        )
-        btn_create_edge.pack(side="left", padx=3)
-        btn_create_polygon = ctk.CTkButton(
-            mode_frame, text="Create Polygon", command=self._btn_create_polygon
-        )
-        btn_create_polygon.pack(side="left", padx=3)
+        ctk.CTkButton(row2, text="Zoom In", width=BTN_W, height=BTN_H,
+                       font=BTN_FONT, command=lambda: self.adjust_zoom(1.2)
+                       ).pack(side="left", padx=2, pady=1)
+        ctk.CTkButton(row2, text="Zoom Out", width=BTN_W, height=BTN_H,
+                       font=BTN_FONT, command=lambda: self.adjust_zoom(0.8)
+                       ).pack(side="left", padx=2, pady=1)
+        ctk.CTkButton(row2, text="Undo", width=BTN_W, height=BTN_H,
+                       font=BTN_FONT, command=self._btn_undo
+                       ).pack(side="left", padx=2, pady=1)
+        ctk.CTkButton(row2, text="Redo", width=BTN_W, height=BTN_H,
+                       font=BTN_FONT, command=self._btn_redo
+                       ).pack(side="left", padx=2, pady=1)
+        self.btn_delete_mode = ctk.CTkButton(
+            row2, text="Delete Vertex", width=BTN_W, height=BTN_H,
+            font=BTN_FONT, command=self._btn_mode_delete)
+        self.btn_delete_mode.pack(side="left", padx=2, pady=1)
+        ctk.CTkButton(row2, text="Reset", width=BTN_W, height=BTN_H,
+                       font=BTN_FONT, command=self.reset_to_initial,
+                       fg_color="red", text_color="white"
+                       ).pack(side="left", padx=2, pady=1)
+        ctk.CTkButton(row2, text="Delete All", width=BTN_W, height=BTN_H,
+                       font=BTN_FONT, command=self.delete_all_vertices,
+                       fg_color="red", text_color="white"
+                       ).pack(side="left", padx=2, pady=1)
 
-        self.reset_btn = ctk.CTkButton(mode_frame, text="Reset", command=self.reset_to_initial,fg_color="red", text_color="white")
-        self.reset_btn.pack(side="left", padx=3)
-        
-        btn_delete_all = ctk.CTkButton(
-            mode_frame, text="Delete All",
-            command=self.delete_all_vertices, fg_color="red", text_color="white"
-        )
-        btn_delete_all.pack(side="left", padx=3)
-
-        # Undo / Reset / Confirm (+ Redo)
-        btn_frame = ctk.CTkFrame(self.control_frame)
-        btn_frame.pack(side="top", pady=5)
-
-        self.undo_btn = ctk.CTkButton(btn_frame, text="Undo", command=self._btn_undo)
-        self.undo_btn.pack(side="left", padx=5)
-
-
-        redo_btn = ctk.CTkButton(btn_frame, text="Redo", command=self._btn_redo)
-        redo_btn.pack(side="left", padx=5)
+        # ── ROW 3: Confirm Feature, ◀ Prev Polygon, feature list label, Next Polygon ▶ ──
+        row3 = ctk.CTkFrame(self.control_frame)
+        row3.pack(side="top", fill="x", pady=2)
 
         self.confirm_button = ctk.CTkButton(
-            btn_frame, text="Confirm Feature",
-            command=self.confirm_feature_cuts, fg_color="#0F52BA", text_color="white"
+            row3, text="Confirm Feature", width=BTN_W + 10, height=BTN_H,
+            font=BTN_FONT, command=self.confirm_feature_cuts,
+            fg_color="#0F52BA", text_color="white"
         )
-        self.confirm_button.pack(side="left", padx=5)
+        self.confirm_button.pack(side="left", padx=4, pady=1)
 
-        # Polygon navigation
-        nav_frame = ctk.CTkFrame(self.control_frame)
-        nav_frame.pack(side="top", pady=2)
-
-        ctk.CTkButton(nav_frame, text="◀ Prev Polygon", width=120,
-                      command=self._edit_prev_polygon, fg_color="white", text_color='black').pack(side="left", padx=3)
+        ctk.CTkButton(row3, text="◀ Prev", width=80, height=BTN_H,
+                       font=BTN_FONT, command=self._edit_prev_polygon,
+                       fg_color="white", text_color='black'
+                       ).pack(side="left", padx=2, pady=1)
         self._poly_nav_label = ctk.CTkLabel(
-            nav_frame, text="", font=("Arial", 10), width=200)
-        self._poly_nav_label.pack(side="left", padx=5)
-        ctk.CTkButton(nav_frame, text="Next Polygon ▶", width=120,
-                      command=self._edit_next_polygon, fg_color="white", text_color='black').pack(side="left", padx=3)
+            row3, text="", font=("Arial", 10), width=220)
+        self._poly_nav_label.pack(side="left", padx=4)
+        ctk.CTkButton(row3, text="Next ▶", width=80, height=BTN_H,
+                       font=BTN_FONT, command=self._edit_next_polygon,
+                       fg_color="white", text_color='black'
+                       ).pack(side="left", padx=2, pady=1)
         self._update_poly_nav_label()
 
-        # Zoom controls
-        ctk.CTkButton(btn_frame, text="Zoom In",
-                      command=lambda: self.adjust_zoom(1.2)).pack(side="left", padx=2)
-        ctk.CTkButton(btn_frame, text="Zoom Out",
-                      command=lambda: self.adjust_zoom(0.8)).pack(side="left", padx=2)
-        ctk.CTkButton(btn_frame, text="Reset View",
-                      command=self.reset_view).pack(side="left", padx=2)
-
-        # Build the non-destructive preview adjust row (Saturation / Exposure / Highlights)
+        # ── ROW 4: Saturation / Exposure / Highlights sliders ──
         self._build_adjust_row(self.control_frame)
         self._install_slider_handlers()
 
-
+        # ── Info label ──
         info_label = ctk.CTkLabel(
             self.control_frame,
-            text="Scroll to zoom | Double-click (delete/add) depending on mode | "
-                 "Keys: d=delete, m=move, f=freehand, e=new edge, p=new polygon, U=undo, R=redo",
-            font=("Arial", 10)
+            text="Scroll=zoom | Dbl-click=delete/add | "
+                 "Keys: d=del, m=move, f=freehand, e=line, p=polygon, c=continue, U=undo, R=redo",
+            font=("Arial", 9)
         )
-        info_label.pack(side="top", pady=2)
+        info_label.pack(side="top", pady=1)
 
-        # enable edit-mode shortcuts (binds d/m/f/e/p + U/R and keeps canvas focused)
+        # enable edit-mode shortcuts (binds d/m/f/e/p/c + U/R and keeps canvas focused)
         self._bind_edit_shortcuts()
 
         # Initial draw
@@ -441,6 +490,23 @@ class HSVMaskEditingMixin:
 
 
     def create_new_edge(self):
+        """
+        Start creating a new polyline.  Non-destructive: if there are
+        existing edited points they are saved to the session features
+        first, so only Reset / Delete All are destructive.
+        """
+        # Save current points to session if they form a valid feature
+        if len(self.edited_edge_points) >= 2:
+            ftype = "polygon" if self.is_polygon_mode else "polyline"
+            proxy_s = getattr(self, '_edit_proxy_scale', 1.0)
+            if proxy_s != 1.0 and proxy_s > 0:
+                inv = 1.0 / proxy_s
+                saved_pts = [[x * inv, y * inv] for x, y in self.edited_edge_points]
+            else:
+                saved_pts = [list(pt) for pt in self.edited_edge_points]
+            self._edit_session_features.append((ftype, saved_pts))
+            self._update_poly_nav_label()
+
         self.edited_edge_points = []
         self.edit_history = []
         self._record_history()
@@ -451,14 +517,102 @@ class HSVMaskEditingMixin:
         self.edit_canvas.bind("<Button-1>", self.on_canvas_single_click)
 
     def create_new_polygon(self):
+        """
+        Start creating a new polygon.  Non-destructive: if there are
+        existing edited points they are saved to the session features first.
+        Double-click to close the polygon (in addition to clicking near
+        the first vertex).
+        """
+        # Save current points to session if they form a valid feature
+        if len(self.edited_edge_points) >= 2:
+            ftype = "polygon" if self.is_polygon_mode else "polyline"
+            proxy_s = getattr(self, '_edit_proxy_scale', 1.0)
+            if proxy_s != 1.0 and proxy_s > 0:
+                inv = 1.0 / proxy_s
+                saved_pts = [[x * inv, y * inv] for x, y in self.edited_edge_points]
+            else:
+                saved_pts = [list(pt) for pt in self.edited_edge_points]
+            self._edit_session_features.append((ftype, saved_pts))
+            self._update_poly_nav_label()
+
         self.edited_edge_points = []
         self.edit_history = []
         self._record_history()
         self.redraw_canvas()
         self.creation_mode = True
         self.is_polygon_mode = True
+        self.edit_canvas.bind("<Button-1>", self.on_canvas_single_click)
+        self.edit_canvas.bind("<Double-Button-1>", self._close_polygon_double_click)
+
+    def _close_polygon_double_click(self, event):
+        """
+        Close the polygon being created on double-click.
+
+        Tk fires <Button-1> before <Double-Button-1>, so the single-click
+        handler has already appended a point.  We remove that extra point
+        before closing, so the polygon ends at the last intentional vertex.
+        """
+        if not self.is_polygon_mode or not getattr(self, 'creation_mode', False):
+            return
+
+        # Remove the spurious point added by the preceding <Button-1>
+        # if len(self.edited_edge_points) > 3:
+        #     self.edited_edge_points.pop()
+
+        if len(self.edited_edge_points) < 3:
+            print("[Edit] Need at least 3 vertices to close a polygon.")
+            return
+
+        # Build closed polygon
+        closed_points = self.edited_edge_points[:]
+        if closed_points[-1] != closed_points[0]:
+            closed_points.append(closed_points[0])
+
+        # Scale from proxy coords back to full-image coords
+        proxy_s = getattr(self, '_edit_proxy_scale', 1.0)
+        if proxy_s != 1.0 and proxy_s > 0:
+            inv = 1.0 / proxy_s
+            closed_points = [[x * inv, y * inv] for x, y in closed_points]
+
+        self._edit_session_features.append(("polygon", closed_points))
+        print("Polygon closed (double-click) and added to session. "
+              "You can create more or press Confirm.")
+
+        self.edited_edge_points = []
+        self.edit_history = []
+        self.selected_vertex = None
+        self._record_history()
+        self._update_poly_nav_label()
+        self.redraw_canvas()
+
+    def continue_line(self):
+        """
+        Continue adding points to the current polyline from its last vertex.
+        Unlike Create Line, this does NOT save existing points to session or
+        clear them.  New clicks are appended to the end of the existing
+        edited_edge_points, seamlessly extending the line.
+
+        If there are no existing points this behaves like Create Line.
+        """
+        # If we were in add/move/delete mode, switch to creation mode
+        # but keep existing points.
+        if getattr(self, "creation_mode", False):
+            # Already in creation mode — do nothing special
+            print("[Edit] Already in creation/continue mode.")
+            return
+
+        self._record_history()
+        self.creation_mode = True
+        # Keep is_polygon_mode as-is (if user was editing a polygon, continue as polygon)
+
         self.edit_canvas.unbind("<Double-Button-1>")
         self.edit_canvas.bind("<Button-1>", self.on_canvas_single_click)
+
+        n = len(self.edited_edge_points)
+        if n > 0:
+            print(f"[Edit] Continue line from point {n} (last vertex).")
+        else:
+            print("[Edit] Continue line — starting fresh (no existing points).")
 
 
     def confirm_feature_cuts(self):
@@ -528,6 +682,13 @@ class HSVMaskEditingMixin:
         self._redraw_job = None
         self._preview_after_id = None
         self._pending_preview = False
+
+        # Clear viewport rendering state
+        self._adjusted_proxy = None
+        self._vp_render_bounds = None
+        self._vp_render_zoom = None
+        self._scroll_job = None
+        self._bg_photo_ref = None
 
         # Destroy the editing UI elements
         if hasattr(self, 'edit_canvas'):
@@ -861,13 +1022,12 @@ class HSVMaskEditingMixin:
     def _apply_preview_to_bg(self):
         """
         Lightweight preview updater that respects the current zoom.
+        Now delegates to viewport renderer (which uses _adjusted_proxy
+        if sliders are active).
         """
         try:
-            base = self._ensure_scaled_base_for_zoom(high_quality=False)
-            if base is None:
-                return
-            preview = self._apply_edit_ops_fast(base, high_quality=False)
-            self._set_edit_preview(preview)  # writes to bg_image_id
+            self._invalidate_viewport_cache()
+            self._render_viewport()
         except Exception:
             # Fallback: at least keep overlays fresh if something goes wrong
             if hasattr(self, "_refresh_overlays"):
@@ -880,36 +1040,191 @@ class HSVMaskEditingMixin:
         return round(float(getattr(self, "zoom_scale", 1.0)), 1)
 
     def _ensure_bg_cached(self, high_quality=False):
-        if self.full_image is None or not hasattr(self, "edit_canvas"):
+        """Backward-compatible entry point — delegates to viewport renderer."""
+        self._render_viewport(high_quality=high_quality)
+
+    # ─── Viewport-based rendering (tile-free zoom optimisation) ───
+
+    def _get_viewport_bounds(self):
+        """Return visible viewport bounds in canvas coordinates."""
+        try:
+            x1 = int(self.edit_canvas.canvasx(0))
+            y1 = int(self.edit_canvas.canvasy(0))
+            x2 = int(self.edit_canvas.canvasx(self.edit_canvas.winfo_width()))
+            y2 = int(self.edit_canvas.canvasy(self.edit_canvas.winfo_height()))
+            return (x1, y1, x2, y2)
+        except Exception:
+            return None
+
+    def _render_viewport(self, high_quality=False):
+        """
+        Render only the visible portion of the image (plus overscan margin).
+
+        Instead of resizing the *entire* proxy to zoom scale (which at 5×
+        on a 2000 px proxy means a 10 000 × 10 000 image), this method
+        crops the source to the visible viewport in image coords, then
+        scales only that small crop.  Result: memory and CPU stay constant
+        regardless of zoom level.
+
+        Coordinate accuracy
+        ───────────────────
+        Annotations are stored in image coords and mapped to canvas coords
+        via ``_scaled(x, y) = (x * zoom, y * zoom)``.  The viewport crop
+        is placed at the exact canvas position matching its image origin,
+        so overlay alignment is pixel-perfect.
+        """
+        if not hasattr(self, "edit_canvas") or self.full_image is None:
             return
-        # Use proxy if available (for large images), else full_image
+
+        # Choose source: adjusted proxy → raw proxy → full image
+        src = getattr(self, '_adjusted_proxy', None)
+        if src is None:
+            src = getattr(self, '_edit_proxy', None)
+        if src is None:
+            src = self.full_image
+
+        h_src, w_src = src.shape[:2]
+        z = max(0.1, min(5.0, float(self.zoom_scale)))
+
+        # Full zoomed dimensions (scrollregion — so scrollbars work)
+        full_w = max(1, int(w_src * z))
+        full_h = max(1, int(h_src * z))
+        self.edit_canvas.config(scrollregion=(0, 0, full_w, full_h))
+
+        # Determine visible viewport
+        vp = self._get_viewport_bounds()
+        if vp is None:
+            vp = (0, 0, full_w, full_h)
+        vp_x1, vp_y1, vp_x2, vp_y2 = vp
+        vp_w = max(1, vp_x2 - vp_x1)
+        vp_h = max(1, vp_y2 - vp_y1)
+
+        # Overscan margin (50 % each side) — avoids re-render on small scrolls
+        margin_w = int(vp_w * 0.5)
+        margin_h = int(vp_h * 0.5)
+        rx1 = max(0, vp_x1 - margin_w)
+        ry1 = max(0, vp_y1 - margin_h)
+        rx2 = min(full_w, vp_x2 + margin_w)
+        ry2 = min(full_h, vp_y2 + margin_h)
+
+        # Skip re-render when the cached image still covers the viewport
+        cached = getattr(self, '_vp_render_bounds', None)
+        cached_z = getattr(self, '_vp_render_zoom', None)
+        if (cached is not None and cached_z == round(z, 3)
+                and cached[0] <= vp_x1 and cached[1] <= vp_y1
+                and cached[2] >= vp_x2 and cached[3] >= vp_y2):
+            return
+
+        # Map render region → image coords
+        img_x1 = max(0, int(rx1 / z))
+        img_y1 = max(0, int(ry1 / z))
+        img_x2 = min(w_src, int(rx2 / z) + 1)
+        img_y2 = min(h_src, int(ry2 / z) + 1)
+        if img_x2 <= img_x1 or img_y2 <= img_y1:
+            return
+
+        # Exact canvas placement from integer image coords
+        canvas_x = int(img_x1 * z)
+        canvas_y = int(img_y1 * z)
+        out_w = max(1, int((img_x2 - img_x1) * z))
+        out_h = max(1, int((img_y2 - img_y1) * z))
+
+        # Crop → RGB → resize (always viewport-sized, never enormous)
+        crop = src[img_y1:img_y2, img_x1:img_x2]
+        crop_rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+        resample = Image.LANCZOS if high_quality else Image.BILINEAR
+        pil = Image.fromarray(crop_rgb).resize((out_w, out_h), resample)
+
+        photo = ImageTk.PhotoImage(pil)
+
+        if getattr(self, "bg_image_id", None):
+            self.edit_canvas.coords(self.bg_image_id, canvas_x, canvas_y)
+            self.edit_canvas.itemconfigure(self.bg_image_id, image=photo)
+        else:
+            self.bg_image_id = self.edit_canvas.create_image(
+                canvas_x, canvas_y, anchor=tk.NW, image=photo)
+
+        # Prevent GC  &  cache bounds
+        self._bg_photo_ref = photo
+        self._vp_render_bounds = (rx1, ry1, rx2, ry2)
+        self._vp_render_zoom = round(z, 3)
+        self._bg_current_zoom = z
+
+    def _invalidate_viewport_cache(self):
+        """Force a full viewport re-render on the next draw."""
+        self._vp_render_bounds = None
+        self._vp_render_zoom = None
+
+    def _on_scroll_update(self, *_):
+        """Debounced handler for canvas scroll / pan events."""
+        job = getattr(self, '_scroll_job', None)
+        if job:
+            try:
+                self.edit_canvas.after_cancel(job)
+            except Exception:
+                pass
+        self._scroll_job = self.edit_canvas.after(30, self._do_scroll_update)
+
+    def _do_scroll_update(self):
+        """Re-render viewport after a scroll or pan."""
+        self._scroll_job = None
+        if not hasattr(self, "edit_canvas"):
+            return
+        self._render_viewport()
+        self._draw_reference_features()
+        self._draw_poly_in_place()
+        self._draw_vertices_in_place()
+
+    def _apply_adjustments_to_proxy(self, high_quality=False):
+        """
+        Apply saturation / exposure / highlights to the small proxy
+        image (max ~2000 × 2000).  Result stored as ``_adjusted_proxy``
+        (BGR numpy).  This is orders of magnitude faster than applying
+        adjustments to the full-zoom-sized image.
+        """
         src = getattr(self, '_edit_proxy', None)
         if src is None:
             src = self.full_image
-        key = self._zoom_key()
-        cache_key = (key, high_quality)
-        if self._bg_cache.get(cache_key) is None:
-            # Evict old entries to prevent unbounded memory growth
-            max_cache = 4
-            if len(self._bg_cache) >= max_cache:
-                oldest = next(iter(self._bg_cache))
-                del self._bg_cache[oldest]
+        if src is None:
+            self._adjusted_proxy = None
+            return
 
-            img_rgb = cv2.cvtColor(src, cv2.COLOR_BGR2RGB)
-            pil = Image.fromarray(img_rgb)
-            h, w = src.shape[:2]
-            sw, sh = max(1, int(w * key)), max(1, int(h * key))
-            resample = Image.LANCZOS if high_quality else Image.BILINEAR
-            scaled = pil.resize((sw, sh), resample)
-            self._bg_cache[cache_key] = ImageTk.PhotoImage(scaled)
+        sat_v = float(self.slider_sat.get())
+        exp_v = float(self.slider_exp.get())
+        hil_v = float(self.slider_hil.get())
 
-        photo = self._bg_cache[cache_key]
-        if getattr(self, "bg_image_id", None):
-            self.edit_canvas.itemconfigure(self.bg_image_id, image=photo)
-        else:
-            self.bg_image_id = self.edit_canvas.create_image(0, 0, anchor=tk.NW, image=photo)
-        self.edit_canvas.config(scrollregion=(0, 0, photo.width(), photo.height()))
-        self._bg_current_zoom = key
+        # Neutral → clear adjusted proxy (use raw)
+        if abs(sat_v - 50) < 0.5 and abs(exp_v - 50) < 0.5 and abs(hil_v - 50) < 0.5:
+            self._adjusted_proxy = None
+            return
+
+        arr = src.astype(np.float32) / 255.0          # BGR HxWx3
+        arr = arr[:, :, ::-1].copy()                   # → RGB
+
+        def midspan(v, span=2.0):
+            if v >= 50:
+                return 1.0 + (span - 1.0) * ((v - 50.0) / 50.0)
+            return 1.0 - (1.0 - 1.0 / span) * ((50.0 - v) / 50.0)
+
+        expf = midspan(exp_v, 2.0)
+        satf = midspan(sat_v, 2.0)
+        lift = (hil_v - 50.0) / 50.0
+
+        if abs(expf - 1.0) > 1e-3:
+            arr *= expf
+        if abs(satf - 1.0) > 1e-3:
+            mean = arr.mean(axis=2, keepdims=True)
+            arr = mean + (arr - mean) * satf
+        if abs(lift) > 1e-3:
+            luma = 0.2126 * arr[..., 0] + 0.7152 * arr[..., 1] + 0.0722 * arr[..., 2]
+            t = 0.6
+            w = np.clip((luma - t) / (1.0 - t + 1e-6), 0.0, 1.0)[..., None]
+            gamma = np.interp(lift, [-1, 1], [1.6, 0.7])
+            curved = np.power(np.clip(arr, 0, 1), gamma)
+            arr = arr * (1.0 - w) + curved * w
+
+        arr = np.clip(arr * 255.0, 0, 255).astype(np.uint8)
+        self._adjusted_proxy = arr[:, :, ::-1].copy()  # → BGR
 
 
     def redraw_canvas(self, event=None):
@@ -918,15 +1233,13 @@ class HSVMaskEditingMixin:
             self.edit_canvas.after_cancel(self._redraw_job)
         def _do():
             if not hasattr(self, "edit_canvas"): return
-            self._ensure_bg_cached()
+            # Invalidate viewport cache on explicit redraw (zoom change, etc.)
+            self._invalidate_viewport_cache()
+            self._render_viewport()
             # (re)draw overlays in place
             self._draw_reference_features()
             self._draw_poly_in_place()
             self._draw_vertices_in_place()
-            # Re-apply preview (debounced separately) if sliders moved
-            if hasattr(self, "slider_sat"):
-                # Don't recompute PIL now; preview uses lightweight item image swap:
-                self._apply_preview_to_bg()  # see section 4
         self._redraw_job = self.edit_canvas.after_idle(_do)
 
     def _scaled(self, x, y):

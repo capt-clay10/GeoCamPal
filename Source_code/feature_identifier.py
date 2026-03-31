@@ -144,7 +144,7 @@ class FeatureIdentifier(HSVMaskEditingMixin, HSVMaskProcessingMixin, HSVMaskUIMi
         self.advanced_check_var = tk.BooleanVar(master=self, value=False)
         self.use_dual_hsv = tk.BooleanVar(master=self, value=False)
 
-        # >>> New: ML predicted mask controls <<<
+        # ML predicted masks
         self.use_ml_pred_mask = tk.BooleanVar(master=self, value=False)
         self.ml_mask_file_path = tk.StringVar(master=self, value="")     # for individual
         self.ml_mask_folder_path = tk.StringVar(master=self, value="")   # for ml/folder
@@ -159,7 +159,7 @@ class FeatureIdentifier(HSVMaskEditingMixin, HSVMaskProcessingMixin, HSVMaskUIMi
         self.aoi_method = tk.StringVar(master=self, value="Threshold")
         self.aoi_click_points = []     # [(x,y), (x,y)] for profile line
 
-        # >>> Dropdown 2: HSV masking (enabled by default) <<<
+        # >>> Dropdown 2: HSV masking  <<<
         self.use_hsv_masking = tk.BooleanVar(master=self, value=True)
 
         # >>> Dropdown 3: Colour picker <<<
@@ -290,7 +290,7 @@ class FeatureIdentifier(HSVMaskEditingMixin, HSVMaskProcessingMixin, HSVMaskUIMi
             self.title("Feature Identifier — Batch Process")
             #self.geometry("1200x600")
             #self.resizable(False, False)
-            fit_geometry(self, 1200, 600, resizeable = True)
+            fit_geometry(self, 1200, 600, resizable=True)
 
             self.do_invert_mask = tk.BooleanVar(master=self, value=False)
             self.use_bbox = tk.BooleanVar(master=self, value=False)
@@ -416,6 +416,13 @@ class FeatureIdentifier(HSVMaskEditingMixin, HSVMaskProcessingMixin, HSVMaskUIMi
         self._edit_proxy = None      # downscaled numpy BGR for editing
         self._edit_proxy_scale = 1.0 # ratio: proxy / full
 
+        # --- viewport rendering (tile-free zoom optimisation) ---
+        self._adjusted_proxy = None     # numpy BGR proxy with slider adjustments
+        self._vp_render_bounds = None   # (x1,y1,x2,y2) of last rendered region
+        self._vp_render_zoom = None     # zoom level of last render
+        self._scroll_job = None         # after() token for scroll debounce
+        self._bg_photo_ref = None       # prevent GC of viewport PhotoImage
+
     def _suppress_master_raise(self):
         """Prevent the launcher window from popping up over the tool windows."""
         try:
@@ -478,6 +485,13 @@ class FeatureIdentifier(HSVMaskEditingMixin, HSVMaskProcessingMixin, HSVMaskUIMi
         self._poly_id = None
         self._vertex_ids = []
         self._zoom_cache = {"zoom": None, "img": None}
+
+        # Clear viewport rendering state
+        self._adjusted_proxy = None
+        self._vp_render_bounds = None
+        self._vp_render_zoom = None
+        self._scroll_job = None
+        self._bg_photo_ref = None
 
         # Reset UI labels
         if hasattr(self, 'filename_label') and self.filename_label.winfo_exists():

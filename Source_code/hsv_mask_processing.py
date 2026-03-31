@@ -1077,11 +1077,162 @@ class HSVMaskProcessingMixin:
         if len(pts_full) < 2:
             messagebox.showwarning("Edge", "No boundary could be extracted from the mask.")
             return
+        
+        if len(pts_full) >= 3:
+            cnt = np.array(pts_full, dtype=np.int32).reshape((-1, 1, 2))
+            epsilon = max(0.3, 0.001 * cv2.arcLength(cnt, False))
+            approx = cv2.approxPolyDP(cnt, epsilon, False)
+            pts_full = [[int(pt[0][0]), int(pt[0][1])] for pt in approx]
 
         # Store ONE polyline feature in FULL coords
         self.edge_points = pts_full
         self.features = [("polyline", pts_full.copy())]
         self.update_edge_display()
+
+
+    def extract_polygon_with_ml_mask(self):
+        """
+        ML mask workflow — polygon extraction variant.
+        Loads the ML predicted mask, resizes to the source image dimensions,
+        and extracts polygon feature(s) instead of a boundary/polyline.
+
+        The mask may differ in size from the source image; mapping is done
+        by simple ratio scaling:
+            x_src = round(x_mask * (src_w / mask_w))
+            y_src = round(y_mask * (src_h / mask_h))
+        """
+        if self.full_image is None:
+            messagebox.showwarning("Image", "Please load an image first.")
+            return
+
+        # ── Resolve mask path (same logic as calculate_edge_with_ml_mask) ──
+        mask_path = None
+        if self.mode == "individual":
+            mask_path = self.ml_mask_file_path.get().strip()
+            if not mask_path:
+                messagebox.showwarning("ML mask", "Please load an associated mask.")
+                return
+        elif self.mode == "ml":
+            if not self.image_files:
+                messagebox.showwarning("Folder", "Please load an image folder first.")
+                return
+            folder = self.ml_mask_folder_path.get().strip()
+            if not folder:
+                messagebox.showwarning("Mask folder", "Please load the associated mask folder.")
+                return
+            cur_img = self.image_files[self.current_index]
+            base = os.path.splitext(os.path.basename(cur_img))[0]
+            mask_path = self._best_match_in_folder(base, folder, self.common_name_len_var.get())
+            if mask_path is None:
+                messagebox.showerror("Mask match", f"No matching mask found for:\n{os.path.basename(cur_img)}")
+                return
+        else:
+            messagebox.showwarning("Mode", "Extract Polygon with Mask is not available in batch mode.")
+            return
+
+        # ── Read mask ──
+        m = self._read_mask_image(mask_path)
+        if m is None:
+            messagebox.showerror("Mask", f"Failed to read mask:\n{mask_path}")
+            return
+
+        # ── Resize mask to full-image dimensions ──
+        Hf, Wf = self.full_image.shape[:2]
+        m_full = self._ensure_binary_u8(m)
+        if m_full.shape[:2] != (Hf, Wf):
+            m_full = cv2.resize(m_full, (Wf, Hf), interpolation=cv2.INTER_NEAREST)
+            print(f"[ML Polygon] Mask resized from {m.shape[:2]} → ({Hf}, {Wf})")
+
+        # ── Optional bbox clip ──
+        if self.use_bbox.get():
+            try:
+                x, y, w, h = map(int, self.bbox_entry.get().strip("()").split(","))
+                x = max(0, x); y = max(0, y)
+                w = max(1, w); h = max(1, h)
+                bbox_full = np.zeros((Hf, Wf), dtype=np.uint8)
+                bbox_full[y:y+h, x:x+w] = 255
+                m_full = cv2.bitwise_and(m_full, bbox_full)
+            except Exception:
+                pass
+
+        if cv2.countNonZero(m_full) == 0:
+            self.current_mask = np.zeros(self.cv_image.shape[:2], dtype=np.uint8) if self.cv_image is not None else None
+            if self.current_mask is not None:
+                self.display_mask()
+            messagebox.showwarning("Polygon", "Mask became empty after binarization/bbox clipping.")
+            return
+
+        # ── Update display mask ──
+        if self.cv_image is not None:
+            hc, wc = self.cv_image.shape[:2]
+            m_cv = cv2.resize(m_full, (wc, hc), interpolation=cv2.INTER_NEAREST)
+            self.current_mask = self._ensure_binary_u8(m_cv)
+            self.display_mask()
+
+        # ── Morphological cleanup ──
+        k_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
+        k_open  = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        m_full = cv2.morphologyEx(m_full, cv2.MORPH_CLOSE, k_close)
+        m_full = cv2.morphologyEx(m_full, cv2.MORPH_OPEN,  k_open)
+
+        # ── Fill interior holes ──
+        ext_cnts, _ = cv2.findContours(m_full, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not ext_cnts:
+            messagebox.showwarning("Polygon", "No contours found in mask after cleanup.")
+            return
+        filled = np.zeros_like(m_full)
+        cv2.drawContours(filled, ext_cnts, -1, 255, thickness=cv2.FILLED)
+
+        # ── Find contours on hole-free mask ──
+        contours, _ = cv2.findContours(filled, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        if not contours:
+            messagebox.showwarning("Polygon", "No contours on filled mask.")
+            return
+
+        # ── Filter by minimum area (0.1% of image) and sort largest-first ──
+        min_area = Hf * Wf * 0.001
+        scored = [(cnt, cv2.contourArea(cnt)) for cnt in contours
+                  if cv2.contourArea(cnt) >= min_area]
+        if not scored:
+            messagebox.showwarning("Polygon", "No contours above minimum area.")
+            return
+        scored.sort(key=lambda x: x[1], reverse=True)
+
+        # ── Build polygon features (already in full-image coords) ──
+        self.features = []
+        self.edge_points = []
+
+        for cnt, area in scored:
+            perimeter = cv2.arcLength(cnt, True)
+            epsilon = max(0.3, 0.001 * perimeter)
+            approx = cv2.approxPolyDP(cnt, epsilon, True)
+            if len(approx) < 3:
+                continue
+
+            pts = [[int(pt[0][0]), int(pt[0][1])] for pt in approx]
+
+            # Remove duplicate closing point if present
+            if len(pts) >= 2 and pts[0] == pts[-1]:
+                pts = pts[:-1]
+            if len(pts) < 3:
+                continue
+
+            self.features.append(("polygon", pts))
+            if not self.edge_points:
+                self.edge_points = pts
+
+        if not self.features:
+            messagebox.showwarning("Polygon", "Could not form valid polygon(s) from mask.")
+            return
+
+        n_polys = len(self.features)
+        n_verts = len(self.features[0][1])
+        print(f"[ML Polygon] Extracted {n_polys} polygon(s) from mask; "
+              f"largest has {n_verts} vertices.")
+
+        if self.mode != "batch":
+            self.update_edge_display()
+
 
     # ────────────────────────────────────────────────────────────────────────────
 

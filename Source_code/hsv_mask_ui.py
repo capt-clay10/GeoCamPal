@@ -341,6 +341,11 @@ class HSVMaskUIMixin:
             )
             self.btn_calc_edge_with_ml.grid(row=0, column=2, padx=8, pady=3, sticky="e")
 
+            self.btn_calc_poly_with_ml = ctk.CTkButton(
+                self.ml_opts_row, text="Extract Polygon with Mask", command=self.extract_polygon_with_ml_mask
+            )
+            self.btn_calc_poly_with_ml.grid(row=0, column=3, padx=4, pady=3, sticky="e")
+
         elif self.mode == "ml":
             self.ml_opts_row.grid_columnconfigure(1, weight=1)
 
@@ -366,6 +371,11 @@ class HSVMaskUIMixin:
                 self.ml_opts_row, text="Extract Boundary with Mask", command=self.calculate_edge_with_ml_mask
             )
             self.btn_calc_edge_with_ml.grid(row=0, column=4, padx=8, pady=3, sticky="e")
+
+            self.btn_calc_poly_with_ml = ctk.CTkButton(
+                self.ml_opts_row, text="Extract Polygon with Mask", command=self.extract_polygon_with_ml_mask
+            )
+            self.btn_calc_poly_with_ml.grid(row=0, column=5, padx=4, pady=3, sticky="e")
 
         # ── DROPDOWN 2: HSV Masking (checkbox + collapsible) ─────────────────────
         self.hsv_label_frame = ctk.CTkFrame(parent)
@@ -736,26 +746,14 @@ class HSVMaskUIMixin:
 
 
     # -------------- ML MASK TOGGLE & ACTIONS --------------
-
     def toggle_ml_mask_options(self):
-        """Show/hide the ML mask options row immediately below the checkbox row (and above Enhance row)."""
-        # Ensure checkbox row stays right under import row:
-        try:
-            # Put the checkbox row right before the enhance frame if it's not already
-            self.ml_row.pack_forget()
-            self.ml_row.pack(side="top", fill="x", pady=(2, 0), before=self.enhance_frame)
-        except Exception:
-            # fallback to regular pack if 'before' not available
-            self.ml_row.pack(side="top", fill="x", pady=(2, 0))
-
+        """Show/hide the ML mask options row directly under the import row."""
+        self.ml_row.pack_forget()
+        self.ml_row.pack(side="top", fill="x", pady=(2, 0), before=self.aoi_check_frame)
+    
+        self.ml_opts_row.pack_forget()
         if self.use_ml_pred_mask.get():
-            self.ml_opts_row.pack_forget()
-            try:
-                self.ml_opts_row.pack(side="top", fill="x", pady=(2, 5), before=self.enhance_frame)
-            except Exception:
-                self.ml_opts_row.pack(side="top", fill="x", pady=(2, 5))
-        else:
-            self.ml_opts_row.pack_forget()
+            self.ml_opts_row.pack(side="top", fill="x", pady=(2, 5), before=self.aoi_check_frame)
 
 
     def browse_ml_mask_file(self):
