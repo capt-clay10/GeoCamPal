@@ -22,7 +22,8 @@ import customtkinter as ctk
 import tkinter as tk
 from tkinter import filedialog, messagebox
 from osgeo import gdal, osr
-osr.DontUseExceptions()
+
+from utils import fit_geometry, resource_path, setup_console, restore_console
 
 try:
     from csv_utils import read_gcp_csv, normalise_columns
@@ -51,24 +52,6 @@ _METHOD_KEY = {"Homography": "homo", "Camera Projection": "proj",
 
 # %%
 #  Helpers
-
-
-def fit_geometry(win, dw, dh, resizable=True, margin=0.90):
-    sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
-    sc = min(margin*sw/dw, margin*sh/dh, 1.0)
-    fw, fh = int(dw*sc), int(dh*sc)
-    win.geometry(f"{fw}x{fh}+{(sw-fw)//2}+{max(0,(sh-fh)//2)}")
-    win.resizable(resizable, resizable)
-
-def resource_path(rp):
-    try: bp = sys._MEIPASS
-    except: bp = os.path.dirname(__file__)
-    return os.path.join(bp, rp)
-
-class StdoutRedirector:
-    def __init__(self, w): self.w = w
-    def write(self, m): self.w.insert(tk.END, m); self.w.see(tk.END)
-    def flush(self): pass
 
 
 # ── GeoTIFF validation ──
@@ -648,6 +631,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
     def _close(self):
         if self.executor:
             self.executor.shutdown(wait=False, cancel_futures=True)
+        restore_console(getattr(self, "_console_redir", None))
         self.destroy()
 
     @staticmethod
@@ -670,12 +654,12 @@ class GeoReferenceModule(ctk.CTkToplevel):
 
     def _build_ui(self):
         self.grid_columnconfigure(0, weight=1)
-        for r in (0,): self.grid_rowconfigure(r, weight=1)
-        for r in range(1, 6): self.grid_rowconfigure(r, weight=0)
-        self.grid_rowconfigure(6, weight=0)
+        self.grid_rowconfigure(0, weight=1)
+        for r in range(1, 6):
+            self.grid_rowconfigure(r, weight=0)
 
         # ── Row 0: Preview panels ──
-        pf = ctk.CTkFrame(self)
+        pf = ctk.CTkFrame(self, fg_color="black")
         pf.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
         self._orig_lbl = self._mkp(pf, "Original")
         self._init_lbl = self._mkp(pf, "Initial Georef")
@@ -683,7 +667,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
 
         # ── Row 1: Method + Image + Inputs ──
         r1 = ctk.CTkFrame(self)
-        r1.grid(row=1, column=0, sticky="ew", padx=5, pady=2)
+        r1.grid(row=2, column=0, sticky="ew", padx=5, pady=2)
 
         ctk.CTkLabel(r1, text="Method:", font=("Arial", 12, "bold")
                      ).pack(side="left", padx=(8,2))
@@ -724,7 +708,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
 
         # ── Row 2: Actions ──
         r2 = ctk.CTkFrame(self)
-        r2.grid(row=2, column=0, sticky="ew", padx=5, pady=2)
+        r2.grid(row=3, column=0, sticky="ew", padx=5, pady=2)
 
         ctk.CTkButton(r2, text="Initial Georeferencing",
                       command=self._initial_georef, fg_color="#0F52BA",
@@ -748,7 +732,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
 
         # ── Row 3: Accuracy + GCP mgmt + Secondary ──
         r3 = ctk.CTkFrame(self)
-        r3.grid(row=3, column=0, sticky="ew", padx=5, pady=2)
+        r3.grid(row=4, column=0, sticky="ew", padx=5, pady=2)
 
         ctk.CTkButton(r3, text="Compute Accuracy",
                       command=self._compute_accuracy, fg_color="#6693F5"
@@ -779,7 +763,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
 
         # ── Row 4: Batch processing ──
         r4 = ctk.CTkFrame(self)
-        r4.grid(row=4, column=0, sticky="ew", padx=5, pady=2)
+        r4.grid(row=5, column=0, sticky="ew", padx=5, pady=2)
 
         ctk.CTkButton(r4, text="Browse Input Folder",
                       command=self._browse_in).pack(side="left", padx=4)
@@ -816,12 +800,10 @@ class GeoReferenceModule(ctk.CTkToplevel):
 
         # ── Row 5: Console ──
         cf = ctk.CTkFrame(self)
-        cf.grid(row=5, column=0, sticky="nsew", padx=5, pady=5)
-        self.grid_rowconfigure(5, weight=0)
-        ct = tk.Text(cf, wrap="word", height=9)
+        cf.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
+        ct = tk.Text(cf, wrap="word", height=10)
         ct.pack(fill="both", expand=True, padx=5, pady=5)
-        sys.stdout = StdoutRedirector(ct)
-        sys.stderr = sys.stdout
+        self._console_redir = setup_console(ct)
         print("GeoCamPal — Georeferencing Tool")
         print("="*50)
         print("\nWorkflow:")
@@ -840,10 +822,11 @@ class GeoReferenceModule(ctk.CTkToplevel):
 
     @staticmethod
     def _mkp(parent, text):
-        fr = ctk.CTkFrame(parent, width=370, height=340)
+        fr = ctk.CTkFrame(parent, width=370, height=340, fg_color="black")
         fr.pack_propagate(False)
         fr.pack(side="left", fill="both", expand=True, padx=4, pady=4)
-        lbl = ctk.CTkLabel(fr, text=text); lbl.pack(fill="both", expand=True)
+        lbl = ctk.CTkLabel(fr, text=text, fg_color="black")
+        lbl.pack(fill="both", expand=True)
         return lbl
 
     # ---- # ---- # ----
@@ -883,7 +866,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
     # ---- # ---- # ----
 
     def _browse_img(self):
-        p = filedialog.askopenfilename(parent= self,
+        p = filedialog.askopenfilename(
             filetypes=[("Images","*.jpg *.jpeg *.png *.bmp *.tif *.tiff")])
         if p:
             self._img_path = p
@@ -891,7 +874,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
             self._show(p, self._orig_lbl)
 
     def _load_homo(self):
-        p = filedialog.askopenfilename(parent= self,filetypes=[("Text","*.txt")])
+        p = filedialog.askopenfilename(filetypes=[("Text","*.txt")])
         if not p: return
         try:
             self._homo_epsg = None
@@ -910,7 +893,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
             messagebox.showerror("Error", f"Bad homography: {e}")
 
     def _load_gcp(self):
-        p = filedialog.askopenfilename(parent= self,
+        p = filedialog.askopenfilename(
             filetypes=[("CSV","*.csv"),("All","*.*")])
         if not p: return
         try:
@@ -938,7 +921,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
             messagebox.showerror("GCP Error", str(e))
 
     def _load_cal(self):
-        p = filedialog.askopenfilename(parent= self,
+        p = filedialog.askopenfilename(
             filetypes=[("Pickle","*.pkl"),("All","*.*")])
         if not p: return
         try:
@@ -1081,19 +1064,22 @@ class GeoReferenceModule(ctk.CTkToplevel):
                 import tempfile
                 tmp = tempfile.NamedTemporaryFile(suffix=".tif", delete=False)
                 tmp.close()
-                _gdal_warp(self._img_path, tmp.name, gcps, srs.ExportToWkt(),
-                           epsg, mk, gsd, te)
-                ds = gdal.Open(tmp.name)
-                self._preview_gt = ds.GetGeoTransform()
-                # Read as BGR
-                bands = min(ds.RasterCount, 3)
-                arr = np.zeros((ds.RasterYSize, ds.RasterXSize, 3), np.uint8)
-                for i in range(bands):
-                    arr[:,:,i] = ds.GetRasterBand(i+1).ReadAsArray()
-                # RGB -> BGR for consistency
-                self._preview_bgr = arr[:,:,::-1].copy()
-                ds = None
-                os.unlink(tmp.name)
+                try:
+                    _gdal_warp(self._img_path, tmp.name, gcps, srs.ExportToWkt(),
+                               epsg, mk, gsd, te)
+                    ds = gdal.Open(tmp.name)
+                    self._preview_gt = ds.GetGeoTransform()
+                    # Read as BGR
+                    bands = min(ds.RasterCount, 3)
+                    arr = np.zeros((ds.RasterYSize, ds.RasterXSize, 3), np.uint8)
+                    for i in range(bands):
+                        arr[:,:,i] = ds.GetRasterBand(i+1).ReadAsArray()
+                    # RGB -> BGR for consistency
+                    self._preview_bgr = arr[:,:,::-1].copy()
+                    ds = None
+                finally:
+                    if os.path.exists(tmp.name):
+                        os.unlink(tmp.name)
                 self._rec_scale_lbl.configure(text=f"(GSD={gsd:.4f} m/px)")
 
             # Show preview
@@ -1370,15 +1356,19 @@ class GeoReferenceModule(ctk.CTkToplevel):
                 import tempfile
                 tmp = tempfile.NamedTemporaryFile(suffix=".tif", delete=False)
                 tmp.close()
-                _gdal_warp(self._img_path, tmp.name, gcps, srs.ExportToWkt(),
-                           epsg, mk, gsd, te)
-                ds = gdal.Open(tmp.name)
-                self._preview_gt = ds.GetGeoTransform()
-                arr = np.zeros((ds.RasterYSize, ds.RasterXSize, 3), np.uint8)
-                for i in range(min(3, ds.RasterCount)):
-                    arr[:,:,i] = ds.GetRasterBand(i+1).ReadAsArray()
-                self._preview_bgr = arr[:,:,::-1].copy()
-                ds = None; os.unlink(tmp.name)
+                try:
+                    _gdal_warp(self._img_path, tmp.name, gcps, srs.ExportToWkt(),
+                               epsg, mk, gsd, te)
+                    ds = gdal.Open(tmp.name)
+                    self._preview_gt = ds.GetGeoTransform()
+                    arr = np.zeros((ds.RasterYSize, ds.RasterXSize, 3), np.uint8)
+                    for i in range(min(3, ds.RasterCount)):
+                        arr[:,:,i] = ds.GetRasterBand(i+1).ReadAsArray()
+                    self._preview_bgr = arr[:,:,::-1].copy()
+                    ds = None
+                finally:
+                    if os.path.exists(tmp.name):
+                        os.unlink(tmp.name)
 
             rgb = cv2.cvtColor(self._preview_bgr, cv2.COLOR_BGR2RGB)
             self._show(rgb, self._sec_lbl)

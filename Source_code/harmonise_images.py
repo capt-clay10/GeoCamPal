@@ -47,6 +47,8 @@ import customtkinter as ctk
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
+from utils import fit_geometry, resource_path, setup_console, restore_console
+
 try:
     from skimage import exposure as sk_exposure
     HAS_SKIMAGE = True
@@ -57,59 +59,6 @@ ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("green")
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
-
-# %% window resizer 
-
-def fit_geometry(window, design_w, design_h, resizable=True, margin=0.90):
-    """
-    Scale a window to fit the current screen while preserving
-    the aspect ratio of the original design size.
-    Centers the result on screen.  Never upscales beyond the design size.
-
-    Parameters
-    ----------
-    window      : Tk / CTk / CTkToplevel instance
-    design_w/h  : the "intended" pixel size (the old hardcoded values)
-    resizable   : whether the user can drag-resize afterward
-    margin      : fraction of screen to occupy at most (0.90 = 90 %)
-    """
-    screen_w = window.winfo_screenwidth()
-    screen_h = window.winfo_screenheight()
-
-    max_w = int(screen_w * margin)
-    max_h = int(screen_h * margin)
-
-    scale = min(max_w / design_w, max_h / design_h, 1.0)
-
-    final_w = int(design_w * scale)
-    final_h = int(design_h * scale)
-
-    x = (screen_w - final_w) // 2
-    y = max(0, (screen_h - final_h) // 2)
-
-    window.geometry(f"{final_w}x{final_h}+{x}+{y}")
-    window.resizable(resizable, resizable)
-
-# %% ————————————————————————————— util helpers ————————————————————————
-def resource_path(relative_path: str) -> str:
-    try:
-        base_path = sys._MEIPASS
-    except Exception:
-        base_path = os.path.dirname(__file__)
-    return os.path.join(base_path, relative_path)
-
-
-class StdoutRedirector:
-    def __init__(self, text_widget: tk.Text):
-        self.text_widget = text_widget
-
-    def write(self, message: str):
-        self.text_widget.insert(tk.END, message)
-        self.text_widget.see(tk.END)
-
-    def flush(self):
-        pass
-
 
 # %% ————————————————————————————— image quality filters ———————————————
 
@@ -554,6 +503,9 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
         except Exception:
             pass
 
+        # ——— close handler ———
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
         # ——— state ———
         self.input_folder = None
         self.output_folder = None
@@ -572,13 +524,13 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
 
         # ——— layout ———
         self.grid_rowconfigure(0, weight=3)
-        self.grid_rowconfigure(1, weight=0)
+        self.grid_rowconfigure(1, weight=0)  # console
         self.grid_rowconfigure(2, weight=0)  # preview nav (hidden)
-        self.grid_rowconfigure(3, weight=1)
+        self.grid_rowconfigure(3, weight=0)  # controls
         self.grid_columnconfigure(0, weight=1)
 
         # ---- TOP: plot panel ----
-        self.top_panel = ctk.CTkFrame(self)
+        self.top_panel = ctk.CTkFrame(self, fg_color="black")
         self.top_panel.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
 
         self.fig, self.axes = plt.subplots(1, 3, figsize=(14, 4))
@@ -593,7 +545,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
 
         # ---- CONTROLS ----
         self.bottom_panel = ctk.CTkFrame(self)
-        self.bottom_panel.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
+        self.bottom_panel.grid(row=3, column=0, sticky="nsew", padx=5, pady=5)
 
         # Row 1 — input folder
         row1 = ctk.CTkFrame(self.bottom_panel)
@@ -609,16 +561,40 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
                         variable=self.recursive_var).grid(
             row=0, column=2, padx=10, pady=5)
 
-        # Row 2 — filter parameters (two sub-rows for readability)
-        row2 = ctk.CTkFrame(self.bottom_panel)
-        row2.pack(fill="x", padx=5, pady=2)
+        # Row 1b — task selection / collapsible sections
+        row1b = ctk.CTkFrame(self.bottom_panel)
+        row1b.pack(fill="x", padx=5, pady=2)
+
+        ctk.CTkLabel(row1b, text="Choose Tasks",
+                     font=("Arial", 12, "bold")).pack(side="left", padx=5)
+
+        self.run_filter_var = tk.BooleanVar(value=True)
+        self.run_brightness_var = tk.BooleanVar(value=True)
+        self.run_colour_var = tk.BooleanVar(value=True)
+        self.run_average_var = tk.BooleanVar(value=False)
+
+        ctk.CTkCheckBox(row1b, text="Filter bad images",
+                        variable=self.run_filter_var,
+                        command=self._toggle_task_sections).pack(side="left", padx=8)
+        ctk.CTkCheckBox(row1b, text="Harmonise brightness",
+                        variable=self.run_brightness_var,
+                        command=self._toggle_task_sections).pack(side="left", padx=8)
+        ctk.CTkCheckBox(row1b, text="Harmonise colour",
+                        variable=self.run_colour_var,
+                        command=self._toggle_task_sections).pack(side="left", padx=8)
+        ctk.CTkCheckBox(row1b, text="Average per folder",
+                        variable=self.run_average_var,
+                        command=self._toggle_task_sections).pack(side="left", padx=8)
+
+        # Row 2 — filter parameters (collapsible)
+        self.filter_section_frame = ctk.CTkFrame(self.bottom_panel)
+        row2 = self.filter_section_frame
 
         ctk.CTkLabel(row2, text="Filter Bad Images",
                      font=("Arial", 12, "bold")).grid(
             row=0, column=0, padx=5, pady=3, sticky="w", columnspan=2)
 
         # Each filter gets one checkbox + its parameter entries
-        # Row A: 4 filters
         self.filter_entries = {}
         self.filter_enabled = {}
 
@@ -634,21 +610,19 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
             name = fdef[0]
             var = tk.BooleanVar(value=True)
             ctk.CTkCheckBox(row2, text=name, variable=var,
-                            width=20).grid(row=1, column=col, padx=2, pady=2)
+                            width=20).grid(row=1, column=col, padx=2, pady=2, sticky="w")
             self.filter_enabled[name] = var
             col += 1
             params = fdef[1:]
             for i in range(0, len(params), 2):
                 plbl, pdef = params[i], params[i + 1]
-                e = ctk.CTkEntry(row2, width=50,
-                                 placeholder_text=plbl)
+                e = ctk.CTkEntry(row2, width=50, placeholder_text=plbl)
                 e.insert(0, pdef)
-                e.grid(row=1, column=col, padx=1, pady=2)
+                e.grid(row=1, column=col, padx=1, pady=2, sticky="w")
                 self.filter_entries[plbl] = e
                 col += 1
         max_col = col
 
-        # Row B: 3 filters
         filters_b = [
             ("Low information", "Entropy threshold", "5.0"),
             ("Lens droplets", "Droplet fraction", "0.08"),
@@ -659,34 +633,37 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
             name = fdef[0]
             var = tk.BooleanVar(value=True)
             ctk.CTkCheckBox(row2, text=name, variable=var,
-                            width=20).grid(row=2, column=col, padx=2, pady=2)
+                            width=20).grid(row=2, column=col, padx=2, pady=2, sticky="w")
             self.filter_enabled[name] = var
             col += 1
             params = fdef[1:]
             for i in range(0, len(params), 2):
                 plbl, pdef = params[i], params[i + 1]
-                e = ctk.CTkEntry(row2, width=50,
-                                 placeholder_text=plbl)
+                e = ctk.CTkEntry(row2, width=50, placeholder_text=plbl)
                 e.insert(0, pdef)
-                e.grid(row=2, column=col, padx=1, pady=2)
+                e.grid(row=2, column=col, padx=1, pady=2, sticky="w")
                 self.filter_entries[plbl] = e
                 col += 1
         max_col = max(max_col, col)
 
+        for c in range(max_col + 2):
+            row2.grid_columnconfigure(c, weight=0)
+        row2.grid_columnconfigure(max_col + 2, weight=1)
+
         ctk.CTkButton(row2, text="Run Filter",
                       command=self._filter_threaded, fg_color="#0F52BA").grid(
-            row=1, column=max_col, padx=10, pady=3, rowspan=2, sticky="ns")
+            row=3, column=0, padx=5, pady=(6, 3), sticky="w")
 
         ctk.CTkLabel(
             row2, text="-> Flags blurry, overexposed, dark,\n"
                        "   foggy, rain-on-lens & blocked images",
             font=("Arial", 10), text_color="gray", justify="left",
-        ).grid(row=1, column=max_col + 1, rowspan=2, padx=5, pady=3,
+        ).grid(row=3, column=1, columnspan=max_col + 1, padx=5, pady=(6, 3),
                sticky="w")
 
-        # Row 3 — harmonise BRIGHTNESS (was "Harmonise Histograms")
-        row3 = ctk.CTkFrame(self.bottom_panel)
-        row3.pack(fill="x", padx=5, pady=2)
+        # Row 3 — harmonise BRIGHTNESS (collapsible)
+        self.brightness_section_frame = ctk.CTkFrame(self.bottom_panel)
+        row3 = self.brightness_section_frame
 
         ctk.CTkLabel(row3, text="Harmonise Brightness",
                      font=("Arial", 12, "bold")).grid(
@@ -725,9 +702,9 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
             font=("Arial", 10), text_color="gray", justify="left",
         ).grid(row=0, column=8, padx=5, pady=3, sticky="w")
 
-        # Row 4 — harmonise COLOUR (NEW)
-        row4 = ctk.CTkFrame(self.bottom_panel)
-        row4.pack(fill="x", padx=5, pady=2)
+        # Row 4 — harmonise COLOUR (collapsible)
+        self.colour_section_frame = ctk.CTkFrame(self.bottom_panel)
+        row4 = self.colour_section_frame
 
         ctk.CTkLabel(row4, text="Harmonise Colour",
                      font=("Arial", 12, "bold")).grid(
@@ -770,6 +747,24 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
                        "   to all images (full LAB match)",
             font=("Arial", 10), text_color="gray", justify="left",
         ).grid(row=0, column=8, padx=5, pady=3, sticky="w")
+
+        # Row 4b — average images per folder (collapsible)
+        self.average_section_frame = ctk.CTkFrame(self.bottom_panel)
+        row4b = self.average_section_frame
+
+        ctk.CTkLabel(row4b, text="Average Images Per Folder",
+                     font=("Arial", 12, "bold")).grid(
+            row=0, column=0, padx=5, pady=3, sticky="w")
+        ctk.CTkLabel(
+            row4b,
+            text="-> Averages all readable images in each folder.\n"
+                 "   With sub-folders enabled, each image-containing folder is averaged separately.",
+            font=("Arial", 10), text_color="gray", justify="left",
+        ).grid(row=0, column=1, padx=5, pady=3, sticky="w")
+        ctk.CTkButton(row4b, text="Run Averaging",
+                      command=self._average_images_threaded,
+                      fg_color="#0F52BA").grid(
+            row=0, column=2, padx=10, pady=3)
 
         # Row 5 — output, progress, ETA, reset
         row5 = ctk.CTkFrame(self.bottom_panel)
@@ -826,16 +821,16 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
             fg_color="#8B0000", hover_color="#A52A2A", width=130)
         self.btn_cancel_preview.pack(side="left", padx=10, pady=5)
 
+        self._toggle_task_sections(initial=True)
+
         # ---- CONSOLE ----
         self.console_frame = ctk.CTkFrame(self)
-        self.console_frame.grid(row=3, column=0, sticky="nsew",
+        self.console_frame.grid(row=1, column=0, sticky="nsew",
                                 padx=5, pady=5)
         self.console_text = tk.Text(self.console_frame, wrap="word",
-                                     height=8)
+                                     height=10)
         self.console_text.pack(fill="both", expand=True, padx=5, pady=5)
-        self.stdout_redirector = StdoutRedirector(self.console_text)
-        sys.stdout = self.stdout_redirector
-        sys.stderr = self.stdout_redirector
+        self._console_redir = setup_console(self.console_text, "")
         print("Harmonise Images - Tool Guide\n"
               "================================\n"
               "\n"
@@ -907,16 +902,118 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
               "sub-folders.\n"
               "================================\n")
 
+    # ——— UI/thread helpers ———
+
+    def _ui_call(self, func, *args, **kwargs):
+        try:
+            self.after(0, lambda: func(*args, **kwargs))
+        except Exception:
+            pass
+
+    def _ui_message(self, level, title, text):
+        fn = getattr(messagebox, f"show{level}", None)
+        if fn is not None:
+            self._ui_call(fn, title, text)
+
+    def _ui_set_progress_fraction(self, frac):
+        self._ui_call(lambda: self.progress_bar.set(frac))
+
+    def _ui_set_eta(self, text):
+        self._ui_call(lambda: self.eta_label.configure(text=text))
+
+    def _toggle_task_sections(self, initial=False):
+        sections = [
+            (self.run_filter_var.get(), self.filter_section_frame),
+            (self.run_brightness_var.get(), self.brightness_section_frame),
+            (self.run_colour_var.get(), self.colour_section_frame),
+            (self.run_average_var.get(), self.average_section_frame),
+        ]
+        for enabled, frame in sections:
+            if enabled:
+                if not frame.winfo_manager():
+                    frame.pack(fill="x", padx=5, pady=2)
+            else:
+                if frame.winfo_manager():
+                    frame.pack_forget()
+
+    def _check_folders_ui(self):
+        if not self.input_folder:
+            messagebox.showwarning("Warning", "Select an image folder first.")
+            return False
+        if not self.output_folder:
+            messagebox.showwarning("Warning", "Select an output folder first.")
+            return False
+        return True
+
+    def _collect_filter_config(self):
+        if not self._check_folders_ui():
+            return None
+        return {
+            "input_folder": self.input_folder,
+            "output_folder": self.output_folder,
+            "recursive": bool(self.recursive_var.get()),
+            "blur_t": float(self.filter_entries["Blur threshold"].get()),
+            "clip_f": float(self.filter_entries["Clip overexp fraction"].get()),
+            "dark_v": int(self.filter_entries["Dark pixel value"].get()),
+            "under_f": float(self.filter_entries["Under-exp fraction"].get()),
+            "dark_max": int(self.filter_entries["Dark max threshold"].get()),
+            "entropy_t": float(self.filter_entries["Entropy threshold"].get()),
+            "droplet_f": float(self.filter_entries["Droplet fraction"].get()),
+            "obstruct_f": float(self.filter_entries["Obstruction fraction"].get()),
+            "enabled": {k: v.get() for k, v in self.filter_enabled.items()},
+        }
+
+    def _collect_brightness_config(self):
+        if not self._check_folders_ui():
+            return None
+        sky_pct = float(self.sky_entry.get())
+        return {
+            "input_folder": self.input_folder,
+            "output_folder": self.output_folder,
+            "recursive": bool(self.recursive_var.get()),
+            "tol": float(self.tol_entry.get()),
+            "sky_pct": sky_pct,
+            "sky_frac": max(0.0, min(0.9, sky_pct / 100.0)),
+            "exclude_bad": bool(self.exclude_bad_var.get()),
+            "bad_list": list(self.bad_list),
+        }
+
+    def _collect_colour_config(self):
+        if not self._check_folders_ui():
+            return None
+        if self.ref_colour_bgr is None:
+            messagebox.showwarning("Warning", "Select a reference image for colour first.")
+            return None
+        return {
+            "input_folder": self.input_folder,
+            "output_folder": self.output_folder,
+            "recursive": bool(self.recursive_var.get()),
+            "exclude_bad": bool(self.exclude_bad_colour_var.get()),
+            "bad_list": list(self.bad_list),
+            "ref_colour_path": self.ref_colour_path,
+            "ref_colour_bgr": self.ref_colour_bgr.copy(),
+            "algo_name": self.colour_algo_var.get(),
+        }
+
+    def _collect_average_config(self):
+        if not self._check_folders_ui():
+            return None
+        return {
+            "input_folder": self.input_folder,
+            "output_folder": self.output_folder,
+            "recursive": bool(self.recursive_var.get()),
+        }
+
     # ——— browse callbacks ———
 
     def _browse_input(self):
-        d = filedialog.askdirectory(parent= self,title="Select Image Folder")
+        d = filedialog.askdirectory(parent =self, title="Select Image Folder")
         if d:
             self.input_folder = d
             self.input_label.configure(text=d)
 
     def _browse_output(self):
-        d = filedialog.askdirectory(parent= self,title="Select Output Folder")
+        d = filedialog.askdirectory(parent =self, title="Select Output Folder")
         if d:
             self.output_folder = d
             self.output_label.configure(text=d)
@@ -924,7 +1021,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
     def _browse_ref_colour(self):
         """Let user pick one reference image for colour harmonisation."""
         init_dir = self.input_folder if self.input_folder else None
-        f = filedialog.askopenfilename(parent= self,
+        f = filedialog.askopenfilename(parent =self, 
             title="Select Reference Image for Colour",
             initialdir=init_dir,
             filetypes=[("Images", "*.jpg *.jpeg *.png *.bmp *.tif *.tiff"),
@@ -954,6 +1051,10 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
 
     # ——— reset ———
 
+    def _on_close(self):
+        restore_console(getattr(self, "_console_redir", None))
+        self.destroy()
+
     def _reset(self):
         self._cancel_preview()
         self.input_folder = None
@@ -967,12 +1068,17 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
         self.progress_bar.set(0)
         self.eta_label.configure(text="ETA: --")
         self.recursive_var.set(False)
+        self.run_filter_var.set(True)
+        self.run_brightness_var.set(True)
+        self.run_colour_var.set(True)
+        self.run_average_var.set(False)
         self.exclude_bad_var.set(True)
         self.exclude_bad_colour_var.set(True)
         for var in self.filter_enabled.values():
             var.set(True)
 
         self._restore_normal_plots()
+        self._toggle_task_sections()
         self.console_text.delete("1.0", tk.END)
         print("Session reset.\n--------------------------------")
 
@@ -1082,96 +1188,152 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
 
     # ——— gather images helper ———
 
-    def _gather_images(self, exclude_bad=True):
-        """Collect images, optionally excluding bad ones."""
-        if self.recursive_var.get():
-            images = collect_images_recursive(self.input_folder)
+    @staticmethod
+    def _gather_images_from(folder, recursive=False, exclude_bad=False, bad_list=None):
+        if recursive:
+            images = collect_images_recursive(folder)
         else:
-            images = collect_images(self.input_folder)
-
-        if exclude_bad:
-            bad_set = set(self.bad_list)
+            images = collect_images(folder)
+        if exclude_bad and bad_list:
+            bad_set = set(map(str, bad_list))
             images = [p for p in images if str(p) not in bad_set]
-
         return images
 
-    def _check_folders(self):
-        """Validate that input and output folders are set."""
-        if not self.input_folder:
-            messagebox.showwarning("Warning",
-                                    "Select an image folder first.")
-            return False
-        if not self.output_folder:
-            messagebox.showwarning("Warning",
-                                    "Select an output folder first.")
-            return False
-        return True
+    def _gather_images(self, exclude_bad=True):
+        return self._gather_images_from(
+            self.input_folder,
+            recursive=bool(self.recursive_var.get()),
+            exclude_bad=exclude_bad,
+            bad_list=self.bad_list,
+        )
 
     # ——— ETA helper ———
 
     def _update_progress(self, idx, total, start_time):
-        """Update progress bar and ETA label."""
-        frac = (idx + 1) / total
-        self.progress_bar.set(frac)
+        frac = (idx + 1) / max(total, 1)
         elapsed = time.time() - start_time
         if idx > 0:
             per_image = elapsed / (idx + 1)
             remaining = per_image * (total - idx - 1)
-            self.eta_label.configure(
-                text=f"ETA: ~{format_eta(remaining)}  "
-                     f"({idx + 1}/{total})")
+            eta_text = f"ETA: ~{format_eta(remaining)}  ({idx + 1}/{total})"
         else:
-            self.eta_label.configure(text=f"ETA: estimating...  "
-                                          f"({idx + 1}/{total})")
+            eta_text = f"ETA: estimating...  ({idx + 1}/{total})"
+        self._ui_set_progress_fraction(frac)
+        self._ui_set_eta(eta_text)
 
-    # ——— filtering (unchanged logic) ———
+    def _render_filter_plot(self, reason_counts, n_bad, n_good):
+        self._restore_normal_plots()
+        self.axes[1].clear()
+        labels = [k for k, v in reason_counts.items() if v > 0]
+        values = [reason_counts[k] for k in labels]
+        if not labels:
+            labels = list(reason_counts.keys())
+            values = [0] * len(labels)
+        colors = ["#e74c3c", "#e67e22", "#3498db", "#2c3e50",
+                  "#95a5a6", "#8e44ad", "#1abc9c"]
+        self.axes[1].barh(labels, values, color=colors[:len(labels)])
+        self.axes[1].set_title(f"Filter Results ({n_bad} bad / {n_good} good)")
+        self.axes[1].set_xlabel("Count")
+        self.fig.tight_layout()
+        self.canvas_plot.draw()
+
+    def _render_brightness_results(self, means_arr, valid, ref_mean, tol, counts):
+        self._restore_normal_plots()
+        self.axes[0].clear()
+        self.axes[0].hist(means_arr[valid], bins=30, color="#3498db",
+                          edgecolor="white", alpha=0.8)
+        self.axes[0].axvline(ref_mean, color="red", linestyle="--",
+                             label=f"Ref={ref_mean:.1f}")
+        self.axes[0].axvspan(ref_mean - tol, ref_mean + tol,
+                             alpha=0.15, color="green",
+                             label=f"+/-{tol} tolerance")
+        self.axes[0].set_title("Luminance Distribution")
+        self.axes[0].set_xlabel("Mean L-channel")
+        self.axes[0].set_ylabel("Count")
+        self.axes[0].legend(fontsize="small")
+
+        self.axes[2].clear()
+        plot_labels = [k for k in counts if counts[k] > 0]
+        plot_values = [counts[k] for k in plot_labels]
+        bar_colors = {
+            "copy": "#2ecc71", "histogram": "#9b59b6",
+            "soft-gain": "#e67e22", "bright-gain": "#e74c3c",
+            "reverted": "#7f8c8d",
+        }
+        self.axes[2].bar(plot_labels, plot_values,
+                         color=[bar_colors.get(k, "#3498db") for k in plot_labels])
+        self.axes[2].set_title("Brightness Results")
+        self.axes[2].set_ylabel("Count")
+        self.fig.tight_layout()
+        self.canvas_plot.draw()
+
+    def _render_colour_results(self, ref_bgr, counts, elapsed, algo_name):
+        self._restore_normal_plots()
+        self.axes[0].imshow(cv2.cvtColor(ref_bgr, cv2.COLOR_BGR2RGB))
+        self.axes[0].set_title("Colour Reference", fontsize=9)
+        self.axes[0].axis("off")
+
+        self.axes[1].clear()
+        plot_labels = [k for k in counts if counts[k] > 0]
+        plot_values = [counts[k] for k in plot_labels]
+        bar_colors = {"corrected": "#2ecc71", "reverted": "#7f8c8d"}
+        self.axes[1].bar(plot_labels, plot_values,
+                         color=[bar_colors.get(k, "#3498db") for k in plot_labels])
+        self.axes[1].set_title("Colour Results")
+        self.axes[1].set_ylabel("Count")
+
+        self.axes[2].set_title(f"Algorithm: {algo_name}", fontsize=9)
+        self.axes[2].text(
+            0.5, 0.5,
+            f"{counts['corrected']} corrected\n"
+            f"{counts['reverted']} reverted\n"
+            f"{format_eta(elapsed)} elapsed",
+            ha="center", va="center", fontsize=12,
+            transform=self.axes[2].transAxes)
+        self.axes[2].axis("off")
+        self.fig.tight_layout()
+        self.canvas_plot.draw()
+
+    def _render_average_results(self, folder_count, written_count, skipped_count):
+        self._restore_normal_plots()
+        self.axes[2].clear()
+        labels = ["Folders found", "Averages written", "Folders skipped"]
+        values = [folder_count, written_count, skipped_count]
+        self.axes[2].bar(labels, values)
+        self.axes[2].set_title("Averaging Results")
+        self.axes[2].set_ylabel("Count")
+        self.fig.tight_layout()
+        self.canvas_plot.draw()
+
+    # ——— filtering ———
 
     def _filter_threaded(self):
         if self._processing:
             return
-        threading.Thread(target=self._run_filter, daemon=True).start()
+        try:
+            cfg = self._collect_filter_config()
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+            return
+        if cfg is None:
+            return
+        threading.Thread(target=self._run_filter, args=(cfg,), daemon=True).start()
 
-    def _run_filter(self):
+    def _run_filter(self, cfg):
         try:
             self._processing = True
-            self.progress_bar.set(0)
-            self.eta_label.configure(text="ETA: --")
+            self._ui_set_progress_fraction(0)
+            self._ui_set_eta("ETA: --")
 
-            if not self._check_folders():
-                return
-
-            blur_t = float(self.filter_entries["Blur threshold"].get())
-            clip_f = float(
-                self.filter_entries["Clip overexp fraction"].get())
-            dark_v = int(self.filter_entries["Dark pixel value"].get())
-            under_f = float(
-                self.filter_entries["Under-exp fraction"].get())
-            dark_max = int(
-                self.filter_entries["Dark max threshold"].get())
-            entropy_t = float(
-                self.filter_entries["Entropy threshold"].get())
-            droplet_f = float(
-                self.filter_entries["Droplet fraction"].get())
-            obstruct_f = float(
-                self.filter_entries["Obstruction fraction"].get())
-
-            # which filters are enabled
-            en = {k: v.get() for k, v in self.filter_enabled.items()}
-
-            if self.recursive_var.get():
-                images = collect_images_recursive(self.input_folder)
-            else:
-                images = collect_images(self.input_folder)
-
+            images = self._gather_images_from(cfg["input_folder"], recursive=cfg["recursive"])
             if not images:
-                messagebox.showwarning("Warning", "No images found.")
+                self._ui_message("warning", "Warning", "No images found.")
                 return
 
+            en = cfg["enabled"]
             active = [k for k, v in en.items() if v]
-            print(f"\nFiltering {len(images)} images with "
-                  f"{len(active)} active filter(s): "
-                  f"{', '.join(active)} ...")
-            self.bad_list = []
+            print(f"\nFiltering {len(images)} images with {len(active)} active filter(s): {', '.join(active)} ...")
+            bad_list = []
             bad_reasons = {}
             reason_counts = {
                 "blurry": 0, "clipped_overexposed": 0,
@@ -1179,7 +1341,6 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
                 "low_information": 0, "lens_droplets": 0,
                 "obstruction": 0,
             }
-
             start_time = time.time()
 
             for idx, p in enumerate(images):
@@ -1187,32 +1348,24 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
                 if img is None:
                     print(f"[WARN] Cannot read: {p.name}")
                     continue
-
-                # run only enabled filters
                 reasons = []
-                if en.get("Blur") and is_blurry(img, blur_t):
+                if en.get("Blur") and is_blurry(img, cfg["blur_t"]):
                     reasons.append("blurry")
-                if (en.get("Overexposure")
-                        and is_clipped_overexposed(img, clip_f)):
+                if en.get("Overexposure") and is_clipped_overexposed(img, cfg["clip_f"]):
                     reasons.append("clipped_overexposed")
-                if (en.get("Underexposure")
-                        and is_underexposed(img, dark_v, under_f)):
+                if en.get("Underexposure") and is_underexposed(img, cfg["dark_v"], cfg["under_f"]):
                     reasons.append("underexposed")
-                if en.get("Darkness") and is_too_dark(img, dark_max):
+                if en.get("Darkness") and is_too_dark(img, cfg["dark_max"]):
                     reasons.append("too_dark")
-                if (en.get("Low information")
-                        and is_low_information(img, entropy_t)):
+                if en.get("Low information") and is_low_information(img, cfg["entropy_t"]):
                     reasons.append("low_information")
-                if (en.get("Lens droplets")
-                        and has_lens_droplets(img, droplet_f)):
+                if en.get("Lens droplets") and has_lens_droplets(img, cfg["droplet_f"]):
                     reasons.append("lens_droplets")
-                if (en.get("Obstruction")
-                        and has_obstruction(img,
-                                            block_fraction=obstruct_f)):
+                if en.get("Obstruction") and has_obstruction(img, block_fraction=cfg["obstruct_f"]):
                     reasons.append("obstruction")
 
                 if reasons:
-                    self.bad_list.append(str(p))
+                    bad_list.append(str(p))
                     bad_reasons[p.name] = reasons
                     for r in reasons:
                         reason_counts[r] = reason_counts.get(r, 0) + 1
@@ -1220,44 +1373,26 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
 
                 self._update_progress(idx, len(images), start_time)
 
-            n_bad = len(self.bad_list)
+            self.bad_list = bad_list
+            n_bad = len(bad_list)
             n_good = len(images) - n_bad
-            print(f"\nFilter complete: {n_bad} bad / {n_good} good "
-                  f"out of {len(images)} images.")
+            print(f"\nFilter complete: {n_bad} bad / {n_good} good out of {len(images)} images.")
 
-            # save bad list
-            txt_path = os.path.join(self.output_folder, "bad_images.txt")
+            txt_path = os.path.join(cfg["output_folder"], "bad_images.txt")
             with open(txt_path, "w", encoding="utf-8") as f:
                 f.write("filename\treason\n")
-                for bp in self.bad_list:
+                for bp in bad_list:
                     name = os.path.basename(bp)
                     reasons = bad_reasons.get(name, [])
                     f.write(f"{name}\t{','.join(reasons)}\n")
             print(f"Bad image list saved: {txt_path}")
 
-            # update plot
-            self._restore_normal_plots()
-            self.axes[1].clear()
-            labels = [k for k, v in reason_counts.items() if v > 0]
-            values = [reason_counts[k] for k in labels]
-            if not labels:
-                labels = list(reason_counts.keys())
-                values = [0] * len(labels)
-            colors = ["#e74c3c", "#e67e22", "#3498db", "#2c3e50",
-                      "#95a5a6", "#8e44ad", "#1abc9c"]
-            self.axes[1].barh(labels, values,
-                              color=colors[:len(labels)])
-            self.axes[1].set_title(
-                f"Filter Results ({n_bad} bad / {n_good} good)")
-            self.axes[1].set_xlabel("Count")
-            self.fig.tight_layout()
-            self.canvas_plot.draw()
-
-            self.eta_label.configure(text="Done")
+            self._ui_call(self._render_filter_plot, reason_counts, n_bad, n_good)
+            self._ui_set_eta("Done")
 
         except Exception as e:
             print(f"[ERROR] {e}")
-            messagebox.showerror("Error", str(e))
+            self._ui_message("error", "Error", str(e))
         finally:
             self._processing = False
 
@@ -1266,144 +1401,110 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
     def _preview_brightness_threaded(self):
         if self._processing:
             return
-        threading.Thread(target=self._run_preview_brightness,
-                         daemon=True).start()
+        try:
+            cfg = self._collect_brightness_config()
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+            return
+        if cfg is None:
+            return
+        threading.Thread(target=self._run_preview_brightness, args=(cfg,), daemon=True).start()
 
-    def _run_preview_brightness(self):
-        """Generate brightness preview on random 5% sample."""
+    def _run_preview_brightness(self, cfg):
         try:
             self._processing = True
-            self.progress_bar.set(0)
+            self._ui_set_progress_fraction(0)
 
-            if not self._check_folders():
-                return
-
-            exclude = self.exclude_bad_var.get()
-            images = self._gather_images(exclude_bad=exclude)
+            images = self._gather_images_from(cfg["input_folder"], recursive=cfg["recursive"],
+                                              exclude_bad=cfg["exclude_bad"], bad_list=cfg["bad_list"])
             if not images:
-                messagebox.showwarning("Warning",
-                                       "No images remaining.")
+                self._ui_message("warning", "Warning", "No images remaining.")
                 return
-
-            tol = float(self.tol_entry.get())
-            sky_pct = float(self.sky_entry.get())
-            sky_frac = max(0.0, min(0.9, sky_pct / 100.0))
 
             n_preview = preview_sample_count(len(images))
-            sample_indices = sorted(random.sample(
-                range(len(images)), min(n_preview, len(images))))
-
-            print(f"\nBrightness preview: processing {len(sample_indices)} "
-                  f"of {len(images)} images...")
-
-            # pass 1: compute luminance for ALL images to find median
+            sample_indices = sorted(random.sample(range(len(images)), min(n_preview, len(images))))
+            print(f"\nBrightness preview: processing {len(sample_indices)} of {len(images)} images...")
             print("  Computing luminance statistics...")
+
             means = []
             for p in images:
                 img = cv2.imread(str(p))
                 if img is None:
                     means.append(np.nan)
                 else:
-                    means.append(mean_luminance(img, sky_frac))
+                    means.append(mean_luminance(img, cfg["sky_frac"]))
             means_arr = np.array(means)
             ref_mean = float(np.nanmedian(means_arr))
             ref_idx = int(np.nanargmin(np.abs(means_arr - ref_mean)))
             ref_img = cv2.imread(str(images[ref_idx]))
-            print(f"  Reference luminance: {ref_mean:.1f} "
-                  f"(from {images[ref_idx].name})")
+            if ref_img is None:
+                print(f"  ERROR: could not load reference image {images[ref_idx].name}")
+                return
+            print(f"  Reference luminance: {ref_mean:.1f} (from {images[ref_idx].name})")
 
-            # pass 2: process sample
-            self.preview_pairs = []
+            preview_pairs = []
             start_time = time.time()
-
             for i, si in enumerate(sample_indices):
                 p = images[si]
                 img = cv2.imread(str(p))
                 if img is None:
                     continue
-
                 m = means_arr[si]
                 delta = m - ref_mean
-
-                if abs(delta) <= tol:
+                if abs(delta) <= cfg["tol"]:
                     corrected = img.copy()
-                elif delta <= -2 * tol:
+                elif delta <= -2 * cfg["tol"]:
                     corrected = hist_match(img, ref_img)
-                elif delta >= 2 * tol:
-                    corrected = soft_gain_match(img, ref_mean)
                 else:
                     corrected = soft_gain_match(img, ref_mean)
-
-                # sanity check
-                if abs(delta) > tol:
-                    corrected, reverted = correction_sanity_check(
-                        img, corrected, ref_mean, sky_frac)
+                if abs(delta) > cfg["tol"]:
+                    corrected, reverted = correction_sanity_check(img, corrected, ref_mean, cfg["sky_frac"])
                     if reverted:
-                        print(f"  [REVERT] {p.name}: correction "
-                              f"worsened luminance")
-
-                self.preview_pairs.append((img, corrected, p.name))
+                        print(f"  [REVERT] {p.name}: correction worsened luminance")
+                preview_pairs.append((img, corrected, p.name))
                 self._update_progress(i, len(sample_indices), start_time)
 
-            # enter preview mode — schedule UI updates on main thread
-            # (tkinter + matplotlib canvas ops must run on the main thread)
+            self.preview_pairs = preview_pairs
             self.preview_mode = "brightness"
             self.preview_idx = 0
-            self.after(0, self._show_preview_nav)
-            self.after(0, self._update_preview_display)
-            self.after(0, lambda: self.eta_label.configure(
-                text="Preview ready"))
-            print(f"  Preview ready: {len(self.preview_pairs)} images. "
-                  f"Use </> to navigate.")
+            self._ui_call(self._show_preview_nav)
+            self._ui_call(self._update_preview_display)
+            self._ui_set_eta("Preview ready")
+            print(f"  Preview ready: {len(self.preview_pairs)} images. Use </> to navigate.")
 
         except Exception as e:
             print(f"[ERROR] {e}")
-            messagebox.showerror("Error", str(e))
+            self._ui_message("error", "Error", str(e))
         finally:
             self._processing = False
 
     def _harmonise_brightness_threaded(self):
         if self._processing:
             return
-        threading.Thread(target=self._run_harmonise_brightness,
-                         daemon=True).start()
+        try:
+            cfg = self._collect_brightness_config()
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+            return
+        if cfg is None:
+            return
+        threading.Thread(target=self._run_harmonise_brightness, args=(cfg,), daemon=True).start()
 
-    def _run_harmonise_brightness(self):
-        """Full brightness harmonisation (original logic, renamed)."""
+    def _run_harmonise_brightness(self, cfg):
         try:
             self._processing = True
-            self.progress_bar.set(0)
-            self.eta_label.configure(text="ETA: --")
+            self._ui_set_progress_fraction(0)
+            self._ui_set_eta("ETA: --")
 
-            if not self._check_folders():
-                return
-
-            tol = float(self.tol_entry.get())
-            sky_pct = float(self.sky_entry.get())
-            sky_frac = max(0.0, min(0.9, sky_pct / 100.0))
-            exclude_bad = self.exclude_bad_var.get()
-            bad_set = set(self.bad_list) if exclude_bad else set()
-
-            if self.recursive_var.get():
-                images = collect_images_recursive(self.input_folder)
-            else:
-                images = collect_images(self.input_folder)
-
-            # filter out bad images if requested
-            images = [p for p in images if str(p) not in bad_set]
-
+            images = self._gather_images_from(cfg["input_folder"], recursive=cfg["recursive"],
+                                              exclude_bad=cfg["exclude_bad"], bad_list=cfg["bad_list"])
             if not images:
-                messagebox.showwarning("Warning",
-                                       "No images remaining after "
-                                       "filtering.")
+                self._ui_message("warning", "Warning", "No images remaining after filtering.")
                 return
 
-            sky_msg = (f", sky mask top {sky_pct:.0f}%"
-                       if sky_frac > 0 else "")
-            print(f"\nHarmonising brightness for {len(images)} images "
-                  f"(tolerance +/-{tol} L-units{sky_msg})...")
+            sky_msg = (f", sky mask top {cfg['sky_pct']:.0f}%" if cfg["sky_frac"] > 0 else "")
+            print(f"\nHarmonising brightness for {len(images)} images (tolerance +/-{cfg['tol']} L-units{sky_msg})...")
 
-            # ---- pass 1: compute luminance stats ----
             means = []
             loaded = []
             for p in images:
@@ -1413,124 +1514,71 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
                     loaded.append(None)
                     continue
                 loaded.append(img)
-                means.append(mean_luminance(img, sky_frac))
+                means.append(mean_luminance(img, cfg["sky_frac"]))
 
             means_arr = np.array(means)
             valid = ~np.isnan(means_arr)
             ref_mean = float(np.nanmedian(means_arr))
-
-            # reference image: the one closest to median luminance
             ref_idx = int(np.nanargmin(np.abs(means_arr - ref_mean)))
             ref_img = loaded[ref_idx]
-            print(f"Reference luminance (median): {ref_mean:.1f}  "
-                  f"(image: {images[ref_idx].name})")
+            if ref_img is None:
+                print(f"ERROR: reference image {images[ref_idx].name} could not be loaded.")
+                return
+            print(f"Reference luminance (median): {ref_mean:.1f}  (image: {images[ref_idx].name})")
 
-            # plot luminance distribution
-            self._restore_normal_plots()
-            self.axes[0].clear()
-            self.axes[0].hist(means_arr[valid], bins=30, color="#3498db",
-                              edgecolor="white", alpha=0.8)
-            self.axes[0].axvline(ref_mean, color="red", linestyle="--",
-                                 label=f"Ref={ref_mean:.1f}")
-            self.axes[0].axvspan(ref_mean - tol, ref_mean + tol,
-                                 alpha=0.15, color="green",
-                                 label=f"+/-{tol} tolerance")
-            self.axes[0].set_title("Luminance Distribution")
-            self.axes[0].set_xlabel("Mean L-channel")
-            self.axes[0].set_ylabel("Count")
-            self.axes[0].legend(fontsize="small")
-
-            # ---- pass 2: correct images ----
-            input_root = Path(self.input_folder)
-            counts = {"copy": 0, "histogram": 0, "soft-gain": 0,
-                      "bright-gain": 0, "reverted": 0}
-
+            input_root = Path(cfg["input_folder"])
+            counts = {"copy": 0, "histogram": 0, "soft-gain": 0, "bright-gain": 0, "reverted": 0}
             start_time = time.time()
 
-            for idx, (p, img, m) in enumerate(
-                    zip(images, loaded, means)):
+            for idx, (p, img, m) in enumerate(zip(images, loaded, means)):
                 if img is None:
                     continue
-
                 delta = m - ref_mean
-
-                if abs(delta) <= tol:
+                if abs(delta) <= cfg["tol"]:
                     mode, corrected = "copy", img
-                elif delta <= -2 * tol:
+                elif delta <= -2 * cfg["tol"]:
                     mode = "histogram"
                     corrected = hist_match(img, ref_img)
-                elif delta >= 2 * tol:
+                elif delta >= 2 * cfg["tol"]:
                     mode = "bright-gain"
                     corrected = soft_gain_match(img, ref_mean)
                 else:
                     mode = "soft-gain"
                     corrected = soft_gain_match(img, ref_mean)
-
-                # sanity check: did the correction actually help?
                 if mode != "copy":
-                    corrected, reverted = correction_sanity_check(
-                        img, corrected, ref_mean, sky_frac)
+                    corrected, reverted = correction_sanity_check(img, corrected, ref_mean, cfg["sky_frac"])
                     if reverted:
                         counts["reverted"] += 1
-                        print(f"  [REVERT] {p.name}: correction made "
-                              f"luminance worse - kept original")
-
+                        print(f"  [REVERT] {p.name}: correction made luminance worse - kept original")
                 counts[mode] = counts.get(mode, 0) + 1
 
-                # preserve folder structure with _brightness_harmonised suffix
                 rel = Path(p).relative_to(input_root)
                 if len(rel.parts) > 1:
                     parent = rel.parent
-                    out_parent = Path(self.output_folder) / (
-                        str(parent) + "_brightness_harmonised")
+                    out_parent = Path(cfg["output_folder"]) / (str(parent) + "_brightness_harmonised")
                 else:
-                    out_parent = Path(self.output_folder) / (
-                        input_root.name + "_brightness_harmonised")
+                    out_parent = Path(cfg["output_folder"]) / (input_root.name + "_brightness_harmonised")
                 out_parent.mkdir(parents=True, exist_ok=True)
                 out_path = out_parent / rel.name
-
                 cv2.imwrite(str(out_path), corrected)
 
                 if (idx + 1) % 20 == 0 or idx == 0:
-                    print(f"  {idx + 1}/{len(images)} | "
-                          f"{p.name} | dL={delta:+.1f} -> {mode}")
+                    print(f"  {idx + 1}/{len(images)} | {p.name} | dL={delta:+.1f} -> {mode}")
                 self._update_progress(idx, len(images), start_time)
 
             elapsed = time.time() - start_time
-            print(f"\nBrightness harmonisation complete "
-                  f"({format_eta(elapsed)} elapsed):")
+            print(f"\nBrightness harmonisation complete ({format_eta(elapsed)} elapsed):")
             for k, v in counts.items():
                 if v > 0:
                     print(f"  {k}: {v}")
 
-            # update harmonise plot
-            self.axes[2].clear()
-            plot_labels = [k for k in counts if counts[k] > 0]
-            plot_values = [counts[k] for k in plot_labels]
-            bar_colors = {
-                "copy": "#2ecc71", "histogram": "#9b59b6",
-                "soft-gain": "#e67e22", "bright-gain": "#e74c3c",
-                "reverted": "#7f8c8d",
-            }
-            self.axes[2].bar(plot_labels,
-                             plot_values,
-                             color=[bar_colors.get(k, "#3498db")
-                                    for k in plot_labels])
-            self.axes[2].set_title("Brightness Results")
-            self.axes[2].set_ylabel("Count")
-
-            self.fig.tight_layout()
-            self.canvas_plot.draw()
-
-            self.eta_label.configure(text="Done")
-            messagebox.showinfo(
-                "Done",
-                f"Brightness-harmonised images saved to:\n"
-                f"{self.output_folder}")
+            self._ui_call(self._render_brightness_results, means_arr, valid, ref_mean, cfg["tol"], counts)
+            self._ui_set_eta("Done")
+            self._ui_message("info", "Done", f"Brightness-harmonised images saved to:\n{cfg['output_folder']}")
 
         except Exception as e:
             print(f"[ERROR] {e}")
-            messagebox.showerror("Error", str(e))
+            self._ui_message("error", "Error", str(e))
         finally:
             self._processing = False
 
@@ -1539,126 +1587,86 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
     def _preview_colour_threaded(self):
         if self._processing:
             return
-        threading.Thread(target=self._run_preview_colour,
-                         daemon=True).start()
+        cfg = self._collect_colour_config()
+        if cfg is None:
+            return
+        threading.Thread(target=self._run_preview_colour, args=(cfg,), daemon=True).start()
 
-    def _run_preview_colour(self):
-        """Generate colour preview on random 5% sample."""
+    def _run_preview_colour(self, cfg):
         try:
             self._processing = True
-            self.progress_bar.set(0)
+            self._ui_set_progress_fraction(0)
 
-            if not self._check_folders():
-                return
-            if self.ref_colour_bgr is None:
-                messagebox.showwarning(
-                    "Warning",
-                    "Select a reference image for colour first.")
-                return
-
-            exclude = self.exclude_bad_colour_var.get()
-            images = self._gather_images(exclude_bad=exclude)
-
-            # exclude the reference image itself
-            ref_abs = os.path.abspath(self.ref_colour_path)
-            images = [p for p in images
-                      if os.path.abspath(str(p)) != ref_abs]
-
+            images = self._gather_images_from(cfg["input_folder"], recursive=cfg["recursive"],
+                                              exclude_bad=cfg["exclude_bad"], bad_list=cfg["bad_list"])
+            ref_abs = os.path.abspath(cfg["ref_colour_path"])
+            images = [p for p in images if os.path.abspath(str(p)) != ref_abs]
             if not images:
-                messagebox.showwarning("Warning",
-                                       "No images remaining.")
+                self._ui_message("warning", "Warning", "No images remaining.")
                 return
 
-            algo_name = self.colour_algo_var.get()
+            algo_name = cfg["algo_name"]
             algo_fn = COLOUR_ALGORITHMS[algo_name]
-
             n_preview = preview_sample_count(len(images))
-            sample_indices = sorted(random.sample(
-                range(len(images)), min(n_preview, len(images))))
+            sample_indices = sorted(random.sample(range(len(images)), min(n_preview, len(images))))
+            print(f"\nColour preview ({algo_name}): processing {len(sample_indices)} of {len(images)} images...")
 
-            print(f"\nColour preview ({algo_name}): processing "
-                  f"{len(sample_indices)} of {len(images)} images...")
-
-            self.preview_pairs = []
+            preview_pairs = []
             start_time = time.time()
-
             for i, si in enumerate(sample_indices):
                 p = images[si]
                 img = cv2.imread(str(p))
                 if img is None:
                     continue
-
-                corrected = algo_fn(img, self.ref_colour_bgr)
-
-                # sanity check
-                corrected, reverted = colour_sanity_check(
-                    img, corrected, self.ref_colour_bgr)
+                corrected = algo_fn(img, cfg["ref_colour_bgr"])
+                corrected, reverted = colour_sanity_check(img, corrected, cfg["ref_colour_bgr"])
                 if reverted:
-                    print(f"  [REVERT] {p.name}: colour correction "
-                          f"worsened - kept original")
-
-                self.preview_pairs.append((img, corrected, p.name))
+                    print(f"  [REVERT] {p.name}: colour correction worsened - kept original")
+                preview_pairs.append((img, corrected, p.name))
                 self._update_progress(i, len(sample_indices), start_time)
 
-            # enter preview mode — schedule UI updates on main thread
+            self.preview_pairs = preview_pairs
             self.preview_mode = "colour"
             self.preview_idx = 0
-            self.after(0, self._show_preview_nav)
-            self.after(0, self._update_preview_display)
-            self.after(0, lambda: self.eta_label.configure(
-                text="Preview ready"))
-            print(f"  Preview ready: {len(self.preview_pairs)} images. "
-                  f"Use </> to navigate.")
+            self._ui_call(self._show_preview_nav)
+            self._ui_call(self._update_preview_display)
+            self._ui_set_eta("Preview ready")
+            print(f"  Preview ready: {len(self.preview_pairs)} images. Use </> to navigate.")
 
         except Exception as e:
             print(f"[ERROR] {e}")
-            messagebox.showerror("Error", str(e))
+            self._ui_message("error", "Error", str(e))
         finally:
             self._processing = False
 
     def _harmonise_colour_threaded(self):
         if self._processing:
             return
-        threading.Thread(target=self._run_harmonise_colour,
-                         daemon=True).start()
+        cfg = self._collect_colour_config()
+        if cfg is None:
+            return
+        threading.Thread(target=self._run_harmonise_colour, args=(cfg,), daemon=True).start()
 
-    def _run_harmonise_colour(self):
-        """Full colour harmonisation to reference image."""
+    def _run_harmonise_colour(self, cfg):
         try:
             self._processing = True
-            self.progress_bar.set(0)
-            self.eta_label.configure(text="ETA: --")
+            self._ui_set_progress_fraction(0)
+            self._ui_set_eta("ETA: --")
 
-            if not self._check_folders():
-                return
-            if self.ref_colour_bgr is None:
-                messagebox.showwarning(
-                    "Warning",
-                    "Select a reference image for colour first.")
-                return
-
-            exclude = self.exclude_bad_colour_var.get()
-            images = self._gather_images(exclude_bad=exclude)
-
-            # exclude reference from processing
-            ref_abs = os.path.abspath(self.ref_colour_path)
-            images = [p for p in images
-                      if os.path.abspath(str(p)) != ref_abs]
-
+            images = self._gather_images_from(cfg["input_folder"], recursive=cfg["recursive"],
+                                              exclude_bad=cfg["exclude_bad"], bad_list=cfg["bad_list"])
+            ref_abs = os.path.abspath(cfg["ref_colour_path"])
+            images = [p for p in images if os.path.abspath(str(p)) != ref_abs]
             if not images:
-                messagebox.showwarning("Warning",
-                                       "No images remaining.")
+                self._ui_message("warning", "Warning", "No images remaining.")
                 return
 
-            algo_name = self.colour_algo_var.get()
+            algo_name = cfg["algo_name"]
             algo_fn = COLOUR_ALGORITHMS[algo_name]
+            print(f"\nColour harmonisation ({algo_name}): {len(images)} images...")
+            print(f"  Reference: {os.path.basename(cfg['ref_colour_path'])}")
 
-            print(f"\nColour harmonisation ({algo_name}): "
-                  f"{len(images)} images...")
-            print(f"  Reference: "
-                  f"{os.path.basename(self.ref_colour_path)}")
-
-            input_root = Path(self.input_folder)
+            input_root = Path(cfg["input_folder"])
             counts = {"corrected": 0, "reverted": 0}
             start_time = time.time()
 
@@ -1667,31 +1675,22 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
                 if img is None:
                     print(f"[WARN] Cannot read: {p.name}")
                     continue
-
-                corrected = algo_fn(img, self.ref_colour_bgr)
-
-                # sanity check
-                corrected, reverted = colour_sanity_check(
-                    img, corrected, self.ref_colour_bgr)
+                corrected = algo_fn(img, cfg["ref_colour_bgr"])
+                corrected, reverted = colour_sanity_check(img, corrected, cfg["ref_colour_bgr"])
                 if reverted:
                     counts["reverted"] += 1
-                    print(f"  [REVERT] {p.name}: colour correction "
-                          f"worsened - kept original")
+                    print(f"  [REVERT] {p.name}: colour correction worsened - kept original")
                 else:
                     counts["corrected"] += 1
 
-                # preserve folder structure
                 rel = Path(p).relative_to(input_root)
                 if len(rel.parts) > 1:
                     parent = rel.parent
-                    out_parent = Path(self.output_folder) / (
-                        str(parent) + "_colour_harmonised")
+                    out_parent = Path(cfg["output_folder"]) / (str(parent) + "_colour_harmonised")
                 else:
-                    out_parent = Path(self.output_folder) / (
-                        input_root.name + "_colour_harmonised")
+                    out_parent = Path(cfg["output_folder"]) / (input_root.name + "_colour_harmonised")
                 out_parent.mkdir(parents=True, exist_ok=True)
                 out_path = out_parent / rel.name
-
                 cv2.imwrite(str(out_path), corrected)
 
                 if (idx + 1) % 10 == 0 or idx == 0:
@@ -1699,55 +1698,108 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
                 self._update_progress(idx, len(images), start_time)
 
             elapsed = time.time() - start_time
-            print(f"\nColour harmonisation complete "
-                  f"({format_eta(elapsed)} elapsed):")
+            print(f"\nColour harmonisation complete ({format_eta(elapsed)} elapsed):")
             print(f"  corrected: {counts['corrected']}")
             if counts["reverted"] > 0:
                 print(f"  reverted:  {counts['reverted']}")
 
-            # update result plot
-            self._restore_normal_plots()
-
-            # show reference in first panel
-            self.axes[0].imshow(
-                cv2.cvtColor(self.ref_colour_bgr, cv2.COLOR_BGR2RGB))
-            self.axes[0].set_title("Colour Reference", fontsize=9)
-            self.axes[0].axis("off")
-
-            # show counts in second panel
-            self.axes[1].clear()
-            plot_labels = [k for k in counts if counts[k] > 0]
-            plot_values = [counts[k] for k in plot_labels]
-            bar_colors = {"corrected": "#2ecc71", "reverted": "#7f8c8d"}
-            self.axes[1].bar(plot_labels, plot_values,
-                             color=[bar_colors.get(k, "#3498db")
-                                    for k in plot_labels])
-            self.axes[1].set_title("Colour Results")
-            self.axes[1].set_ylabel("Count")
-
-            self.axes[2].set_title(
-                f"Algorithm: {algo_name}", fontsize=9)
-            self.axes[2].text(
-                0.5, 0.5,
-                f"{counts['corrected']} corrected\n"
-                f"{counts['reverted']} reverted\n"
-                f"{format_eta(elapsed)} elapsed",
-                ha="center", va="center", fontsize=12,
-                transform=self.axes[2].transAxes)
-            self.axes[2].axis("off")
-
-            self.fig.tight_layout()
-            self.canvas_plot.draw()
-
-            self.eta_label.configure(text="Done")
-            messagebox.showinfo(
-                "Done",
-                f"Colour-harmonised images saved to:\n"
-                f"{self.output_folder}")
+            self._ui_call(self._render_colour_results, cfg["ref_colour_bgr"], counts, elapsed, algo_name)
+            self._ui_set_eta("Done")
+            self._ui_message("info", "Done", f"Colour-harmonised images saved to:\n{cfg['output_folder']}")
 
         except Exception as e:
             print(f"[ERROR] {e}")
-            messagebox.showerror("Error", str(e))
+            self._ui_message("error", "Error", str(e))
+        finally:
+            self._processing = False
+
+    # ——— averaging ———
+
+    def _average_images_threaded(self):
+        if self._processing:
+            return
+        cfg = self._collect_average_config()
+        if cfg is None:
+            return
+        threading.Thread(target=self._run_average_images, args=(cfg,), daemon=True).start()
+
+    def _run_average_images(self, cfg):
+        try:
+            self._processing = True
+            self._ui_set_progress_fraction(0)
+            self._ui_set_eta("ETA: --")
+
+            input_root = Path(cfg["input_folder"])
+            jobs = []
+            if cfg["recursive"]:
+                for root, _, files in os.walk(cfg["input_folder"]):
+                    imgs = [Path(root) / f for f in sorted(files) if Path(f).suffix.lower() in IMAGE_EXTS]
+                    if imgs:
+                        jobs.append((Path(root), imgs))
+            else:
+                imgs = collect_images(cfg["input_folder"])
+                if imgs:
+                    jobs.append((input_root, imgs))
+
+            if not jobs:
+                self._ui_message("warning", "Warning", "No images found.")
+                return
+
+            written_count = 0
+            skipped_count = 0
+            start_time = time.time()
+            print(f"\nAveraging images for {len(jobs)} folder(s)...")
+
+            for idx, (folder_path, imgs) in enumerate(jobs):
+                accum = None
+                ref_shape = None
+                valid_count = 0
+                skipped_local = 0
+                for p in imgs:
+                    img = cv2.imread(str(p), cv2.IMREAD_COLOR)
+                    if img is None:
+                        skipped_local += 1
+                        continue
+                    if ref_shape is None:
+                        ref_shape = img.shape
+                        accum = img.astype(np.float64)
+                        valid_count = 1
+                    elif img.shape == ref_shape:
+                        accum += img.astype(np.float64)
+                        valid_count += 1
+                    else:
+                        skipped_local += 1
+                        print(f"  [SKIP] {p.name}: size mismatch in {folder_path.name}")
+
+                if valid_count == 0 or accum is None:
+                    skipped_count += 1
+                    print(f"  [SKIP] {folder_path}: no valid readable images")
+                    self._update_progress(idx, len(jobs), start_time)
+                    continue
+
+                avg = np.clip(accum / valid_count, 0, 255).astype(np.uint8)
+                if cfg["recursive"]:
+                    rel = folder_path.relative_to(input_root)
+                    out_dir = Path(cfg["output_folder"]) / rel
+                else:
+                    out_dir = Path(cfg["output_folder"]) / input_root.name
+                out_dir.mkdir(parents=True, exist_ok=True)
+                out_name = f"{folder_path.name}_average.png"
+                out_path = out_dir / out_name
+                cv2.imwrite(str(out_path), avg)
+                written_count += 1
+                print(f"  Wrote average for {folder_path}: {out_path.name} ({valid_count} images, {skipped_local} skipped)")
+                self._update_progress(idx, len(jobs), start_time)
+
+            elapsed = time.time() - start_time
+            print(f"\nAveraging complete ({format_eta(elapsed)} elapsed): {written_count} written, {skipped_count} skipped.")
+            self._ui_call(self._render_average_results, len(jobs), written_count, skipped_count)
+            self._ui_set_eta("Done")
+            self._ui_message("info", "Done", f"Folder averages saved to:\n{cfg['output_folder']}")
+
+        except Exception as e:
+            print(f"[ERROR] {e}")
+            self._ui_message("error", "Error", str(e))
         finally:
             self._processing = False
 

@@ -38,63 +38,12 @@ import customtkinter as ctk
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
+from utils import fit_geometry, resource_path, setup_console, restore_console
+
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("green")
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
-
-# %% window resizer 
-
-def fit_geometry(window, design_w, design_h, resizable=True, margin=0.90):
-    """
-    Scale a window to fit the current screen while preserving
-    the aspect ratio of the original design size.
-    Centers the result on screen.  Never upscales beyond the design size.
-
-    Parameters
-    ----------
-    window      : Tk / CTk / CTkToplevel instance
-    design_w/h  : the "intended" pixel size (the old hardcoded values)
-    resizable   : whether the user can drag-resize afterward
-    margin      : fraction of screen to occupy at most (0.90 = 90 %)
-    """
-    screen_w = window.winfo_screenwidth()
-    screen_h = window.winfo_screenheight()
-
-    max_w = int(screen_w * margin)
-    max_h = int(screen_h * margin)
-
-    scale = min(max_w / design_w, max_h / design_h, 1.0)
-
-    final_w = int(design_w * scale)
-    final_h = int(design_h * scale)
-
-    x = (screen_w - final_w) // 2
-    y = max(0, (screen_h - final_h) // 2)
-
-    window.geometry(f"{final_w}x{final_h}+{x}+{y}")
-    window.resizable(resizable, resizable)
-
-# %% ————————————————————————————— util helpers ————————————————————————
-def resource_path(relative_path: str) -> str:
-    try:
-        base_path = sys._MEIPASS
-    except Exception:
-        base_path = os.path.dirname(__file__)
-    return os.path.join(base_path, relative_path)
-
-
-class StdoutRedirector:
-    def __init__(self, text_widget: tk.Text):
-        self.text_widget = text_widget
-
-    def write(self, message: str):
-        self.text_widget.insert(tk.END, message)
-        self.text_widget.see(tk.END)
-
-    def flush(self):
-        pass
-
 
 # %% ————————————————————————————— timestamp parsing ———————————————————
 # (shared with exploration.py — duplicated here so module is standalone)
@@ -245,6 +194,9 @@ class ProfileHovmullerWindow(ctk.CTkToplevel):
         except Exception:
             pass
 
+        # ——— close handler ———
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
         # ——— state ———
         self.image_folder = None
         self.output_folder = None
@@ -258,11 +210,11 @@ class ProfileHovmullerWindow(ctk.CTkToplevel):
         # ——— layout ———
         self.grid_rowconfigure(0, weight=3)
         self.grid_rowconfigure(1, weight=0)
-        self.grid_rowconfigure(2, weight=1)
+        self.grid_rowconfigure(2, weight=0)
         self.grid_columnconfigure(0, weight=1)
 
         # ---- TOP: display panel (3 plots) ----
-        self.top_panel = ctk.CTkFrame(self)
+        self.top_panel = ctk.CTkFrame(self, fg_color="black")
         self.top_panel.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
 
         self.fig, self.axes = plt.subplots(1, 3, figsize=(16, 5))
@@ -282,7 +234,7 @@ class ProfileHovmullerWindow(ctk.CTkToplevel):
 
         # ---- BOTTOM: controls ----
         self.bottom_panel = ctk.CTkFrame(self)
-        self.bottom_panel.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
+        self.bottom_panel.grid(row=2, column=0, sticky="nsew", padx=5, pady=5)
 
         # Row 1 — folders & sample image
         row1 = ctk.CTkFrame(self.bottom_panel)
@@ -372,12 +324,10 @@ class ProfileHovmullerWindow(ctk.CTkToplevel):
 
         # ---- CONSOLE ----
         self.console_frame = ctk.CTkFrame(self)
-        self.console_frame.grid(row=2, column=0, sticky="nsew", padx=5, pady=5)
-        self.console_text = tk.Text(self.console_frame, wrap="word", height=8)
+        self.console_frame.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
+        self.console_text = tk.Text(self.console_frame, wrap="word", height=10)
         self.console_text.pack(fill="both", expand=True, padx=5, pady=5)
-        self.stdout_redirector = StdoutRedirector(self.console_text)
-        sys.stdout = self.stdout_redirector
-        sys.stderr = self.stdout_redirector
+        self._console_redir = setup_console(self.console_text)
         print("Profile & Hovmöller Tool\n"
               "========================\n"
               "\n"
@@ -402,22 +352,160 @@ class ProfileHovmullerWindow(ctk.CTkToplevel):
               "  profiles.txt — tab-separated, one column per image\n"
               "================================")
 
+    def _on_close(self):
+        restore_console(getattr(self, "_console_redir", None))
+        self.destroy()
+
+    def _ui_call(self, func, *args, **kwargs):
+        try:
+            self.after(0, lambda: func(*args, **kwargs))
+        except Exception:
+            pass
+
+    def _ui_progress(self, value: float):
+        self._ui_call(self.progress_bar.set, value)
+
+    def _ui_message(self, level: str, title: str, message: str):
+        funcs = {
+            "info": messagebox.showinfo,
+            "warning": messagebox.showwarning,
+            "error": messagebox.showerror,
+        }
+        self._ui_call(funcs.get(level, messagebox.showinfo), title, message)
+
+    def _collect_generate_config(self):
+        if not self.image_folder:
+            self._ui_message("warning", "Warning", "Select an image folder first.")
+            return None
+        if not self.output_folder:
+            self._ui_message("warning", "Warning", "Select an output folder first.")
+            return None
+        try:
+            x1 = int(self.x1_entry.get())
+            y1 = int(self.y1_entry.get())
+            x2 = int(self.x2_entry.get())
+            y2 = int(self.y2_entry.get())
+        except (ValueError, TypeError):
+            self._ui_message(
+                "warning",
+                "Warning",
+                "Define a profile line first (click on the image or enter coordinates).",
+            )
+            return None
+        try:
+            avg_width = max(1, int(self.width_entry.get()))
+        except (ValueError, TypeError):
+            avg_width = 1
+        mode = self.mode_var.get()
+        user_fmt = self.fmt_entry.get().strip() or None
+        recursive = bool(self.recursive_var.get())
+        px_length = int(np.hypot(x2 - x1, y2 - y1))
+        if px_length < 2:
+            self._ui_message("warning", "Warning", "Profile line is too short.")
+            return None
+        return {
+            "image_folder": self.image_folder,
+            "output_folder": self.output_folder,
+            "x1": x1, "y1": y1, "x2": x2, "y2": y2,
+            "avg_width": avg_width,
+            "mode": mode,
+            "user_fmt": user_fmt,
+            "recursive": recursive,
+            "px_length": px_length,
+        }
+
+    def _display_generated_results(self, result):
+        profiles_gray = result["profiles_gray"]
+        timestamps = result["timestamps"]
+        hov_rgb = result["hov_rgb"]
+        hov_gray = result["hov_gray"]
+        n_imgs = result["n_imgs"]
+        n_pts = result["n_pts"]
+        mode = result["mode"]
+
+        self.profile_data = {
+            "hov_rgb": hov_rgb,
+            "hov_gray": hov_gray,
+            "timestamps": timestamps,
+            "filenames": result["filenames"],
+            "x1": result["x1"], "y1": result["y1"],
+            "x2": result["x2"], "y2": result["y2"],
+            "width": result["avg_width"], "mode": mode,
+        }
+
+        for cb in self._colorbars:
+            try:
+                cb.remove()
+            except Exception:
+                pass
+        self._colorbars = []
+
+        self.axes[1].clear()
+        dist_axis = np.arange(n_pts)
+        time_labels = [t.strftime("%Y-%m-%d\n%H:%M") for t in timestamps]
+
+        if mode == "RGB":
+            self.axes[1].imshow(hov_rgb, aspect="auto", interpolation="nearest",
+                                extent=[0, n_pts, n_imgs - 0.5, -0.5])
+            self.axes[1].set_title("Hovmöller — RGB")
+        else:
+            im = self.axes[1].imshow(hov_gray, aspect="auto", cmap="gray",
+                                     interpolation="nearest",
+                                     extent=[0, n_pts, n_imgs - 0.5, -0.5])
+            cb1 = self.fig.colorbar(im, ax=self.axes[1], fraction=0.03, pad=0.02)
+            self._colorbars.append(cb1)
+            self.axes[1].set_title("Hovmöller — Intensity")
+
+        self.axes[1].set_xlabel("Distance along profile (px)")
+        self.axes[1].set_ylabel("Image index")
+
+        max_labels = 20
+        if n_imgs > max_labels:
+            step = max(1, n_imgs // max_labels)
+            tick_pos = list(range(0, n_imgs, step))
+            tick_labels = [time_labels[i] for i in tick_pos]
+        else:
+            tick_pos = list(range(n_imgs))
+            tick_labels = time_labels
+        self.axes[1].set_yticks(tick_pos)
+        self.axes[1].set_yticklabels(tick_labels, fontsize=6)
+
+        self.axes[2].clear()
+        cmap = plt.cm.viridis
+        for i, prof in enumerate(profiles_gray):
+            color = cmap(i / max(n_imgs - 1, 1))
+            self.axes[2].plot(dist_axis, prof, color=color, alpha=0.4, linewidth=0.5)
+        self.axes[2].set_xlabel("Distance along profile (px)")
+        self.axes[2].set_ylabel("Intensity")
+        self.axes[2].set_title(f"Profile Overlay ({n_imgs} images)")
+        self.axes[2].grid(True, alpha=0.3)
+
+        sm = plt.cm.ScalarMappable(cmap=cmap, norm=Normalize(0, n_imgs - 1))
+        sm.set_array([])
+        cb2 = self.fig.colorbar(sm, ax=self.axes[2], fraction=0.03, pad=0.02)
+        cb2.set_label("Image index", fontsize=8)
+        self._colorbars.append(cb2)
+
+        self.fig.tight_layout()
+        self.canvas_plot.draw_idle()
+        self.progress_bar.set(0.85)
+
     # ——— browse callbacks ———
 
     def _browse_folder(self):
-        d = filedialog.askdirectory(parent= self,title="Select Image Folder")
+        d = filedialog.askdirectory(title="Select Image Folder")
         if d:
             self.image_folder = d
             self.folder_label.configure(text=d)
 
     def _browse_output(self):
-        d = filedialog.askdirectory(parent= self,title="Select Output Folder")
+        d = filedialog.askdirectory(title="Select Output Folder")
         if d:
             self.output_folder = d
             self.output_label.configure(text=d)
 
     def _load_sample(self):
-        p = filedialog.askopenfilename(parent= self,
+        p = filedialog.askopenfilename(
             title="Select Sample Image",
             filetypes=[("Images", "*.jpg *.jpeg *.png *.bmp *.tif *.tiff")])
         if not p:
@@ -556,60 +644,39 @@ class ProfileHovmullerWindow(ctk.CTkToplevel):
     # ——— generation ———
 
     def _generate_threaded(self):
-        threading.Thread(target=self._generate, daemon=True).start()
+        cfg = self._collect_generate_config()
+        if cfg is None:
+            return
+        self.progress_bar.set(0)
+        threading.Thread(target=self._generate, args=(cfg,), daemon=True).start()
 
-    def _generate(self):
+    def _generate(self, cfg):
         try:
-            self.progress_bar.set(0)
+            self._ui_progress(0)
 
-            # ---- validate ----
-            if not self.image_folder:
-                messagebox.showwarning("Warning",
-                                       "Select an image folder first.")
-                return
-            if not self.output_folder:
-                messagebox.showwarning("Warning",
-                                       "Select an output folder first.")
-                return
-
-            try:
-                x1 = int(self.x1_entry.get())
-                y1 = int(self.y1_entry.get())
-                x2 = int(self.x2_entry.get())
-                y2 = int(self.y2_entry.get())
-            except (ValueError, TypeError):
-                messagebox.showwarning(
-                    "Warning",
-                    "Define a profile line first (click on the image "
-                    "or enter coordinates).")
-                return
-
-            avg_width = max(1, int(self.width_entry.get()))
-            mode = self.mode_var.get()
-            user_fmt = self.fmt_entry.get().strip() or None
-            px_length = int(np.hypot(x2 - x1, y2 - y1))
-
-            if px_length < 2:
-                messagebox.showwarning("Warning",
-                                       "Profile line is too short.")
-                return
+            x1 = cfg["x1"]
+            y1 = cfg["y1"]
+            x2 = cfg["x2"]
+            y2 = cfg["y2"]
+            avg_width = cfg["avg_width"]
+            mode = cfg["mode"]
+            user_fmt = cfg["user_fmt"]
+            px_length = cfg["px_length"]
+            image_folder = cfg["image_folder"]
+            output_folder = cfg["output_folder"]
+            recursive = cfg["recursive"]
 
             print(f"\n=== Generating Hovmöller ===")
             print(f"Profile: ({x1},{y1}) → ({x2},{y2})  |  "
                   f"{px_length} px long  |  "
                   f"avg width: {avg_width} px  |  mode: {mode}")
 
-            # ---- collect images ----
-            image_list = collect_dated_images(
-                self.image_folder, user_fmt, self.recursive_var.get())
+            image_list = collect_dated_images(image_folder, user_fmt, recursive)
             if not image_list:
-                messagebox.showwarning(
-                    "Warning",
-                    "No images with parseable timestamps found.")
+                self._ui_message("warning", "Warning", "No images with parseable timestamps found.")
                 return
             print(f"Found {len(image_list)} dated images.")
 
-            # ---- extract profiles ----
             profiles_rgb = []
             profiles_gray = []
             timestamps = []
@@ -634,116 +701,54 @@ class ProfileHovmullerWindow(ctk.CTkToplevel):
 
                 if (idx + 1) % 20 == 0 or idx == 0:
                     print(f"  Extracted {idx + 1}/{len(image_list)}")
-                self.progress_bar.set((idx + 1) / len(image_list) * 0.7)
+                self._ui_progress((idx + 1) / len(image_list) * 0.7)
 
             if not profiles_rgb:
-                messagebox.showwarning("Warning",
-                                       "No profiles could be extracted.")
+                self._ui_message("warning", "Warning", "No profiles could be extracted.")
                 return
 
             n_imgs = len(profiles_rgb)
             n_pts = profiles_rgb[0].shape[0]
             print(f"\nExtracted {n_imgs} profiles, {n_pts} points each.")
 
-            # ---- build Hovmöller arrays ----
-            # RGB: (n_imgs, n_pts, 3) uint8
             hov_rgb = np.stack(profiles_rgb, axis=0)
             hov_rgb = np.clip(hov_rgb, 0, 255).astype(np.uint8)
-
-            # Intensity: (n_imgs, n_pts) float
             hov_gray = np.stack(profiles_gray, axis=0)
 
-            self.profile_data = {
-                "hov_rgb": hov_rgb,
-                "hov_gray": hov_gray,
+            self._ui_call(self._display_generated_results, {
+                "profiles_gray": profiles_gray,
                 "timestamps": timestamps,
                 "filenames": filenames,
+                "hov_rgb": hov_rgb,
+                "hov_gray": hov_gray,
+                "n_imgs": n_imgs,
+                "n_pts": n_pts,
+                "mode": mode,
                 "x1": x1, "y1": y1, "x2": x2, "y2": y2,
-                "width": avg_width, "mode": mode,
-            }
+                "avg_width": avg_width,
+            })
 
-            # ---- display ----
-            # remove any previous colorbars
-            for cb in self._colorbars:
-                try:
-                    cb.remove()
-                except Exception:
-                    pass
-            self._colorbars = []
-
-            # Hovmöller
-            self.axes[1].clear()
             dist_axis = np.arange(n_pts)
             time_labels = [t.strftime("%Y-%m-%d\n%H:%M") for t in timestamps]
-
-            if mode == "RGB":
-                self.axes[1].imshow(hov_rgb, aspect="auto",
-                                     interpolation="nearest",
-                                     extent=[0, n_pts, n_imgs - 0.5, -0.5])
-                self.axes[1].set_title("Hovmöller — RGB")
-            else:
-                im = self.axes[1].imshow(hov_gray, aspect="auto",
-                                          cmap="gray",
-                                          interpolation="nearest",
-                                          extent=[0, n_pts, n_imgs - 0.5, -0.5])
-                cb1 = self.fig.colorbar(im, ax=self.axes[1],
-                                         fraction=0.03, pad=0.02)
-                self._colorbars.append(cb1)
-                self.axes[1].set_title("Hovmöller — Intensity")
-
-            self.axes[1].set_xlabel("Distance along profile (px)")
-            self.axes[1].set_ylabel("Image index")
-
-            # add time labels on y-axis (subsample if many images)
             max_labels = 20
             if n_imgs > max_labels:
-                step = n_imgs // max_labels
+                step = max(1, n_imgs // max_labels)
                 tick_pos = list(range(0, n_imgs, step))
                 tick_labels = [time_labels[i] for i in tick_pos]
             else:
                 tick_pos = list(range(n_imgs))
                 tick_labels = time_labels
-            self.axes[1].set_yticks(tick_pos)
-            self.axes[1].set_yticklabels(tick_labels, fontsize=6)
 
-            # Profile overlay
-            self.axes[2].clear()
-            cmap = plt.cm.viridis
-            for i, prof in enumerate(profiles_gray):
-                color = cmap(i / max(n_imgs - 1, 1))
-                self.axes[2].plot(dist_axis, prof, color=color,
-                                  alpha=0.4, linewidth=0.5)
-            self.axes[2].set_xlabel("Distance along profile (px)")
-            self.axes[2].set_ylabel("Intensity")
-            self.axes[2].set_title(f"Profile Overlay ({n_imgs} images)")
-            self.axes[2].grid(True, alpha=0.3)
-
-            # add colorbar-like time indicator
-            sm = plt.cm.ScalarMappable(
-                cmap=cmap, norm=Normalize(0, n_imgs - 1))
-            sm.set_array([])
-            cb2 = self.fig.colorbar(sm, ax=self.axes[2],
-                                     fraction=0.03, pad=0.02)
-            cb2.set_label("Image index", fontsize=8)
-            self._colorbars.append(cb2)
-
-            self.fig.tight_layout()
-            self.canvas_plot.draw()
-            self.progress_bar.set(0.85)
-
-            # ---- save outputs ----
-            # Hovmöller PNG
             hov_fig, hov_ax = plt.subplots(figsize=(12, max(6, n_imgs * 0.04)))
             if mode == "RGB":
-                hov_ax.imshow(hov_rgb, aspect="auto",
-                               interpolation="nearest",
-                               extent=[0, n_pts, n_imgs - 0.5, -0.5])
+                hov_ax.imshow(hov_rgb, aspect="auto", interpolation="nearest",
+                              extent=[0, n_pts, n_imgs - 0.5, -0.5])
                 hov_ax.set_title("Hovmöller — RGB")
                 hov_name = "hovmuller_rgb.png"
             else:
                 hov_ax.imshow(hov_gray, aspect="auto", cmap="gray",
-                               interpolation="nearest",
-                               extent=[0, n_pts, n_imgs - 0.5, -0.5])
+                              interpolation="nearest",
+                              extent=[0, n_pts, n_imgs - 0.5, -0.5])
                 hov_ax.set_title("Hovmöller — Intensity")
                 hov_name = "hovmuller_intensity.png"
             hov_ax.set_xlabel("Distance along profile (px)")
@@ -751,33 +756,29 @@ class ProfileHovmullerWindow(ctk.CTkToplevel):
             hov_ax.set_yticks(tick_pos)
             hov_ax.set_yticklabels(tick_labels, fontsize=6)
             hov_fig.tight_layout()
-            hov_path = os.path.join(self.output_folder, hov_name)
+            hov_path = os.path.join(output_folder, hov_name)
             hov_fig.savefig(hov_path, dpi=200, bbox_inches="tight")
             plt.close(hov_fig)
             print(f"Saved: {hov_path}")
 
-            # Overlay PNG
+            cmap = plt.cm.viridis
             ov_fig, ov_ax = plt.subplots(figsize=(10, 5))
             for i, prof in enumerate(profiles_gray):
                 color = cmap(i / max(n_imgs - 1, 1))
-                ov_ax.plot(dist_axis, prof, color=color,
-                           alpha=0.4, linewidth=0.5)
+                ov_ax.plot(dist_axis, prof, color=color, alpha=0.4, linewidth=0.5)
             ov_ax.set_xlabel("Distance along profile (px)")
             ov_ax.set_ylabel("Intensity")
             ov_ax.set_title(f"Profile Overlay ({n_imgs} images)")
             ov_ax.grid(True, alpha=0.3)
             ov_fig.tight_layout()
-            ov_path = os.path.join(self.output_folder, "profile_overlay.png")
+            ov_path = os.path.join(output_folder, "profile_overlay.png")
             ov_fig.savefig(ov_path, dpi=200, bbox_inches="tight")
             plt.close(ov_fig)
             print(f"Saved: {ov_path}")
 
-            # Text file: one column per image
-            txt_path = os.path.join(self.output_folder, "profiles.txt")
+            txt_path = os.path.join(output_folder, "profiles.txt")
             with open(txt_path, "w", encoding="utf-8") as f:
-                # header
-                f.write("distance_px\t" +
-                        "\t".join(filenames) + "\n")
+                f.write("distance_px\t" + "\t".join(filenames) + "\n")
                 for j in range(n_pts):
                     row = [str(j)]
                     for i in range(n_imgs):
@@ -785,15 +786,16 @@ class ProfileHovmullerWindow(ctk.CTkToplevel):
                     f.write("\t".join(row) + "\n")
             print(f"Saved: {txt_path}")
 
-            self.progress_bar.set(1.0)
-            messagebox.showinfo(
+            self._ui_progress(1.0)
+            self._ui_message(
+                "info",
                 "Done",
-                f"Generated Hovmöller from {n_imgs} images.\n\n"
-                f"Outputs saved to:\n{self.output_folder}")
+                f"Generated Hovmöller from {n_imgs} images.\n\nOutputs saved to:\n{output_folder}",
+            )
 
         except Exception as e:
             print(f"[ERROR] {e}")
-            messagebox.showerror("Error", str(e))
+            self._ui_message("error", "Error", str(e))
 
 
 # ——— standalone ———

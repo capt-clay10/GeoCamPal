@@ -25,37 +25,7 @@ from PIL import Image
 import cv2
 import numpy as np
 
-# %% window resizer 
-
-def fit_geometry(window, design_w, design_h, resizable=True, margin=0.90):
-    """
-    Scale a window to fit the current screen while preserving
-    the aspect ratio of the original design size.
-    Centers the result on screen.  Never upscales beyond the design size.
-
-    Parameters
-    ----------
-    window      : Tk / CTk / CTkToplevel instance
-    design_w/h  : the "intended" pixel size (the old hardcoded values)
-    resizable   : whether the user can drag-resize afterward
-    margin      : fraction of screen to occupy at most (0.90 = 90 %)
-    """
-    screen_w = window.winfo_screenwidth()
-    screen_h = window.winfo_screenheight()
-
-    max_w = int(screen_w * margin)
-    max_h = int(screen_h * margin)
-
-    scale = min(max_w / design_w, max_h / design_h, 1.0)
-
-    final_w = int(design_w * scale)
-    final_h = int(design_h * scale)
-
-    x = (screen_w - final_w) // 2
-    y = max(0, (screen_h - final_h) // 2)
-
-    window.geometry(f"{final_w}x{final_h}+{x}+{y}")
-    window.resizable(resizable, resizable)
+from utils import fit_geometry, setup_console, resource_path as _resource_path
 
 # Import profile extraction from the profile tool (used for AOI filtering)
 try:
@@ -94,7 +64,7 @@ ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("green")
 
 # %% Import mixin classes and helpers
-from hsv_mask_ui import BBoxSelectorWindow, StdoutRedirector, HSVMaskUIMixin
+from hsv_mask_ui import BBoxSelectorWindow, HSVMaskUIMixin
 from hsv_mask_processing import HSVMaskProcessingMixin
 from hsv_mask_editing import HSVMaskEditingMixin
 
@@ -118,12 +88,7 @@ class FeatureIdentifier(HSVMaskEditingMixin, HSVMaskProcessingMixin, HSVMaskUIMi
 
     @staticmethod
     def resource_path(relative_path: str) -> str:
-        try:
-            base_path = sys._MEIPASS  # If running in a PyInstaller .exe
-        except Exception:
-            # Running directly from source
-            base_path = os.path.dirname(__file__)
-        return os.path.join(base_path, relative_path)
+        return _resource_path(relative_path)
 
     def __init__(self, master=None, mode="individual", *args, **kwargs):
 
@@ -215,12 +180,10 @@ class FeatureIdentifier(HSVMaskEditingMixin, HSVMaskProcessingMixin, HSVMaskUIMi
             self.console_text = scrolledtext.ScrolledText(
                 self.console_frame, wrap="word", height=10)
             self.console_text.pack(side="left", fill="both", expand=True)
-            self.stdout_redirector = StdoutRedirector(self.console_text)
-            self.original_stdout = sys.stdout
-            sys.stdout = self.stdout_redirector
-            self.original_stderr = sys.stderr
-            sys.stderr = self.stdout_redirector
-            print("Here you may see console outputs\n--------------------------------\n")
+            self._console_redir = setup_console(
+                self.console_text,
+                "Here you may see console outputs\n--------------------------------\n",
+            )
 
             # image display window
             self.image_display_window = ctk.CTkToplevel(self)
@@ -234,7 +197,7 @@ class FeatureIdentifier(HSVMaskEditingMixin, HSVMaskProcessingMixin, HSVMaskUIMi
             except:
                 pass
 
-            self.top_frame = ctk.CTkFrame(self.image_display_window)
+            self.top_frame = ctk.CTkFrame(self.image_display_window, fg_color="black")
             self.top_frame.pack(fill="both", expand=True)
 
             self.top_frame.grid_columnconfigure(0, weight=1, minsize=400, uniform="panels")
@@ -244,15 +207,15 @@ class FeatureIdentifier(HSVMaskEditingMixin, HSVMaskProcessingMixin, HSVMaskUIMi
 
             self.top_frame.grid_rowconfigure(0, weight=1)
 
-            self.top_left_frame = ctk.CTkFrame(self.top_frame)
+            self.top_left_frame = ctk.CTkFrame(self.top_frame, fg_color="black")
             self.top_left_frame.pack_propagate(False)
             self.top_left_frame.grid_propagate(False)
             self.top_left_frame.configure(width=400, height=400)
 
             self.top_center_frame = ctk.CTkFrame(
-                self.top_frame, fg_color="white")
+                self.top_frame, fg_color="black")
             self.top_right_frame = ctk.CTkFrame(
-                self.top_frame, fg_color="white")
+                self.top_frame, fg_color="black")
 
             self.top_left_frame.grid(row=0, column=0, sticky="nsew")
             self.top_center_frame.grid(row=0, column=1, sticky="nsew")
@@ -263,11 +226,11 @@ class FeatureIdentifier(HSVMaskEditingMixin, HSVMaskProcessingMixin, HSVMaskUIMi
             self.image_label.pack(fill="both", expand=True)
 
             self.mask_label = ctk.CTkLabel(
-                self.top_center_frame, text="", fg_color="white", anchor="center")
+                self.top_center_frame, text="", fg_color="black", anchor="center")
             self.mask_label.pack(fill="both", expand=True)
 
             self.edge_label = ctk.CTkLabel(
-                self.top_right_frame, text="", fg_color="white", anchor="center")
+                self.top_right_frame, text="", fg_color="black", anchor="center")
             self.edge_label.pack(fill="both", expand=True)
 
             self.top_center_frame.grid_propagate(False)
@@ -315,7 +278,7 @@ class FeatureIdentifier(HSVMaskEditingMixin, HSVMaskProcessingMixin, HSVMaskUIMi
                 font=("Arial", 11), justify="left", text_color="gray"
             ).pack(side="top", fill="x", padx=10, pady=5)
 
-            self.top_frame = ctk.CTkFrame(main_frame)
+            self.top_frame = ctk.CTkFrame(main_frame, fg_color="black")
             self.top_frame.pack(side="top", fill="both", expand=True)
 
             # Settings summary label — shows what pipeline is configured
@@ -341,21 +304,21 @@ class FeatureIdentifier(HSVMaskEditingMixin, HSVMaskProcessingMixin, HSVMaskUIMi
                 side="bottom", fill="x", expand=False, padx=5, pady=0)
 
             self.console_text = scrolledtext.ScrolledText(
-                self.console_frame, wrap="word", height=6)
+                self.console_frame, wrap="word", height=10)
             self.console_text.pack(side="left", fill="both", expand=True)
 
-            self.stdout_redirector = StdoutRedirector(self.console_text)
-            self.original_stdout = sys.stdout
-            sys.stdout = self.stdout_redirector
-            self.original_stderr = sys.stderr
-            sys.stderr = self.stdout_redirector
-            print("Here you may see console outputs\n")
+            self._console_redir = setup_console(
+                self.console_text,
+                "Here you may see console outputs",
+            )
 
             self.bottom_frame = ctk.CTkFrame(main_frame)
             self.bottom_frame.pack(side="bottom", fill="x", expand=False)
 
             # Setup controls for batch
             self.setup_controls(self.bottom_frame)
+
+            self.protocol("WM_DELETE_WINDOW", self.on_all_close)
 
         # Shared variables
         self.cv_image = None

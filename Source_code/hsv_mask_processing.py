@@ -9,7 +9,6 @@ together with the UI and editing mixins.
 """
 
 import os
-import sys
 import tkinter as tk
 from tkinter import filedialog, messagebox
 import customtkinter as ctk
@@ -22,6 +21,8 @@ import rasterio
 import warnings
 from rasterio.errors import NotGeoreferencedWarning
 from difflib import SequenceMatcher
+
+from utils import restore_console
 
 warnings.filterwarnings("ignore", category=NotGeoreferencedWarning)
 
@@ -272,9 +273,7 @@ class HSVMaskProcessingMixin:
             self.calculate_mask()
 
     def on_all_close(self):
-        # Restore stdout
-        sys.stdout = self.original_stdout
-        sys.stderr = self.original_stderr
+        restore_console(getattr(self, "_console_redir", None))
 
         # Destroy image window if it still exists
         if hasattr(self, "image_display_window") and self.image_display_window.winfo_exists():
@@ -291,22 +290,32 @@ class HSVMaskProcessingMixin:
                 except Exception:
                     pass
             # recreate the standard mask label
-            self.mask_label = ctk.CTkLabel(self.top_center_frame, text="", fg_color="white", anchor="center")
+            self.mask_label = ctk.CTkLabel(self.top_center_frame, text="", fg_color="black", anchor="center")
             self.mask_label.pack(fill="both", expand=True)
 
     # -------------- IMPORT/LOAD --------------
 
     def load_image(self):
         file_path = filedialog.askopenfilename(
+            parent=self,
+            title="Select Image",
             filetypes=[
-                ("Image Files", "*.png;*.jpg;*.jpeg;*.bmp;*.tif;*.tiff")]
+                ("Image Files", "*.png *.jpg *.jpeg *.bmp *.tif *.tiff"),
+                ("JPEG", "*.jpg *.jpeg"),
+                ("PNG", "*.png"),
+                ("Bitmap", "*.bmp"),
+                ("TIFF", "*.tif *.tiff"),
+                ("All Files", "*.*"),
+            ],
         )
         if not file_path:
             return
+    
         original_image = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
         if original_image is None:
-            messagebox.showerror("Error", f"Failed to load image: {file_path}")
+            messagebox.showerror("Error", f"Failed to load image: {file_path}", parent=self)
             return
+    
         self.image_path = file_path
         self.filename_label.configure(text=os.path.basename(file_path))
         self.full_image = original_image.copy()
@@ -315,7 +324,7 @@ class HSVMaskProcessingMixin:
             self.process_loaded_image(original_image)
 
     def load_folder(self):
-        folder = filedialog.askdirectory()
+        folder = filedialog.askdirectory(parent=self)
         if not folder:
             return
         exts = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff")

@@ -10,63 +10,21 @@ from PIL.PngImagePlugin import PngInfo
 import re
 import cv2
 import numpy as np
-import sys
 import tifffile
 import customtkinter as ctk
 import rasterio
 from scipy.interpolate import interp1d
 import concurrent.futures
 
+from utils import fit_geometry, resource_path, setup_console, restore_console
+
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("green")
 
-# %% window resizer 
-
-def fit_geometry(window, design_w, design_h, resizable=True, margin=0.90):
-    """
-    Scale a window to fit the current screen while preserving
-    the aspect ratio of the original design size.
-    Centers the result on screen.  Never upscales beyond the design size.
-
-    Parameters
-    ----------
-    window      : Tk / CTk / CTkToplevel instance
-    design_w/h  : the "intended" pixel size (the old hardcoded values)
-    resizable   : whether the user can drag-resize afterward
-    margin      : fraction of screen to occupy at most (0.90 = 90 %)
-    """
-    screen_w = window.winfo_screenwidth()
-    screen_h = window.winfo_screenheight()
-
-    max_w = int(screen_w * margin)
-    max_h = int(screen_h * margin)
-
-    scale = min(max_w / design_w, max_h / design_h, 1.0)
-
-    final_w = int(design_w * scale)
-    final_h = int(design_h * scale)
-
-    x = (screen_w - final_w) // 2
-    y = max(0, (screen_h - final_h) // 2)
-
-    window.geometry(f"{final_w}x{final_h}+{x}+{y}")
-    window.resizable(resizable, resizable)
-
 # %% helpers
-# StdoutRedirector: Redirect console output to the built-in console widget
-# -------------------------------------------------------------------------------
-class StdoutRedirector:
-    def __init__(self, text_widget):
-        self.text_widget = text_widget
-
-    def write(self, message):
-        self.text_widget.insert(tk.END, message)
-        self.text_widget.see(tk.END)
-
-    def flush(self):
-        pass
 
 # Robust timestamp parsing 
+
 # -------------------------------------------------------------------------------
 # Patterns we’ll accept in filenames (we search anywhere in the basename)
 _PATTERNS = [
@@ -207,7 +165,7 @@ class ScrollZoomBBoxSelector(tk.Frame):
 
     def load_image(self, file_path=None):
         if file_path is None:
-            file_path = filedialog.askopenfilename(parent= self,
+            file_path = filedialog.askopenfilename(
                 title="Open Image",
                 filetypes=[("Image Files", "*.jpg *.jpeg *.png *.bmp *.tif *.gif")],
             )
@@ -440,17 +398,8 @@ def generate_no_fill(image_files, bbox, resolution_x_m, output_path, progress_ca
     return output_path
 
 
-# Utility to get resource path
-# -------------------------------------------------------------------------------
-def resource_path(rel: str) -> str:
-    try:
-        base = sys._MEIPASS
-    except Exception:
-        base = os.path.dirname(__file__)
-    return os.path.join(base, rel)
-
-
 # Helper executed in worker processes  
+
 # -------------------------------------------------------------------------------
 def _process_subfolder(sub_path: str, bbox: tuple, res_x: float,
                        freq: float, dur: float, fill_gaps: bool,
@@ -505,6 +454,8 @@ class TimestackTool(ctk.CTkToplevel):
         except Exception:
             pass
 
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
         self.input_folder = tk.StringVar()
         self.output_folder = tk.StringVar()
         self.batch_folder = tk.StringVar()
@@ -523,23 +474,59 @@ class TimestackTool(ctk.CTkToplevel):
 
         self._build_ui()
 
-        self.stdout_redirector = StdoutRedirector(self.console_text)
-        sys.stdout = self.stdout_redirector
-        sys.stderr = self.stdout_redirector
-        print("Here you may see console outputs\n--------------------------------\n")
+        self._console_redir = setup_console(
+            self.console_text,
+            "Here you may see console outputs\n--------------------------------\n"
+        )
+
+    def _on_close(self):
+        restore_console(getattr(self, "_console_redir", None))
+        self.destroy()
+
+    def _ui_call(self, func, *args, **kwargs):
+        try:
+            self.after(0, lambda: func(*args, **kwargs))
+        except Exception:
+            pass
+
+    def _ui_message(self, kind, title, message):
+        fn = getattr(messagebox, f"show{kind}")
+        self._ui_call(fn, title, message)
+
+    def _ui_single_progress(self, current, total):
+        total = max(int(total), 1)
+        frac = max(0.0, min(1.0, float(current) / float(total)))
+        self._ui_call(self.single_pb.set, frac)
+        self._ui_call(self.single_lbl.configure, text=f"{current} / {total}")
+
+    def _apply_single_preview(self, image_path):
+        pil = Image.open(image_path)
+        preview = ctk.CTkImage(light_image=pil, size=(800, min(600, pil.height)))
+        self.image_label.configure(image=preview)
+        self.image_label.image = preview
+
+    def _ui_batch_progress(self, fraction, label_text):
+        self._ui_call(self.batch_pb.set, fraction)
+        self._ui_call(self.batch_lbl.configure, text=label_text)
 
     # ( UI-building helpers)
     # ---------------------------------------------------------------------------
     def _build_ui(self):
         # Top: preview image
-        self.top_frame = ctk.CTkFrame(self, height=400)
+        self.top_frame = ctk.CTkFrame(self, height=400, fg_color="black")
         self.top_frame.pack(fill="both", expand=True, padx=10, pady=10)
         self.image_label = ctk.CTkLabel(self.top_frame, text="")
         self.image_label.pack(expand=True)
 
+        # Middle: console
+        cf = ctk.CTkFrame(self)
+        cf.pack(fill="both", expand=False, padx=10, pady=(0, 10))
+        self.console_text = tk.Text(cf, wrap="word", height=10)
+        self.console_text.pack(fill="both", expand=True, padx=5, pady=5)
+
         # Bottom: control panels
         self.bottom_frame = ctk.CTkFrame(self, height=250)
-        self.bottom_frame.pack(fill="x", padx=10, pady=10)
+        self.bottom_frame.pack(fill="x", padx=10, pady=(0, 10))
 
         # Input / ROI panel
         ip = ctk.CTkFrame(self.bottom_frame)
@@ -606,11 +593,6 @@ class TimestackTool(ctk.CTkToplevel):
         self.batch_lbl = ctk.CTkLabel(bp, text="")
         self.batch_lbl.grid(row=0, column=4, padx=5, pady=5, sticky="w")
 
-        # Console panel
-        cf = ctk.CTkFrame(self)
-        cf.pack(fill="both", expand=False, padx=10, pady=10)
-        self.console_text = tk.Text(cf, wrap="word", height=10)
-        self.console_text.pack(fill="both", expand=True, padx=5, pady=5)
 
     # ---------------------------------------------------------------------------
     # Simple helpers (unchanged)
@@ -622,17 +604,17 @@ class TimestackTool(ctk.CTkToplevel):
         self.resolution_entry.configure(state="normal" if self.add_resolution_manual.get() else "disabled")
 
     def browse_input_folder(self):
-        f = filedialog.askdirectory(parent= self,title="Select Input Folder with Images")
+        f = filedialog.askdirectory(title="Select Input Folder with Images")
         if f:
             self.input_folder.set(f)
 
     def select_output_folder(self):
-        f = filedialog.askdirectory(parent= self,title="Select Output Folder for Raw Timestack")
+        f = filedialog.askdirectory(title="Select Output Folder for Raw Timestack")
         if f:
             self.output_folder.set(f)
 
     def browse_batch_folder(self):
-        f = filedialog.askdirectory(parent= self,title="Select Main Batch Folder (sub-folders per batch)")
+        f = filedialog.askdirectory(title="Select Main Batch Folder (sub-folders per batch)")
         if f:
             self.batch_folder.set(f)
 
@@ -746,13 +728,13 @@ class TimestackTool(ctk.CTkToplevel):
 
         out_name = f"{first_ts}_raw_timestack.png"
         out_path = os.path.join(outf, out_name)
+        fill_gaps = bool(self.fill_gaps.get())
 
         def worker():
             def upd(c, t):
-                self.single_pb.set(c / t)
-                self.single_lbl.configure(text=f"{c} / {t}")
+                self._ui_single_progress(c, t)
             try:
-                if self.fill_gaps.get():
+                if fill_gaps:
                     gen = generate_with_fill(
                         imgs, self.bbox, res_x, out_path,
                         freq_hz=freq, duration_s=dur,
@@ -763,16 +745,13 @@ class TimestackTool(ctk.CTkToplevel):
                         imgs, self.bbox, res_x, out_path,
                         progress_callback=upd
                     )
-                messagebox.showinfo("Success", f"Timestack saved to:\n{gen}")
-                pil = Image.open(gen)
-                preview = ctk.CTkImage(light_image=pil, size=(800, min(600, pil.height)))
-                self.image_label.configure(image=preview)
-                self.image_label.image = preview
+                self._ui_message("info", "Success", f"Timestack saved to:\n{gen}")
+                self._ui_call(self._apply_single_preview, gen)
             except Exception as e:
-                messagebox.showerror("Error", str(e))
+                self._ui_message("error", "Error", str(e))
             finally:
-                self.single_pb.set(0)
-                self.single_lbl.configure(text="")
+                self._ui_call(self.single_pb.set, 0)
+                self._ui_call(self.single_lbl.configure, text="")
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -860,12 +839,12 @@ class TimestackTool(ctk.CTkToplevel):
         self.batch_pb.set(0)
         self.batch_lbl.configure(text="ETA: --")
         start = time.time()
+        fill_gaps = bool(self.fill_gaps.get())
         print(f"Batch process has started – {total} new sub-folders "
               f"(skipped {skipped} already done)")
 
         def update_ui(done_cnt: int):
             frac = done_cnt / total
-            self.batch_pb.set(frac)
 
             elapsed = time.time() - start
             if done_cnt:
@@ -873,7 +852,8 @@ class TimestackTool(ctk.CTkToplevel):
             else:
                 est_remaining = 0
             m, s = divmod(int(est_remaining), 60)
-            self.batch_lbl.configure(text=f"{m}m {s}s" if m else f"{s}s")
+            label = f"{m}m {s}s" if m else f"{s}s"
+            self._ui_batch_progress(frac, label)
 
         # ---------- Worker thread that controls the ThreadPool ----------
         def controller():
@@ -883,7 +863,7 @@ class TimestackTool(ctk.CTkToplevel):
                                                        thread_name_prefix="batch") as pool:
                 futures = [pool.submit(
                     _process_subfolder, sub, self.bbox, res_x, freq, dur,
-                    self.fill_gaps.get(), outf) for sub in subs_to_do]
+                    fill_gaps, outf) for sub in subs_to_do]
 
                 for fut in concurrent.futures.as_completed(futures):
                     sub_path, status, msg = fut.result()
@@ -901,7 +881,8 @@ class TimestackTool(ctk.CTkToplevel):
             elapsed = time.time() - start
             elapsed_str = f"{elapsed/60:.1f} min" if elapsed >= 60 else f"{elapsed:.1f} s"
             print(f"Batch process complete in {elapsed_str}")
-            messagebox.showinfo(
+            self._ui_message(
+                "info",
                 "Batch Done",
                 f"Newly processed: {done}\n"
                 f"Previously done: {skipped}\n"
@@ -909,8 +890,7 @@ class TimestackTool(ctk.CTkToplevel):
                 f"Elapsed time: {elapsed_str}\n\n"
                 "Batch process complete"
             )
-            self.batch_pb.set(0)
-            self.batch_lbl.configure(text="")
+            self._ui_batch_progress(0, "")
 
         threading.Thread(target=controller, daemon=True).start()
 

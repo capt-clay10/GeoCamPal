@@ -36,60 +36,10 @@ import customtkinter as ctk
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
+from utils import fit_geometry, resource_path, setup_console, restore_console
+
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("green")
-
-# %% window resizer 
-
-def fit_geometry(window, design_w, design_h, resizable=True, margin=0.90):
-    """
-    Scale a window to fit the current screen while preserving
-    the aspect ratio of the original design size.
-    Centers the result on screen.  Never upscales beyond the design size.
-
-    Parameters
-    ----------
-    window      : Tk / CTk / CTkToplevel instance
-    design_w/h  : the "intended" pixel size (the old hardcoded values)
-    resizable   : whether the user can drag-resize afterward
-    margin      : fraction of screen to occupy at most (0.90 = 90 %)
-    """
-    screen_w = window.winfo_screenwidth()
-    screen_h = window.winfo_screenheight()
-
-    max_w = int(screen_w * margin)
-    max_h = int(screen_h * margin)
-
-    scale = min(max_w / design_w, max_h / design_h, 1.0)
-
-    final_w = int(design_w * scale)
-    final_h = int(design_h * scale)
-
-    x = (screen_w - final_w) // 2
-    y = max(0, (screen_h - final_h) // 2)
-
-    window.geometry(f"{final_w}x{final_h}+{x}+{y}")
-    window.resizable(resizable, resizable)
-
-# %% ————————————————————————————— util helpers ————————————————————————
-def resource_path(relative_path: str) -> str:
-    try:
-        base_path = sys._MEIPASS
-    except Exception:
-        base_path = os.path.dirname(__file__)
-    return os.path.join(base_path, relative_path)
-
-
-class StdoutRedirector:
-    def __init__(self, text_widget: tk.Text):
-        self.text_widget = text_widget
-
-    def write(self, message: str):
-        self.text_widget.insert(tk.END, message)
-        self.text_widget.see(tk.END)
-
-    def flush(self):
-        pass
 
 
 # %% ————————————————————————————— main GUI ————————————————————————————
@@ -106,6 +56,9 @@ class LensCorrectionWindow(ctk.CTkToplevel):
         except Exception:
             pass
 
+        # ——— close handler ———
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
         # ——— state ———
         self.input_folder = None
         self.output_folder = None
@@ -114,11 +67,11 @@ class LensCorrectionWindow(ctk.CTkToplevel):
         # ——— layout ———
         self.grid_rowconfigure(0, weight=3)
         self.grid_rowconfigure(1, weight=0)
-        self.grid_rowconfigure(2, weight=1)
+        self.grid_rowconfigure(2, weight=0)
         self.grid_columnconfigure(0, weight=1)
 
         # ---- TOP: preview panel ----
-        self.top_panel = ctk.CTkFrame(self)
+        self.top_panel = ctk.CTkFrame(self, fg_color="black")
         self.top_panel.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
 
         self.fig, self.axes = plt.subplots(1, 2, figsize=(12, 5))
@@ -132,7 +85,7 @@ class LensCorrectionWindow(ctk.CTkToplevel):
 
         # ---- BOTTOM: controls ----
         self.bottom_panel = ctk.CTkFrame(self)
-        self.bottom_panel.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
+        self.bottom_panel.grid(row=2, column=0, sticky="nsew", padx=5, pady=5)
 
         # Row 1 — input folder
         row1 = ctk.CTkFrame(self.bottom_panel)
@@ -197,21 +150,25 @@ class LensCorrectionWindow(ctk.CTkToplevel):
 
         # ---- CONSOLE ----
         self.console_frame = ctk.CTkFrame(self)
-        self.console_frame.grid(row=2, column=0, sticky="nsew", padx=5, pady=5)
-        self.console_text = tk.Text(self.console_frame, wrap="word", height=8)
+        self.console_frame.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
+        self.console_text = tk.Text(self.console_frame, wrap="word", height=10)
         self.console_text.pack(fill="both", expand=True, padx=5, pady=5)
-        self.stdout_redirector = StdoutRedirector(self.console_text)
-        sys.stdout = self.stdout_redirector
-        sys.stderr = self.stdout_redirector
-        print("Lens Correction Tool ready.\n"
-              "Provide a folder of checkerboard images.\n"
-              "Enter the number of SQUARES (not inner corners) — the\n"
-              "tool automatically converts to inner corners (squares − 1).\n"
-              "  e.g. 17 squares across × 19 down → 16 × 18 inner corners\n"
-              "Cell width/height = physical size of each cell in mm.\n"
-              "For square checkerboards, set both to the same value.\n"
-              "Output: lens_calibration.pkl  +  calibration_report.txt\n"
-              "--------------------------------")
+        self._console_redir = setup_console(self.console_text,
+            "Lens Correction Tool ready.\n"
+            "Provide a folder of checkerboard images.\n"
+            "Enter the number of SQUARES (not inner corners) — the\n"
+            "tool automatically converts to inner corners (squares − 1).\n"
+            "  e.g. 17 squares across × 19 down → 16 × 18 inner corners\n"
+            "Cell width/height = physical size of each cell in mm.\n"
+            "For square checkerboards, set both to the same value.\n"
+            "Output: lens_calibration.pkl  +  calibration_report.txt\n"
+            "--------------------------------")
+
+    # ——————————————————————————— close handler —————————————————————————
+    def _on_close(self):
+        """Clean up and close the window."""
+        restore_console(self._console_redir)
+        self.destroy()
 
     # ——— browse callbacks ———
 
@@ -268,34 +225,69 @@ class LensCorrectionWindow(ctk.CTkToplevel):
 
     # ——— calibration ———
 
+    def _ui_call(self, func, *args, **kwargs):
+        self.after(0, lambda: func(*args, **kwargs))
+
+    def _ui_message(self, kind, title, message):
+        fn = getattr(messagebox, f"show{kind}")
+        self._ui_call(fn, title, message)
+
+    def _ui_progress(self, value):
+        self._ui_call(self.progress_bar.set, value)
+
+    def _apply_preview(self, vis_bgr, undist_bgr):
+        self.axes[0].clear()
+        self.axes[0].imshow(cv2.cvtColor(vis_bgr, cv2.COLOR_BGR2RGB))
+        self.axes[0].set_title("Detected Corners (sample)")
+        self.axes[0].axis("off")
+
+        self.axes[1].clear()
+        self.axes[1].imshow(cv2.cvtColor(undist_bgr, cv2.COLOR_BGR2RGB))
+        self.axes[1].set_title("Undistorted Result")
+        self.axes[1].axis("off")
+        self.fig.tight_layout()
+        self.canvas_plot.draw()
+
+    def _collect_calibration_config(self):
+        return {
+            "input_folder": self.input_folder,
+            "output_folder": self.output_folder,
+            "sq_cols": int(self.cols_entry.get()),
+            "sq_rows": int(self.rows_entry.get()),
+            "cell_w_mm": float(self.cell_w_entry.get()),
+            "cell_h_mm": float(self.cell_h_entry.get()),
+        }
+
     def _calibrate_threaded(self):
-        threading.Thread(target=self._calibrate, daemon=True).start()
+        cfg = self._collect_calibration_config()
+        threading.Thread(target=self._calibrate, args=(cfg,), daemon=True).start()
 
-    def _calibrate(self):
+    def _calibrate(self, cfg):
         try:
-            if not self.input_folder:
-                messagebox.showwarning("Warning",
-                                       "Select a checkerboard image folder "
-                                       "first.")
+            input_folder = cfg["input_folder"]
+            output_folder = cfg["output_folder"]
+            if not input_folder:
+                self._ui_message("warning", "Warning",
+                                 "Select a checkerboard image folder first.")
                 return
-            if not self.output_folder:
-                messagebox.showwarning("Warning",
-                                       "Select an output folder first.")
+            if not output_folder:
+                self._ui_message("warning", "Warning",
+                                 "Select an output folder first.")
                 return
 
-            sq_cols = int(self.cols_entry.get())
-            sq_rows = int(self.rows_entry.get())
+            sq_cols = cfg["sq_cols"]
+            sq_rows = cfg["sq_rows"]
             # OpenCV needs inner corners = squares − 1 in each direction
             n_cols = sq_cols - 1
             n_rows = sq_rows - 1
             if n_cols < 2 or n_rows < 2:
-                messagebox.showerror(
+                self._ui_message(
+                    "error",
                     "Error",
-                    "Need at least 3 squares in each direction "
-                    "(2 inner corners).")
+                    "Need at least 3 squares in each direction (2 inner corners).")
                 return
-            cell_w_mm = float(self.cell_w_entry.get())
-            cell_h_mm = float(self.cell_h_entry.get())
+            cell_w_mm = cfg["cell_w_mm"]
+            cell_h_mm = cfg["cell_h_mm"]
             cell_w_m = cell_w_mm / 1000.0
             cell_h_m = cell_h_mm / 1000.0
 
@@ -304,11 +296,10 @@ class LensCorrectionWindow(ctk.CTkToplevel):
                          else f"{cell_w_mm} × {cell_h_mm} mm")
 
             pattern_size = (n_cols, n_rows)
-            images = self._collect_images(self.input_folder)
+            images = self._collect_images(input_folder)
             if not images:
-                messagebox.showwarning("Warning",
-                                       "No images found in the selected "
-                                       "folder.")
+                self._ui_message("warning", "Warning",
+                                 "No images found in the selected folder.")
                 return
 
             print(f"Found {len(images)} images.")
@@ -317,17 +308,12 @@ class LensCorrectionWindow(ctk.CTkToplevel):
                   f"cell size {cell_desc} …\n")
 
             # ---- prepare object points ----
-            # For a rectangular (non-square) checkerboard the X and Y
-            # coordinates of each corner are scaled independently.
-            #   X axis → column index × cell_width
-            #   Y axis → row index    × cell_height
             objp = np.zeros((n_cols * n_rows, 3), np.float32)
             for r in range(n_rows):
                 for c in range(n_cols):
                     idx = r * n_cols + c
-                    objp[idx, 0] = c * cell_w_m   # X
-                    objp[idx, 1] = r * cell_h_m   # Y
-                    # Z stays 0 (planar target)
+                    objp[idx, 0] = c * cell_w_m
+                    objp[idx, 1] = r * cell_h_m
 
             obj_points = []
             img_points = []
@@ -342,13 +328,12 @@ class LensCorrectionWindow(ctk.CTkToplevel):
             for idx, img_path in enumerate(images):
                 img = cv2.imread(img_path)
                 if img is None:
-                    print(f"[WARN] Cannot read: "
-                          f"{os.path.basename(img_path)}")
+                    print(f"[WARN] Cannot read: {os.path.basename(img_path)}")
                     continue
 
                 gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
                 if img_shape is None:
-                    img_shape = gray.shape[::-1]  # (W, H)
+                    img_shape = gray.shape[::-1]
 
                 found, corners = cv2.findChessboardCorners(
                     gray, pattern_size,
@@ -362,69 +347,55 @@ class LensCorrectionWindow(ctk.CTkToplevel):
                     obj_points.append(objp)
                     img_points.append(corners_refined)
                     detected_count += 1
-                    print(f"  ✓ {os.path.basename(img_path)} "
-                          f"— corners found")
+                    print(f"  ✓ {os.path.basename(img_path)} — corners found")
 
                     if sample_img is None:
                         sample_img = img.copy()
                         sample_corners = corners_refined.copy()
                 else:
-                    print(f"  ✗ {os.path.basename(img_path)} "
-                          f"— corners NOT found")
+                    print(f"  ✗ {os.path.basename(img_path)} — corners NOT found")
 
                 frac = (idx + 1) / len(images)
-                self.progress_bar.set(frac)
+                self._ui_progress(frac)
 
-            print(f"\nDetected corners in "
-                  f"{detected_count}/{len(images)} images.")
+            print(f"\nDetected corners in {detected_count}/{len(images)} images.")
 
             if detected_count < 3:
-                messagebox.showerror(
+                self._ui_message(
+                    "error",
                     "Error",
-                    f"Only {detected_count} images had detectable "
-                    f"corners.\n"
+                    f"Only {detected_count} images had detectable corners.\n"
                     "Need at least 3 for reliable calibration.\n"
                     "Check your checkerboard dimensions (cols × rows).")
                 return
 
-            # ---- calibrate ----
             print("Running calibration …")
-            ret, camera_matrix, dist_coeffs, rvecs, tvecs = \
-                cv2.calibrateCamera(
-                    obj_points, img_points, img_shape, None, None)
+            ret, camera_matrix, dist_coeffs, rvecs, tvecs = cv2.calibrateCamera(
+                obj_points, img_points, img_shape, None, None)
 
             print(f"\nCalibration RMS reprojection error: {ret:.4f} px")
             print(f"\nCamera matrix:\n{camera_matrix}")
             print(f"\nDistortion coefficients:\n{dist_coeffs.ravel()}")
 
-            # ---- derived intrinsics ----
             fx = camera_matrix[0, 0]
             fy = camera_matrix[1, 1]
             cx = camera_matrix[0, 2]
             cy = camera_matrix[1, 2]
             W, H = img_shape
-            # sensor-equivalent focal length (assuming known pixel pitch
-            # is unavailable — express in pixels)
             print(f"\nFocal length:  fx={fx:.2f} px,  fy={fy:.2f} px")
             print(f"Principal point:  cx={cx:.2f} px,  cy={cy:.2f} px")
             print(f"Image size: {W} × {H} px")
 
             if not is_square:
-                print(f"\n[NOTE] Rectangular cells used "
-                      f"({cell_w_mm} × {cell_h_mm} mm). Object points "
-                      f"have been scaled accordingly.")
+                print(f"\n[NOTE] Rectangular cells used ({cell_w_mm} × {cell_h_mm} mm). Object points have been scaled accordingly.")
 
-            # ---- per-image errors ----
             mean_errors = []
             for i in range(len(obj_points)):
                 proj, _ = cv2.projectPoints(
-                    obj_points[i], rvecs[i], tvecs[i],
-                    camera_matrix, dist_coeffs)
-                err = cv2.norm(
-                    img_points[i], proj, cv2.NORM_L2) / len(proj)
+                    obj_points[i], rvecs[i], tvecs[i], camera_matrix, dist_coeffs)
+                err = cv2.norm(img_points[i], proj, cv2.NORM_L2) / len(proj)
                 mean_errors.append(err)
 
-            # ---- save .pkl ----
             cal_data = {
                 "camera_matrix": camera_matrix,
                 "dist_coeff": dist_coeffs,
@@ -435,83 +406,53 @@ class LensCorrectionWindow(ctk.CTkToplevel):
                 "board_squares": (sq_cols, sq_rows),
                 "cell_width_m": cell_w_m,
                 "cell_height_m": cell_h_m,
-                # keep legacy key for backward compatibility
                 "square_size_m": cell_w_m,
             }
             self.calibration_data = cal_data
-            pkl_path = os.path.join(
-                self.output_folder, "lens_calibration.pkl")
+            pkl_path = os.path.join(output_folder, "lens_calibration.pkl")
             with open(pkl_path, "wb") as f:
                 pickle.dump(cal_data, f)
             print(f"\nSaved: {pkl_path}")
 
-            # ---- save report ----
-            txt_path = os.path.join(
-                self.output_folder, "calibration_report.txt")
+            txt_path = os.path.join(output_folder, "calibration_report.txt")
             with open(txt_path, "w", encoding="utf-8") as f:
                 f.write("=== Lens Calibration Report ===\n\n")
-                f.write(f"Input folder: {self.input_folder}\n")
+                f.write(f"Input folder: {input_folder}\n")
                 f.write(f"Images found: {len(images)}\n")
                 f.write(f"Images with corners: {detected_count}\n")
                 f.write(f"Board: {sq_cols} × {sq_rows} squares\n")
                 f.write(f"Inner corners: {n_cols} × {n_rows}\n")
                 if is_square:
-                    f.write(f"Cell size: {cell_w_mm} mm "
-                            f"(square)\n\n")
+                    f.write(f"Cell size: {cell_w_mm} mm (square)\n\n")
                 else:
                     f.write(f"Cell width: {cell_w_mm} mm\n")
                     f.write(f"Cell height: {cell_h_mm} mm\n\n")
                 f.write(f"RMS reprojection error: {ret:.4f} px\n\n")
                 f.write(f"Camera matrix:\n{camera_matrix}\n\n")
-                f.write(f"Focal length: "
-                        f"fx={fx:.2f} px, fy={fy:.2f} px\n")
-                f.write(f"Principal point: "
-                        f"cx={cx:.2f} px, cy={cy:.2f} px\n")
+                f.write(f"Focal length: fx={fx:.2f} px, fy={fy:.2f} px\n")
+                f.write(f"Principal point: cx={cx:.2f} px, cy={cy:.2f} px\n")
                 f.write(f"Image size: {W} × {H} px\n\n")
-                f.write(f"Distortion coefficients:\n"
-                        f"{dist_coeffs.ravel()}\n\n")
+                f.write(f"Distortion coefficients:\n{dist_coeffs.ravel()}\n\n")
                 f.write("Per-image reprojection errors:\n")
                 for i, err in enumerate(mean_errors):
                     f.write(f"  Image {i + 1}: {err:.4f} px\n")
             print(f"Saved: {txt_path}")
 
-            # ---- update preview ----
             if sample_img is not None:
-                vis = cv2.drawChessboardCorners(
-                    sample_img.copy(), pattern_size,
-                    sample_corners, True)
-                self.axes[0].clear()
-                self.axes[0].imshow(
-                    cv2.cvtColor(vis, cv2.COLOR_BGR2RGB))
-                self.axes[0].set_title("Detected Corners (sample)")
-                self.axes[0].axis("off")
-
-                # undistort
+                vis = cv2.drawChessboardCorners(sample_img.copy(), pattern_size, sample_corners, True)
                 Himg, Wimg = sample_img.shape[:2]
-                new_mtx, _ = cv2.getOptimalNewCameraMatrix(
-                    camera_matrix, dist_coeffs,
-                    (Wimg, Himg), 1, (Wimg, Himg))
-                undist = cv2.undistort(
-                    sample_img, camera_matrix, dist_coeffs,
-                    None, new_mtx)
-                self.axes[1].clear()
-                self.axes[1].imshow(
-                    cv2.cvtColor(undist, cv2.COLOR_BGR2RGB))
-                self.axes[1].set_title("Undistorted Result")
-                self.axes[1].axis("off")
+                new_mtx, _ = cv2.getOptimalNewCameraMatrix(camera_matrix, dist_coeffs, (Wimg, Himg), 1, (Wimg, Himg))
+                undist = cv2.undistort(sample_img, camera_matrix, dist_coeffs, None, new_mtx)
+                self._ui_call(self._apply_preview, vis, undist)
 
-            self.fig.tight_layout()
-            self.canvas_plot.draw()
-
-            messagebox.showinfo(
+            self._ui_message(
+                "info",
                 "Done",
-                f"Calibration complete!\n"
-                f"RMS error: {ret:.4f} px\n\n"
-                f"Files saved to:\n{self.output_folder}")
+                f"Calibration complete!\nRMS error: {ret:.4f} px\n\nFiles saved to:\n{output_folder}")
 
         except Exception as e:
             print(f"[ERROR] {e}")
-            messagebox.showerror("Error", str(e))
+            self._ui_message("error", "Error", str(e))
 
 
 # ——— standalone ———

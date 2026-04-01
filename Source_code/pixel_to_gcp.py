@@ -9,6 +9,8 @@ import pandas as pd
 from PIL import Image, ImageTk
 import utm
 
+from utils import fit_geometry, resource_path, setup_console, restore_console
+
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("green")
 
@@ -27,32 +29,6 @@ except ImportError:
         return df
 
 
-# %% window resizer
-
-def fit_geometry(window, design_w, design_h, resizable=True, margin=0.90):
-    """
-    Scale a window to fit the current screen while preserving
-    the aspect ratio of the original design size.
-    Centers the result on screen. Never upscales beyond the design size.
-    """
-    screen_w = window.winfo_screenwidth()
-    screen_h = window.winfo_screenheight()
-
-    max_w = int(screen_w * margin)
-    max_h = int(screen_h * margin)
-
-    scale = min(max_w / design_w, max_h / design_h, 1.0)
-
-    final_w = int(design_w * scale)
-    final_h = int(design_h * scale)
-
-    x = (screen_w - final_w) // 2
-    y = max(0, (screen_h - final_h) // 2)
-
-    window.geometry(f"{final_w}x{final_h}+{x}+{y}")
-    window.resizable(resizable, resizable)
-
-
 # %% helpers
 
 def convert_to_utm(lat, lon):
@@ -63,26 +39,6 @@ def convert_to_utm(lat, lon):
     easting, northing, zone_number, _zone_letter = utm.from_latlon(lat, lon)
     epsg = 32600 + zone_number if lat >= 0 else 32700 + zone_number
     return easting, northing, epsg
-
-
-def resource_path(relative_path: str) -> str:
-    try:
-        base_path = sys._MEIPASS  # type: ignore[attr-defined]
-    except Exception:
-        base_path = os.path.dirname(__file__)
-    return os.path.join(base_path, relative_path)
-
-
-class StdoutRedirector:
-    def __init__(self, text_widget):
-        self.text_widget = text_widget
-
-    def write(self, message):
-        self.text_widget.insert(tk.END, message)
-        self.text_widget.see(tk.END)
-
-    def flush(self):
-        pass
 
 
 _IMAGE_EXTS = {".bmp", ".jpg", ".jpeg", ".png", ".tif", ".tiff"}
@@ -128,6 +84,9 @@ class PixelToGCPWindow(ctk.CTkToplevel):
         except Exception as e:
             print("Warning: Could not load window icon:", e)
 
+        # ——— close handler ———
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
         # -----------------------
         # Data / State Variables
         # -----------------------
@@ -160,7 +119,7 @@ class PixelToGCPWindow(ctk.CTkToplevel):
         # =============================
         # TOP SECTION: IMAGES + CONSOLE
         # =============================
-        top_section = ctk.CTkFrame(self)
+        top_section = ctk.CTkFrame(self, fg_color="black")
         top_section.pack(side="top", fill="both", expand=True, padx=5, pady=5)
 
         # 1) Main Image Panel (left)
@@ -174,7 +133,7 @@ class PixelToGCPWindow(ctk.CTkToplevel):
 
         self.main_canvas = tk.Canvas(
             self.main_image_frame,
-            bg="gray",
+            bg="black",
             highlightthickness=0,
             xscrollcommand=self._sync_xscroll,
             yscrollcommand=self._sync_yscroll,
@@ -200,21 +159,11 @@ class PixelToGCPWindow(ctk.CTkToplevel):
             self.overview_frame,
             width=_OVERVIEW_MAX_W,
             height=_OVERVIEW_MAX_H,
-            bg="white",
+            bg="black",
             highlightthickness=1,
             highlightbackground="#777777",
         )
         self.overview_canvas.pack(fill="both", expand=True, padx=5, pady=5)
-
-        # 3) Console Panel (right)
-        console_frame = ctk.CTkFrame(top_section, width=300)
-        console_frame.pack(side="left", fill="y")
-        self.console_text = tk.Text(console_frame, wrap="word", width=40)
-        self.console_text.pack(fill="both", expand=True, padx=5, pady=5)
-        self.stdout_redirector = StdoutRedirector(self.console_text)
-        sys.stdout = self.stdout_redirector
-        sys.stderr = self.stdout_redirector
-        print("Here you may see console outputs\n--------------------------------\n")
 
         instructions_panel = ctk.CTkFrame(self)
         instructions_panel.pack(side="top", fill="x", padx=5, pady=5)
@@ -228,6 +177,16 @@ class PixelToGCPWindow(ctk.CTkToplevel):
         )
         instructions_label = ctk.CTkLabel(instructions_panel, text=instructions_text, justify="left")
         instructions_label.pack(side="left", padx=10, pady=5)
+
+        # =============================
+        # MIDDLE SECTION: CONSOLE
+        # =============================
+        console_frame = ctk.CTkFrame(self)
+        console_frame.pack(side="top", fill="both", expand=False, padx=5, pady=5)
+        self.console_text = tk.Text(console_frame, wrap="word", width=40, height=10)
+        self.console_text.pack(fill="both", expand=True, padx=5, pady=5)
+        self._console_redir = setup_console(self.console_text,
+            "Here you may see console outputs\n--------------------------------\n")
 
         # =============================
         # BOTTOM SECTION: CONFIG PANEL
@@ -309,6 +268,12 @@ class PixelToGCPWindow(ctk.CTkToplevel):
         self.bind("<minus>", self.zoom_out)
         self.bind("<KP_Add>", self.zoom_in)
         self.bind("<KP_Subtract>", self.zoom_out)
+
+    # ——————————————————————————— close handler —————————————————————————
+    def _on_close(self):
+        """Clean up and close the window."""
+        restore_console(self._console_redir)
+        self.destroy()
 
     # LOGGING TO CONSOLE
     # ---------------

@@ -17,41 +17,11 @@ from PIL import Image, ImageTk
 import cv2
 import numpy as np
 
-# %% window resizer 
-
-def fit_geometry(window, design_w, design_h, resizable=True, margin=0.90):
-    """
-    Scale a window to fit the current screen while preserving
-    the aspect ratio of the original design size.
-    Centers the result on screen.  Never upscales beyond the design size.
-
-    Parameters
-    ----------
-    window      : Tk / CTk / CTkToplevel instance
-    design_w/h  : the "intended" pixel size (the old hardcoded values)
-    resizable   : whether the user can drag-resize afterward
-    margin      : fraction of screen to occupy at most (0.90 = 90 %)
-    """
-    screen_w = window.winfo_screenwidth()
-    screen_h = window.winfo_screenheight()
-
-    max_w = int(screen_w * margin)
-    max_h = int(screen_h * margin)
-
-    scale = min(max_w / design_w, max_h / design_h, 1.0)
-
-    final_w = int(design_w * scale)
-    final_h = int(design_h * scale)
-
-    x = (screen_w - final_w) // 2
-    y = max(0, (screen_h - final_h) // 2)
-
-    window.geometry(f"{final_w}x{final_h}+{x}+{y}")
-    window.resizable(resizable, resizable)
-
+from utils import fit_geometry, StdoutRedirector
 
 # %% Standalone helper classes
 # ──────────────────────────────────────────────
+
 
 class BBoxSelectorWindow(tk.Toplevel):
     def __init__(self, master, pil_image, callback, **kwargs):
@@ -179,24 +149,10 @@ class BBoxSelectorWindow(tk.Toplevel):
         self.destroy()
 
 
-class StdoutRedirector:
-    """
-    A class to redirect stdout to a given text widget.
-    """
-
-    def __init__(self, text_widget):
-        self.text_widget = text_widget
-
-    def write(self, message):
-        self.text_widget.insert(tk.END, message)
-        self.text_widget.see(tk.END)  # auto-scroll
-
-    def flush(self):
-        pass  # no-op for Python's IO flush requirements
-
 
 # %% UI Mixin
 # ──────────────────────────────────────────────
+
 
 class HSVMaskUIMixin:
     """Mixin that supplies all UI‑construction, control‑panel, toggle, and settings methods."""
@@ -1489,13 +1445,13 @@ class HSVMaskUIMixin:
         return sld, value_var, lbl_value
 
     def browse_export_folder(self):
-        folder = filedialog.askdirectory()
+        folder = filedialog.askdirectory(parent=self)
         if folder:
             self.export_path_entry.delete(0, tk.END)
             self.export_path_entry.insert(0, folder)
 
     def save_settings(self):
-        file_path = filedialog.asksaveasfilename(
+        file_path = filedialog.asksaveasfilename(parent=self,
             defaultextension=".json",
             filetypes=[("JSON Files", "*.json"), ("All Files", "*.*")]
         )
@@ -1562,7 +1518,7 @@ class HSVMaskUIMixin:
             messagebox.showerror("Error", f"Failed to save settings: {e}")
 
     def load_settings(self):
-        file_path = filedialog.askopenfilename(
+        file_path = filedialog.askopenfilename(parent=self,
             filetypes=[("JSON Files", "*.json"), ("All Files", "*.*")]
         )
         if not file_path:

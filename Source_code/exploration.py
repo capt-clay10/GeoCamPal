@@ -42,6 +42,8 @@ import customtkinter as ctk
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
+from utils import fit_geometry, resource_path, setup_console, restore_console
+
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("green")
 
@@ -68,51 +70,6 @@ COMMON_NODATA = [
     9999, 9999.0, 999, 999.0, 99.9, 99.99,
     -1e30, 1e30, -1e10, 1e10,
 ]
-
-
-# %% ————————————————————————————— util helpers ————————————————————————
-def resource_path(relative_path: str) -> str:
-    try:
-        base_path = sys._MEIPASS
-    except Exception:
-        base_path = os.path.dirname(__file__)
-    return os.path.join(base_path, relative_path)
-
-
-def fit_geometry(window, design_w, design_h, resizable=True, margin=0.90):
-    """
-    Scale a window to fit the current screen while preserving
-    the aspect ratio of the original design size.
-    Centers the result on screen.  Never upscales beyond the design size.
-    """
-    screen_w = window.winfo_screenwidth()
-    screen_h = window.winfo_screenheight()
-
-    max_w = int(screen_w * margin)
-    max_h = int(screen_h * margin)
-
-    scale = min(max_w / design_w, max_h / design_h, 1.0)
-
-    final_w = int(design_w * scale)
-    final_h = int(design_h * scale)
-
-    x = (screen_w - final_w) // 2
-    y = max(0, (screen_h - final_h) // 2)
-
-    window.geometry(f"{final_w}x{final_h}+{x}+{y}")
-    window.resizable(resizable, resizable)
-
-
-class StdoutRedirector:
-    def __init__(self, text_widget: tk.Text):
-        self.text_widget = text_widget
-
-    def write(self, message: str):
-        self.text_widget.insert(tk.END, message)
-        self.text_widget.see(tk.END)
-
-    def flush(self):
-        pass
 
 
 # %% ————————————————————————————— no-data detection ———————————————————
@@ -765,6 +722,9 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
         except Exception:
             pass
 
+        # ——— close handler ———
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
         # ——— state ———
         self.image_folder = None
         self.output_folder = None
@@ -786,18 +746,18 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
 
         # ——— main layout (3 rows) ———
         self.grid_rowconfigure(0, weight=3)     # plot
-        self.grid_rowconfigure(1, weight=0)     # controls
-        self.grid_rowconfigure(2, weight=1)     # console
+        self.grid_rowconfigure(1, weight=0)     # console
+        self.grid_rowconfigure(2, weight=0)     # controls
         self.grid_columnconfigure(0, weight=1)
 
         # ---- TOP: plot ----
         self._build_plot_area()
 
-        # ---- MIDDLE: controls ----
-        self._build_controls()
-
-        # ---- BOTTOM: console ----
+        # ---- MIDDLE: console ----
         self._build_console()
+
+        # ---- BOTTOM: controls ----
+        self._build_controls()
 
         # initial visibility
         self._on_num_series_change(1)
@@ -808,10 +768,10 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
     # ═══════════════════════════════════════════════════════════════════
 
     def _build_plot_area(self):
-        self.top_panel = ctk.CTkFrame(self)
+        self.top_panel = ctk.CTkFrame(self, fg_color="black")
         self.top_panel.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
 
-        self.plot_canvas_frame = tk.Frame(self.top_panel)
+        self.plot_canvas_frame = tk.Frame(self.top_panel, bg="black")
         self.plot_canvas_frame.pack(fill="both", expand=True)
 
         # start with a single subplot — rebuilt dynamically
@@ -824,7 +784,7 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
             self.fig, master=self.plot_canvas_frame)
         self.canvas_plot.get_tk_widget().pack(fill="both", expand=True)
 
-        self.toolbar_frame = tk.Frame(self.top_panel)
+        self.toolbar_frame = tk.Frame(self.top_panel, bg="black")
         self.toolbar_frame.pack(fill="x")
         self.toolbar = NavigationToolbar2Tk(
             self.canvas_plot, self.toolbar_frame)
@@ -838,7 +798,7 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
     def _build_controls(self):
         self.bottom_panel = ctk.CTkFrame(self)
         self.bottom_panel.grid(
-            row=1, column=0, sticky="nsew", padx=5, pady=5)
+            row=2, column=0, sticky="nsew", padx=5, pady=5)
 
         # ── Row 0: global top bar ──
         top_bar = ctk.CTkFrame(self.bottom_panel)
@@ -1004,13 +964,15 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
     def _build_console(self):
         self.console_frame = ctk.CTkFrame(self)
         self.console_frame.grid(
-            row=2, column=0, sticky="nsew", padx=5, pady=5)
+            row=1, column=0, sticky="nsew", padx=5, pady=5)
         self.console_text = tk.Text(
-            self.console_frame, wrap="word", height=8)
+            self.console_frame, wrap="word", height=10)
         self.console_text.pack(fill="both", expand=True, padx=5, pady=5)
-        self.stdout_redirector = StdoutRedirector(self.console_text)
-        sys.stdout = self.stdout_redirector
-        sys.stderr = self.stdout_redirector
+        self._console_redir = setup_console(self.console_text)
+
+    def _on_close(self):
+        restore_console(getattr(self, "_console_redir", None))
+        self.destroy()
 
     def _print_welcome(self):
         print(
@@ -1098,7 +1060,7 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
     # ═══════════════════════════════════════════════════════════════════
 
     def _browse_series_csv(self, idx):
-        p = filedialog.askopenfilename(parent= self,
+        p = filedialog.askopenfilename(
             title=f"Select CSV for Series {idx + 1}",
             filetypes=[("CSV / TXT", "*.csv *.txt *.dat")])
         if p:
@@ -1108,13 +1070,13 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
             self._load_series(idx)
 
     def _browse_images(self):
-        d = filedialog.askdirectory(parent= self,title="Select Image Folder")
+        d = filedialog.askdirectory(title="Select Image Folder")
         if d:
             self.image_folder = d
             self.img_label.configure(text=d)
 
     def _browse_output(self):
-        d = filedialog.askdirectory(parent= self,title="Select Output Folder")
+        d = filedialog.askdirectory(title="Select Output Folder")
         if d:
             self.output_folder = d
             self.output_label.configure(text=d)
@@ -1383,45 +1345,83 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
     # RUN ANALYSIS
     # ═══════════════════════════════════════════════════════════════════
 
-    def _run_threaded(self):
-        threading.Thread(target=self._run_analysis, daemon=True).start()
+    def _ui_call(self, func, *args, **kwargs):
+        self.after(0, lambda: func(*args, **kwargs))
 
-    def _run_analysis(self):
+    def _set_progress_safe(self, value):
+        self._ui_call(self.progress_bar.set, value)
+
+    def _show_warning_safe(self, title, message):
+        self._ui_call(messagebox.showwarning, title, message)
+
+    def _show_info_safe(self, title, message):
+        self._ui_call(messagebox.showinfo, title, message)
+
+    def _show_error_safe(self, title, message):
+        self._ui_call(messagebox.showerror, title, message)
+
+    def _collect_run_config(self):
+        n = self._get_active_count()
+        series_inputs = []
+        for idx in range(n):
+            if self.series_state[idx]["df"] is None:
+                return None, ("warning", "Warning", f"Series {idx + 1} has no CSV loaded.")
+            w = self.series_widgets[idx]
+            series_inputs.append({
+                "idx": idx,
+                "label": w["label_entry"].get().strip() or f"Series_{idx + 1}",
+                "criterion": w["criterion_var"].get(),
+                "thresh": w["thresh_entry"].get().strip(),
+                "tol": w["tol_entry"].get().strip(),
+                "sep": w["sep_entry"].get().strip(),
+                "prom": w["prom_entry"].get().strip(),
+                "nodata": w["nodata_entry"].get().strip(),
+            })
+
+        if not self.image_folder:
+            return None, ("warning", "Warning", "Select an image folder first.")
+        if not self.output_folder:
+            return None, ("warning", "Warning", "Select an output folder first.")
+
         try:
-            # --- validation ---
-            n = self._get_active_count()
-            loaded = []
-            for idx in range(n):
-                if self.series_state[idx]["df"] is None:
-                    messagebox.showwarning(
-                        "Warning",
-                        f"Series {idx + 1} has no CSV loaded.")
-                    return
-                loaded.append(idx)
-
-            if not self.image_folder:
-                messagebox.showwarning("Warning",
-                                       "Select an image folder first.")
-                return
-            if not self.output_folder:
-                messagebox.showwarning("Warning",
-                                       "Select an output folder first.")
-                return
-
             buffer_min = float(self.buffer_entry.get())
-            user_fmt = self.fmt_entry.get().strip() or None
+        except Exception:
+            return None, ("error", "Error", "Invalid buffer value.")
+
+        return {
+            "series_inputs": series_inputs,
+            "image_folder": self.image_folder,
+            "output_folder": self.output_folder,
+            "buffer_min": buffer_min,
+            "user_fmt": self.fmt_entry.get().strip() or None,
+            "recursive": bool(self.recursive_var.get()),
+            "copy_images": bool(self.copy_images_var.get()),
+        }, None
+
+    def _run_threaded(self):
+        cfg, err = self._collect_run_config()
+        if err:
+            kind, title, msg = err
+            if kind == "warning":
+                messagebox.showwarning(title, msg)
+            else:
+                messagebox.showerror(title, msg)
+            return
+        threading.Thread(target=self._run_analysis, args=(cfg,), daemon=True).start()
+
+    def _run_analysis(self, cfg):
+        try:
+            buffer_min = cfg["buffer_min"]
+            user_fmt = cfg["user_fmt"]
 
             # --- build series configs ---
             series_configs = []
-            for idx in loaded:
-                w = self.series_widgets[idx]
-                label = w["label_entry"].get().strip() or \
-                    f"Series_{idx + 1}"
-                criterion = w["criterion_var"].get()
+            nodata_reports = {}
+            for sin in cfg["series_inputs"]:
+                idx = sin["idx"]
+                criterion = sin["criterion"]
 
-                # re-load with current no-data setting in case user
-                # changed it after initial load
-                nodata_text = w["nodata_entry"].get().strip()
+                nodata_text = sin["nodata"]
                 nodata_val = None
                 if nodata_text and nodata_text.lower() != "auto":
                     try:
@@ -1430,31 +1430,26 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
                         pass
 
                 csv_path = self.series_state[idx]["csv_path"]
-                df, nodata_report = load_timeseries(
-                    csv_path, nodata_value=nodata_val)
+                df, nodata_report = load_timeseries(csv_path, nodata_value=nodata_val)
                 self.series_state[idx]["df"] = df
                 self.series_state[idx]["nodata_report"] = nodata_report
+                nodata_reports[sin["label"]] = nodata_report
 
                 params = {}
                 if criterion in ("Above Threshold", "Below Threshold"):
-                    params["threshold"] = float(
-                        w["thresh_entry"].get())
+                    params["threshold"] = float(sin["thresh"])
                 elif criterion == "Near Target Value":
-                    params["target"] = float(
-                        w["thresh_entry"].get())
-                    params["tolerance"] = float(
-                        w["tol_entry"].get())
+                    params["target"] = float(sin["thresh"])
+                    params["tolerance"] = float(sin["tol"])
 
                 if criterion in ("Peaks (Maxima)", "Troughs (Minima)",
                                  "Spring Tide Peaks", "Neap Tide Peaks"):
-                    params["min_sep_hours"] = float(
-                        w["sep_entry"].get())
-                    params["min_prominence"] = float(
-                        w["prom_entry"].get())
+                    params["min_sep_hours"] = float(sin["sep"])
+                    params["min_prominence"] = float(sin["prom"])
 
                 series_configs.append({
                     "df": df,
-                    "label": label,
+                    "label": sin["label"],
                     "criterion": criterion,
                     "params": params,
                 })
@@ -1468,28 +1463,20 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
             print(f"Search buffer: ±{buffer_min} min")
 
             for sc in series_configs:
-                nd_rep = ""
-                for idx in loaded:
-                    lbl = self.series_widgets[idx][
-                        "label_entry"].get().strip()
-                    if lbl == sc["label"]:
-                        nd_rep = self.series_state[idx]["nodata_report"]
-                        break
-                print(f"  [{sc['label']}] {nd_rep}")
+                print(f"  [{sc['label']}] {nodata_reports.get(sc['label'], '')}")
 
             # --- collect images ---
             print("Scanning images for timestamps …")
             image_list = collect_dated_images(
-                self.image_folder, user_fmt,
-                self.recursive_var.get())
+                cfg["image_folder"], user_fmt, cfg["recursive"])
             if not image_list:
-                messagebox.showwarning(
+                self._show_warning_safe(
                     "Warning",
                     "No images with parseable timestamps found.\n"
                     "Check your filename format.")
                 return
             print(f"Found {len(image_list)} dated images.")
-            self.progress_bar.set(0.1)
+            self._set_progress_safe(0.1)
 
             # --- run combined analysis ---
             print("Evaluating criteria …")
@@ -1497,13 +1484,12 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
                 series_configs, image_list, buffer_min,
                 print_fn=print)
             self.matched_results = results
-            self.progress_bar.set(0.6)
+            self._set_progress_safe(0.6)
 
             if not results:
                 print("No images matched ALL criteria.")
-                messagebox.showinfo("Result",
-                                    "No matching images found.")
-                self._refresh_plot(results=[])
+                self._show_info_safe("Result", "No matching images found.")
+                self._ui_call(self._refresh_plot, results=[])
                 return
 
             print(f"\nMatched {len(results)} images (all criteria).")
@@ -1512,10 +1498,9 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
             labels = [sc["label"] for sc in series_configs]
             mode_tag = "_".join(labels).lower().replace(" ", "_")
             txt_name = f"matched_images_{mode_tag}.txt"
-            txt_path = os.path.join(self.output_folder, txt_name)
+            txt_path = os.path.join(cfg["output_folder"], txt_name)
 
             with open(txt_path, "w", encoding="utf-8") as f:
-                # header
                 cols = ["image_filename", "image_time"]
                 for lb in labels:
                     cols.extend([f"{lb}_value", f"{lb}_criterion",
@@ -1538,27 +1523,25 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
             print(f"Results saved: {txt_path}")
 
             # --- copy images ---
-            if self.copy_images_var.get():
+            if cfg["copy_images"]:
                 print("Copying images …")
-                copy_dir = os.path.join(
-                    self.output_folder, f"images_{mode_tag}")
+                copy_dir = os.path.join(cfg["output_folder"], f"images_{mode_tag}")
                 os.makedirs(copy_dir, exist_ok=True)
                 for i, r in enumerate(results):
                     shutil.copy2(
                         str(r["image_path"]),
-                        os.path.join(copy_dir,
-                                     r["image_path"].name))
-                    self.progress_bar.set(
-                        0.6 + 0.35 * (i + 1) / len(results))
+                        os.path.join(copy_dir, r["image_path"].name))
+                    self._set_progress_safe(0.6 + 0.35 * (i + 1) / len(results))
                 print(f"  Copied to: {copy_dir}")
 
             # --- update plot ---
-            self._refresh_plot(
+            self._ui_call(
+                self._refresh_plot,
                 results=results,
                 title=f"Matched: {crit_desc}")
 
-            self.progress_bar.set(1.0)
-            messagebox.showinfo(
+            self._set_progress_safe(1.0)
+            self._show_info_safe(
                 "Done",
                 f"Matched {len(results)} images.\n"
                 f"Results saved to:\n{txt_path}")
@@ -1567,7 +1550,7 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
             print(f"[ERROR] {e}")
             import traceback
             traceback.print_exc()
-            messagebox.showerror("Error", str(e))
+            self._show_error_safe("Error", str(e))
 
 
 # ——— standalone ———

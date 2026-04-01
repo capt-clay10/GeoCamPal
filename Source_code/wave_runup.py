@@ -10,73 +10,18 @@ import os
 import datetime
 import csv
 import re
-import sys
 import json
 from collections import defaultdict
 from pathlib import Path
+
+from utils import fit_geometry, resource_path, setup_console, restore_console
 
 # Set appearance
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("green")
 
-# %% window resizer 
-
-def fit_geometry(window, design_w, design_h, resizable=True, margin=0.90):
-    """
-    Scale a window to fit the current screen while preserving
-    the aspect ratio of the original design size.
-    Centers the result on screen.  Never upscales beyond the design size.
-
-    Parameters
-    ----------
-    window      : Tk / CTk / CTkToplevel instance
-    design_w/h  : the "intended" pixel size (the old hardcoded values)
-    resizable   : whether the user can drag-resize afterward
-    margin      : fraction of screen to occupy at most (0.90 = 90 %)
-    """
-    screen_w = window.winfo_screenwidth()
-    screen_h = window.winfo_screenheight()
-
-    max_w = int(screen_w * margin)
-    max_h = int(screen_h * margin)
-
-    scale = min(max_w / design_w, max_h / design_h, 1.0)
-
-    final_w = int(design_w * scale)
-    final_h = int(design_h * scale)
-
-    x = (screen_w - final_w) // 2
-    y = max(0, (screen_h - final_h) // 2)
-
-    window.geometry(f"{final_w}x{final_h}+{x}+{y}")
-    window.resizable(resizable, resizable)
-
-def resource_path(relative_path: str) -> str:
-    """
-    Get absolute path to resource, works for development and PyInstaller.
-    """
-    try:
-        base_path = sys._MEIPASS  # type: ignore
-    except Exception:
-        base_path = os.path.dirname(__file__)
-    return os.path.join(base_path, relative_path)
-
-
-class StdoutRedirector:
-    """Redirect stdout/stderr to a tk.Text widget."""
-    def __init__(self, text_widget):
-        self.text_widget = text_widget
-
-    def write(self, message):
-        self.text_widget.insert(tk.END, message)
-        self.text_widget.see(tk.END)
-
-    def flush(self):
-        pass
-
-
-
 # %% Runup Extraction Functions - Supporting Multiple Formats
+
 # =============================================================================
 
 def extract_runup_from_mask(mask_path, resolution_x_m, time_interval_sec, flip_horizontal=False):
@@ -271,6 +216,8 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         except Exception:
             pass
 
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
         # Data holders
         self.raw_image = None
         self.raw_image_path = ""
@@ -287,7 +234,7 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         self.batch_progress_bar = None
 
         # Top frame: three panels
-        self.top_frame = ctk.CTkFrame(self)
+        self.top_frame = ctk.CTkFrame(self, fg_color="black")
         self.top_frame.pack(side="top", fill="both", expand=True)
 
         # Image panel - removed fixed size constraints to allow proper scaling
@@ -308,16 +255,23 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         self.canvas_stats = FigureCanvasTkAgg(self.fig_stats, master=self.stats_panel)
         self.canvas_stats.get_tk_widget().pack(fill="both", expand=True)
 
+        # Middle console
+        self.console_frame = ctk.CTkFrame(self)
+        self.console_frame.pack(side="top", fill="both", expand=False, padx=10, pady=(0, 10))
+        self.console_text = tk.Text(self.console_frame, wrap="word", height=10)
+        self.console_text.pack(fill="both", expand=True, padx=5, pady=5)
+        self._console_redir = setup_console(
+            self.console_text,
+            "Here you may see console outputs\n--------------------------------\n"
+        )
+
         # Bottom frame
         self.bottom_panel = ctk.CTkFrame(self)
-        self.bottom_panel.pack(side="bottom", fill="x", padx=5, pady=5)
+        self.bottom_panel.pack(side="top", fill="x", padx=5, pady=5)
 
         # Controls
         self.controls_panel = ctk.CTkFrame(self.bottom_panel)
         self.controls_panel.pack(side="top", fill="x", padx=5, pady=2)
-        
-        # Configure grid columns - make column 4 expand to push reset button to the right
-        self.controls_panel.grid_columnconfigure(4, weight=1)
         
         self.btn_load_raw = ctk.CTkButton(self.controls_panel, text="Load Raw Time-Stack Image", command=self.load_raw_image)
         self.btn_load_raw.grid(row=0, column=0, padx=5, pady=5)
@@ -337,7 +291,6 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         self.btn_calculate = ctk.CTkButton(self.controls_panel, text="Calculate Runup", command=self.calculate_runup)
         self.btn_calculate.grid(row=0, column=3, padx=5, pady=5)
         
-        # Reset button - aligned to the right
         self.btn_reset = ctk.CTkButton(
             self.controls_panel, 
             text="Reset", 
@@ -346,7 +299,7 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
             fg_color="#8B0000",  # Dark red
             hover_color="#A52A2A"  # Lighter red on hover
         )
-        self.btn_reset.grid(row=0, column=5, padx=5, pady=5, sticky="e")
+        self.btn_reset.grid(row=0, column=4, padx=5, pady=5, sticky="w")
 
         # Resolution
         self.resolution_panel = ctk.CTkFrame(self.bottom_panel)
@@ -360,10 +313,16 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         self.manual_res_entry.grid(row=0, column=2, padx=5, pady=5)
         self.manual_res_label = ctk.CTkLabel(self.resolution_panel, text="m")
         self.manual_res_label.grid(row=0, column=3, padx=5, pady=5)
-        
+
+        ctk.CTkLabel(self.resolution_panel, text="IG threshold (Hz):").grid(
+            row=0, column=4, padx=(20, 5), pady=5, sticky="w")
+        self.ig_threshold_entry = ctk.CTkEntry(self.resolution_panel, width=80)
+        self.ig_threshold_entry.insert(0, "0.05")
+        self.ig_threshold_entry.grid(row=0, column=5, padx=5, pady=5, sticky="w")
+
         # Annotation format indicator
         self.format_label = ctk.CTkLabel(self.resolution_panel, text="Annotation: None", text_color="gray")
-        self.format_label.grid(row=0, column=4, padx=20, pady=5, sticky="w")
+        self.format_label.grid(row=0, column=6, padx=20, pady=5, sticky="w")
 
         # Export
         self.export_panel = ctk.CTkFrame(self.bottom_panel)
@@ -394,15 +353,10 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         self.batch_progress_label = ctk.CTkLabel(self.batch_panel, text="0 / 0 pairs processed")
         self.batch_progress_label.grid(row=1, column=2, padx=5, pady=5, sticky="w")
 
-        # Console
-        self.console_frame = ctk.CTkFrame(self)
-        self.console_frame.pack(side="bottom", fill="both", expand=False, padx=10, pady=10)
-        self.console_text = tk.Text(self.console_frame, wrap="word", height=10)
-        self.console_text.pack(fill="both", expand=True, padx=5, pady=5)
-        self.stdout_redirector = StdoutRedirector(self.console_text)
-        sys.stdout = self.stdout_redirector
-        sys.stderr = self.stdout_redirector
-        print("Here you may see console outputs\n--------------------------------\n")
+
+    def _on_close(self):
+        restore_console(getattr(self, "_console_redir", None))
+        self.destroy()
 
     def reset_all(self):
         """Reset all data and UI elements to initial state."""
@@ -430,7 +384,7 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         self.canvas_plot.draw()
         
         self.ax_stats_psd.clear()
-        self.ax_stats_psd.set_title('Power Spectral Density')
+        self.ax_stats_psd.set_title(f'Power Spectral Density (IG cutoff = {ig_threshold_hz:.3g} Hz)')
         self.ax_stats_swash.clear()
         self.ax_stats_swash.set_title('Detrended Swash Excursion')
         self.fig_stats.tight_layout()
@@ -450,7 +404,7 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         print("Session reset. Ready for new data.\n--------------------------------\n")
 
     def load_raw_image(self):
-        file_path = filedialog.askopenfilename(parent= self,title="Select Raw Time-Stack Image", filetypes=[("PNG Images", "*.png")])
+        file_path = filedialog.askopenfilename(title="Select Raw Time-Stack Image", filetypes=[("PNG Images", "*.png")])
         if file_path:
             self.raw_image_path = file_path
             self.raw_image = Image.open(file_path)
@@ -465,7 +419,7 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         Load runup annotation from mask PNG, GeoJSON, or COCO JSON file.
         Automatically detects format based on file extension.
         """
-        file_path = filedialog.askopenfilename(parent= self,
+        file_path = filedialog.askopenfilename(
             title="Select Runup Annotation", 
             filetypes=[
                 ("All Supported", "*.png *.geojson *.json"),
@@ -662,9 +616,27 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         self.canvas_img_fig.get_tk_widget().pack(fill="both", expand=True)
         self.canvas_img_fig.draw()
 
+    def _get_ig_threshold(self):
+        """Return the user-configured IG cutoff in Hz."""
+        try:
+            ig_threshold_hz = float(self.ig_threshold_entry.get())
+        except Exception:
+            messagebox.showerror("Error", "IG threshold must be a valid number in Hz.")
+            return None
+
+        if ig_threshold_hz <= 0:
+            messagebox.showerror("Error", "IG threshold must be greater than 0 Hz.")
+            return None
+
+        return ig_threshold_hz
+
     def calculate_runup(self):
         if not self.raw_image_path or not self.mask_image_path:
             messagebox.showerror("Error", "Load both raw image and annotation first.")
+            return
+
+        ig_threshold_hz = self._get_ig_threshold()
+        if ig_threshold_hz is None:
             return
 
         # Get resolution and timing
@@ -738,7 +710,7 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         fxx, pxx = welch(detr, fs=fs, nperseg=min(256, len(detr)))
         pos = fxx > 0
         fxx, pxx = fxx[pos], pxx[pos]
-        ig_mask = fxx < 0.05
+        ig_mask = fxx < ig_threshold_hz
         E_ig = np.trapz(pxx[ig_mask], fxx[ig_mask])
         E_tot = np.trapz(pxx, fxx)
         ig_pct = 100 * E_ig / E_tot if E_tot > 0 else 0
@@ -746,10 +718,12 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         # PSD plot
         self.ax_stats_psd.clear()
         self.ax_stats_psd.plot(fxx, pxx, label='PSD')
-        self.ax_stats_psd.fill_between(fxx, pxx, where=ig_mask, alpha=0.3,
-                                       label=f'IG (<0.05Hz) {ig_pct:.1f}%')
+        self.ax_stats_psd.fill_between(
+            fxx, pxx, where=ig_mask, alpha=0.3,
+            label=f'IG (<{ig_threshold_hz:.3g} Hz) {ig_pct:.1f}%'
+        )
         self.ax_stats_psd.set_xscale('log')
-        self.ax_stats_psd.set_title('Power Spectral Density')
+        self.ax_stats_psd.set_title(f'Power Spectral Density (IG cutoff = {ig_threshold_hz:.3g} Hz)')
         self.ax_stats_psd.set_ylabel('PSD')
         self.ax_stats_psd.legend()
 
@@ -765,7 +739,7 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         self.canvas_stats.draw()
 
     def select_output_folder(self):
-        folder = filedialog.askdirectory(parent= self,title="Select Output Folder")
+        folder = filedialog.askdirectory(title="Select Output Folder")
         if folder:
             self.output_folder = folder
             self.out_folder_label.configure(text=folder)
@@ -798,13 +772,13 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         messagebox.showinfo("Export Runup", f"Exported to:\n{out_path}")
 
     def select_batch_raw_folder(self):
-        folder = filedialog.askdirectory(parent= self,title="Select Folder with Raw TS Images")
+        folder = filedialog.askdirectory(title="Select Folder with Raw TS Images")
         if folder:
             self.batch_raw_folder = folder
             self.batch_raw_label.configure(text=folder)
 
     def select_batch_mask_folder(self):
-        folder = filedialog.askdirectory(parent= self,title="Select Folder with Annotations (Masks/GeoJSON/JSON)")
+        folder = filedialog.askdirectory(title="Select Folder with Annotations (Masks/GeoJSON/JSON)")
         if folder:
             self.batch_mask_folder = folder
             self.batch_mask_label.configure(text=folder)
@@ -814,6 +788,11 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         if not self.batch_raw_folder or not self.batch_mask_folder:
             messagebox.showerror("Error", "Please select both batch raw and batch annotation folders.")
             return
+
+        ig_threshold_hz = self._get_ig_threshold()
+        if ig_threshold_hz is None:
+            return
+
         print("Batch process has started")
 
         # 2) List all supported annotation files
@@ -972,7 +951,7 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
             fxx, pxx = welch(detr, fs=fs, nperseg=min(256, len(detr)))
             pos = fxx > 0
             fxx, pxx = fxx[pos], pxx[pos]
-            ig_mask = fxx < 0.05
+            ig_mask = fxx < ig_threshold_hz
             E_ig = np.trapz(pxx[ig_mask], fxx[ig_mask])
             E_tot = np.trapz(pxx, fxx)
             ig_pct = 100 * E_ig / E_tot if E_tot > 0 else 0
@@ -984,12 +963,13 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
 
         # Energy partitioning bar plot
         idx = np.arange(len(ig_list))
-        self.ax_stats_psd.bar(idx, ig_list, label='IG%')
-        self.ax_stats_psd.bar(idx, inc_list, bottom=ig_list, label='Incident%')
+        self.ax_stats_psd.bar(idx, ig_list, label=f'IG% (<{ig_threshold_hz:.3g} Hz)')
+        self.ax_stats_psd.bar(idx, inc_list, bottom=ig_list,
+                              label=f'Incident% (≥{ig_threshold_hz:.3g} Hz)')
         self.ax_stats_psd.set_xticks(idx)
         self.ax_stats_psd.set_xticklabels([str(i + 1) for i in idx])
         self.ax_stats_psd.set_ylabel('%')
-        self.ax_stats_psd.set_title('Energy Partitioning')
+        self.ax_stats_psd.set_title(f'Energy Partitioning (IG cutoff = {ig_threshold_hz:.3g} Hz)')
         self.ax_stats_psd.legend()
 
         self.ax_stats_swash.set_xlabel('Time (s)')

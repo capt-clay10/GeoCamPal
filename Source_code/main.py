@@ -1,5 +1,4 @@
 import sys
-import os
 
 # Windows DPI awareness — must be set before any GUI imports
 if sys.platform == "win32":
@@ -28,13 +27,7 @@ from exploration import TimeSeriesExplorerWindow
 from profile_tool import ProfileHovmullerWindow
 from colour_explorer import ColorSpaceExplorerWindow
 
-# 1) Resource helper for PyInstaller or direct script
-def resource_path(relative_path: str) -> str:
-    try:
-        base_path = sys._MEIPASS  # PyInstaller temp folder
-    except Exception:
-        base_path = os.path.dirname(__file__)  # Running from source
-    return os.path.join(base_path, relative_path)
+from utils import fit_geometry, resource_path
 
 
 def set_window_icon(window):
@@ -58,29 +51,6 @@ def set_window_icon(window):
     except Exception:
         pass  # Missing icon asset — not fatal
 
-
-def fit_geometry(window, design_w, design_h, resizable=True, margin=0.90):
-    """
-    Scale a window to fit the current screen while preserving
-    the aspect ratio of the original design size.
-    Centers the result on screen.  Never upscales beyond the design size.
-    """
-    screen_w = window.winfo_screenwidth()
-    screen_h = window.winfo_screenheight()
-
-    max_w = int(screen_w * margin)
-    max_h = int(screen_h * margin)
-
-    scale = min(max_w / design_w, max_h / design_h, 1.0)
-
-    final_w = int(design_w * scale)
-    final_h = int(design_h * scale)
-
-    x = (screen_w - final_w) // 2
-    y = max(0, (screen_h - final_h) // 2)
-
-    window.geometry(f"{final_w}x{final_h}+{x}+{y}")
-    window.resizable(resizable, resizable)
 
 # 2) Optional splash screen
 def show_splash(duration_ms=1000):
@@ -123,53 +93,76 @@ ctk.set_default_color_theme("green")
 
 # 4) Launcher window
 def launcher_window():
+    # ── Single-tool guard ──────────────────────────────────────────
+    # Only one tool window may be open at a time.  This avoids the
+    # global sys.stdout collision where the last-opened window
+    # captures all print output from every module.
+    _active_tool = [None]  # mutable container so closures can update it
+
+    def _open_tool(factory, **kwargs):
+        """Open a tool window, enforcing one-at-a-time."""
+        current = _active_tool[0]
+        if current is not None:
+            try:
+                if current.winfo_exists():
+                    from tkinter import messagebox
+                    messagebox.showinfo(
+                        "Tool already open",
+                        "Please close the current tool before opening another.")
+                    current.lift()
+                    return
+            except Exception:
+                pass  # widget was destroyed — safe to proceed
+        win = factory(master=dialog, **kwargs)
+        _active_tool[0] = win
+
     # --- Pre-prep tools ---
     def open_fov():
-        FOVGeneratorWindow(master=dialog)
+        _open_tool(FOVGeneratorWindow)
 
     def open_lens():
-        LensCorrectionWindow(master=dialog)
+        _open_tool(LensCorrectionWindow)
 
     def open_harmonise():
-        HarmoniseImagesWindow(master=dialog)
+        _open_tool(HarmoniseImagesWindow)
 
     # --- Georeferencing ---
     def open_pixel_to_gcp():
-        PixelToGCPWindow(master=dialog)
+        _open_tool(PixelToGCPWindow)
 
     def open_feature_individual():
-        FeatureIdentifier(master=dialog, mode="individual")
+        _open_tool(FeatureIdentifier, mode="individual")
 
     def open_feature_ml():
-        FeatureIdentifier(master=dialog, mode="ml")
+        _open_tool(FeatureIdentifier, mode="ml")
 
     def open_feature_batch():
-        FeatureIdentifier(master=dialog, mode="batch")
+        _open_tool(FeatureIdentifier, mode="batch")
 
     def open_dem():
-        CreateDemWindow(master=dialog)
+        _open_tool(CreateDemWindow)
 
     def open_georef():
-        GeoReferenceModule(master=dialog)
+        _open_tool(GeoReferenceModule)
 
     def open_homography():
-        CreateHomographyMatrixWindow(master=dialog)
+        _open_tool(CreateHomographyMatrixWindow)
 
     def open_timestack():
-        TimestackTool(master=dialog)
+        _open_tool(TimestackTool)
 
     def open_wave_run():
-        WaveRunUpCalculator(master=dialog)
+        _open_tool(WaveRunUpCalculator)
 
     # --- Data exploration ---
     def open_timeseries():
-        TimeSeriesExplorerWindow(master=dialog)
+        _open_tool(TimeSeriesExplorerWindow)
 
     def open_color_explorer():
-        ColorSpaceExplorerWindow(master=dialog)
+        _open_tool(ColorSpaceExplorerWindow)
 
     def open_profile():
-        ProfileHovmullerWindow(master=dialog)
+        _open_tool(ProfileHovmullerWindow)
 
     def on_close():
         dialog.destroy()

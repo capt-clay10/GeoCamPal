@@ -10,6 +10,8 @@ import sys
 import time
 import threading
 
+from utils import fit_geometry, resource_path, setup_console, restore_console
+
 # ── shared CSV utility ──
 try:
     from csv_utils import read_gcp_csv, check_required_columns
@@ -24,59 +26,6 @@ except ImportError:
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("green")
 
-# %% window resizer
-
-def fit_geometry(window, design_w, design_h, resizable=True, margin=0.90):
-    """
-    Scale a window to fit the current screen while preserving
-    the aspect ratio of the original design size.
-    Centers the result on screen.  Never upscales beyond the design size.
-
-    Parameters
-    ----------
-    window      : Tk / CTk / CTkToplevel instance
-    design_w/h  : the "intended" pixel size (the old hardcoded values)
-    resizable   : whether the user can drag-resize afterward
-    margin      : fraction of screen to occupy at most (0.90 = 90 %)
-    """
-    screen_w = window.winfo_screenwidth()
-    screen_h = window.winfo_screenheight()
-
-    max_w = int(screen_w * margin)
-    max_h = int(screen_h * margin)
-
-    scale = min(max_w / design_w, max_h / design_h, 1.0)
-
-    final_w = int(design_w * scale)
-    final_h = int(design_h * scale)
-
-    x = (screen_w - final_w) // 2
-    y = max(0, (screen_h - final_h) // 2)
-
-    window.geometry(f"{final_w}x{final_h}+{x}+{y}")
-    window.resizable(resizable, resizable)
-
-# %% --- StdoutRedirector class for redirecting console output into the GUI ---
-class StdoutRedirector:
-    def __init__(self, text_widget):
-        self.text_widget = text_widget
-
-    def write(self, message):
-        self.text_widget.insert(tk.END, message)
-        self.text_widget.see(tk.END)
-
-    def flush(self):
-        pass
-
-
-def resource_path(relative_path: str) -> str:
-    """Return absolute path to resource, compatible with PyInstaller."""
-    try:
-        base_path = sys._MEIPASS
-    except Exception:
-        base_path = os.path.dirname(__file__)
-    return os.path.join(base_path, relative_path)
-
 
 class CreateHomographyMatrixWindow(ctk.CTkToplevel):
     def __init__(self, master=None, *args, **kwargs):
@@ -89,6 +38,9 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
             self.iconbitmap(resource_path("launch_logo.ico"))
         except Exception as e:
             print("Warning: Could not load window icon:", e)
+
+        # ——— close handler ———
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         # ------------  state variables  ------------
         self.input_file = None
@@ -221,9 +173,14 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
         self.text_console = tk.Text(self.panel5, wrap="word", height=10)
         self.text_console.pack(padx=5, pady=5, fill="both", expand=True)
 
-        sys.stdout = StdoutRedirector(self.text_console)
-        sys.stderr = sys.stdout
-        print("Here you may see console outputs\n--------------------------------\n")
+        self._console_redir = setup_console(self.text_console,
+            "Here you may see console outputs\n--------------------------------\n")
+
+    # ——————————————————————————— close handler —————————————————————————
+    def _on_close(self):
+        """Clean up and close the window."""
+        restore_console(self._console_redir)
+        self.destroy()
 
 # %% Helper
 
@@ -468,13 +425,19 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
         _, _, _, _, _, _, H = self.compute_homography_and_errors(
             self.pixel_points, self.utm_points, subset, r_thresh
         )
-        best_cost = cost(*self.compute_full_errors(H, self.pixel_points, self.utm_points))
-        best_subset, best_H = subset.copy(), H
+        if H is None:
+            self.thread_log("Error: could not compute an initial homography for SA.")
+            return
+
+        current_subset, current_H = subset.copy(), H
+        current_cost = cost(*self.compute_full_errors(current_H, self.pixel_points, self.utm_points))
+        best_subset, best_H = current_subset.copy(), current_H
+        best_cost = current_cost
 
         self.thread_log("Starting simulated annealing …")
         t0 = time.time()
         for it in range(max_iter):
-            new_subset = best_subset.copy()
+            new_subset = current_subset.copy()
             for _ in range(swaps):
                 out = random.choice(new_subset)
                 inp = random.choice(np.setdiff1d(idx_all, new_subset))
@@ -482,10 +445,15 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
             _, _, _, _, _, _, H2 = self.compute_homography_and_errors(
                 self.pixel_points, self.utm_points, new_subset, r_thresh
             )
+            if H2 is None:
+                temp *= cooling
+                continue
             new_cost = cost(*self.compute_full_errors(H2, self.pixel_points, self.utm_points))
-            dc = new_cost - best_cost
+            dc = new_cost - current_cost
             if dc < 0 or random.random() < np.exp(-dc / temp):
-                best_subset, best_cost, best_H = new_subset.copy(), new_cost, H2
+                current_subset, current_cost, current_H = new_subset.copy(), new_cost, H2
+                if new_cost < best_cost:
+                    best_subset, best_cost, best_H = new_subset.copy(), new_cost, H2
             temp *= cooling
             if (it + 1) % 50000 == 0:
                 self.thread_log(
@@ -493,6 +461,7 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
                 )
 
         self.best_H_annealing = best_H
+        self.best_cost = best_cost
         elapsed = time.time() - t0
         m, med, sd, mx, inl, big = self.compute_full_errors(
             best_H, self.pixel_points, self.utm_points

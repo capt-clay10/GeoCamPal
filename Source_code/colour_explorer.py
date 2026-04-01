@@ -43,63 +43,12 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 from PIL import Image, ImageTk
 
+from utils import fit_geometry, resource_path, setup_console, restore_console
+
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("green")
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
-
-# %% window resizer 
-
-def fit_geometry(window, design_w, design_h, resizable=True, margin=0.90):
-    """
-    Scale a window to fit the current screen while preserving
-    the aspect ratio of the original design size.
-    Centers the result on screen.  Never upscales beyond the design size.
-
-    Parameters
-    ----------
-    window      : Tk / CTk / CTkToplevel instance
-    design_w/h  : the "intended" pixel size (the old hardcoded values)
-    resizable   : whether the user can drag-resize afterward
-    margin      : fraction of screen to occupy at most (0.90 = 90 %)
-    """
-    screen_w = window.winfo_screenwidth()
-    screen_h = window.winfo_screenheight()
-
-    max_w = int(screen_w * margin)
-    max_h = int(screen_h * margin)
-
-    scale = min(max_w / design_w, max_h / design_h, 1.0)
-
-    final_w = int(design_w * scale)
-    final_h = int(design_h * scale)
-
-    x = (screen_w - final_w) // 2
-    y = max(0, (screen_h - final_h) // 2)
-
-    window.geometry(f"{final_w}x{final_h}+{x}+{y}")
-    window.resizable(resizable, resizable)
-
-
-# %% ————————————————————————————— util helpers ————————————————————————
-def resource_path(relative_path: str) -> str:
-    try:
-        base_path = sys._MEIPASS
-    except Exception:
-        base_path = os.path.dirname(__file__)
-    return os.path.join(base_path, relative_path)
-
-
-class StdoutRedirector:
-    def __init__(self, text_widget: tk.Text):
-        self.text_widget = text_widget
-
-    def write(self, message: str):
-        self.text_widget.insert(tk.END, message)
-        self.text_widget.see(tk.END)
-
-    def flush(self):
-        pass
 
 
 # %% ————————————————————————————— timestamp parsing ———————————————————
@@ -263,6 +212,9 @@ class ColorSpaceExplorerWindow(ctk.CTkToplevel):
         except Exception:
             pass
 
+        # ——— close handler ———
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
         # ——— state ———
         self.input_folder = None
         self.output_folder = None
@@ -272,14 +224,14 @@ class ColorSpaceExplorerWindow(ctk.CTkToplevel):
         self.aoi_polygon_pts = None  # list of (x, y) in full-image coords
         self.aoi_mask = None         # uint8 H×W mask (255 = inside AOI)
 
-        # ——— layout: 3 rows — plots | controls | console ———
+        # ——— layout: 3 rows — plots | console | controls ———
         self.grid_rowconfigure(0, weight=3)
         self.grid_rowconfigure(1, weight=0)
-        self.grid_rowconfigure(2, weight=1)
+        self.grid_rowconfigure(2, weight=0)
         self.grid_columnconfigure(0, weight=1)
 
         # ———————————— TOP: matplotlib plot area ————————————————
-        self.top_panel = ctk.CTkFrame(self)
+        self.top_panel = ctk.CTkFrame(self, fg_color="black")
         self.top_panel.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
 
         self.fig, self.axes = plt.subplots(1, 3, figsize=(15, 4.5))
@@ -302,7 +254,7 @@ class ColorSpaceExplorerWindow(ctk.CTkToplevel):
 
         # ———————————— MIDDLE: controls ————————————————————————
         self.ctrl_panel = ctk.CTkFrame(self)
-        self.ctrl_panel.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
+        self.ctrl_panel.grid(row=2, column=0, sticky="nsew", padx=5, pady=5)
 
         # -- Row 1: input folder --
         r1 = ctk.CTkFrame(self.ctrl_panel)
@@ -476,14 +428,18 @@ class ColorSpaceExplorerWindow(ctk.CTkToplevel):
 
         # ———————————— BOTTOM: console ————————————————————————
         self.console_frame = ctk.CTkFrame(self)
-        self.console_frame.grid(row=2, column=0, sticky="nsew", padx=5, pady=5)
-        self.console_text = tk.Text(self.console_frame, wrap="word", height=8)
+        self.console_frame.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
+        self.console_text = tk.Text(self.console_frame, wrap="word", height=10)
         self.console_text.pack(fill="both", expand=True, padx=5, pady=5)
-        self.stdout_redirector = StdoutRedirector(self.console_text)
-        sys.stdout = self.stdout_redirector
-        sys.stderr = self.stdout_redirector
+        self._console_redir = setup_console(self.console_text)
 
         self._print_guide()
+
+    # ——————————————————————————— close handler —————————————————————————
+    def _on_close(self):
+        """Clean up and close the window."""
+        restore_console(self._console_redir)
+        self.destroy()
 
     # ——————————————————————————— guide text ———————————————————————————
     def _print_guide(self):
@@ -759,21 +715,40 @@ class ColorSpaceExplorerWindow(ctk.CTkToplevel):
             m = rem // 60
             return f"{int(h)}h {int(m)}m left"
 
-    def _update_eta(self, text):
-        """Thread-safe update of the ETA label."""
+    def _ui_call(self, func, *args, **kwargs):
+        """Run a UI callback on Tk's main thread."""
         try:
-            self.eta_label.configure(text=text)
+            self.after(0, lambda: func(*args, **kwargs))
         except Exception:
             pass
 
+    def _set_progress(self, value):
+        self._ui_call(self.progress_bar.set, value)
+
+    def _update_eta(self, text):
+        """Thread-safe update of the ETA label."""
+        self._ui_call(self.eta_label.configure, text=text)
+
+    def _show_warning(self, title, message):
+        self._ui_call(messagebox.showwarning, title, message)
+
+    def _show_info(self, title, message):
+        self._ui_call(messagebox.showinfo, title, message)
+
+    def _show_error(self, title, message):
+        self._ui_call(messagebox.showerror, title, message)
+
+    def _draw_canvas(self):
+        self._ui_call(self.canvas_plot.draw)
+
     def _run_analysis(self):
         try:
-            self.progress_bar.set(0)
+            self._set_progress(0)
             self._update_eta("")
 
             if not self.input_folder:
-                messagebox.showwarning("Warning",
-                                       "Select an image folder first.")
+                self._show_warning("Warning",
+                                   "Select an image folder first.")
                 return
 
             params = self._read_params()
@@ -787,8 +762,8 @@ class ColorSpaceExplorerWindow(ctk.CTkToplevel):
             images = collect_images(self.input_folder,
                                     self.recursive_var.get())
             if not images:
-                messagebox.showwarning("Warning",
-                                       "No images found in the folder.")
+                self._show_warning("Warning",
+                                   "No images found in the folder.")
                 return
 
             n_img = len(images)
@@ -862,7 +837,7 @@ class ColorSpaceExplorerWindow(ctk.CTkToplevel):
 
                 done = idx + 1
                 frac = done / n_img * 0.6
-                self.progress_bar.set(frac)
+                self._set_progress(frac)
                 elapsed = time.time() - t_start
                 eta_str = self._format_eta(elapsed, done, n_img)
                 if (done) % 5 == 0 or done == 1 or done == n_img:
@@ -872,7 +847,7 @@ class ColorSpaceExplorerWindow(ctk.CTkToplevel):
                           f"[{eta_str}]")
 
             if not all_stats:
-                messagebox.showwarning("Warning", "No readable images found.")
+                self._show_warning("Warning", "No readable images found.")
                 return
 
             self.all_stats = all_stats
@@ -910,7 +885,7 @@ class ColorSpaceExplorerWindow(ctk.CTkToplevel):
             ax0.set_ylabel("Density")
             ax0.legend(fontsize="small")
             ax0.grid(True, alpha=0.2)
-            self.progress_bar.set(0.7)
+            self._set_progress(0.7)
 
             # ---- Plot 2: 2-D scatter density --------------------------
             print("Generating 2-D scatter density …")
@@ -936,7 +911,7 @@ class ColorSpaceExplorerWindow(ctk.CTkToplevel):
             ax1.set_xlabel(ch_names[sx])
             ax1.set_ylabel(ch_names[sy])
             ax1.grid(True, alpha=0.2)
-            self.progress_bar.set(0.8)
+            self._set_progress(0.8)
 
             # ---- Plot 3: color timeline -------------------------------
             print("Generating color timeline …")
@@ -993,8 +968,8 @@ class ColorSpaceExplorerWindow(ctk.CTkToplevel):
                 print("  No timestamps could be parsed — timeline skipped.")
 
             self.fig.tight_layout()
-            self.canvas_plot.draw()
-            self.progress_bar.set(0.9)
+            self._draw_canvas()
+            self._set_progress(0.9)
 
             # ---- Outlier detection ------------------------------------
             print("\nOutlier detection …")
@@ -1097,7 +1072,7 @@ class ColorSpaceExplorerWindow(ctk.CTkToplevel):
                 print("\nNo output folder selected — CSV/outlier "
                       "files not saved.")
 
-            self.progress_bar.set(1.0)
+            self._set_progress(1.0)
             total_elapsed = time.time() - t_start
             if total_elapsed < 60:
                 elapsed_str = f"{total_elapsed:.1f}s"
@@ -1106,16 +1081,16 @@ class ColorSpaceExplorerWindow(ctk.CTkToplevel):
                 elapsed_str = f"{int(em)}m {int(es)}s"
             self._update_eta(f"Done in {elapsed_str}")
             print(f"\n✓ Analysis complete ({elapsed_str}).")
-            messagebox.showinfo("Done",
-                                f"Analysed {len(all_stats)} images "
-                                f"in {elapsed_str}.\n"
-                                f"Outliers: {len(outliers)}")
+            self._show_info("Done",
+                            f"Analysed {len(all_stats)} images "
+                            f"in {elapsed_str}.\n"
+                            f"Outliers: {len(outliers)}")
 
         except Exception as e:
             print(f"\n[ERROR] {e}")
             import traceback
             traceback.print_exc()
-            messagebox.showerror("Error", str(e))
+            self._show_error("Error", str(e))
 
 
 # ——— standalone ———

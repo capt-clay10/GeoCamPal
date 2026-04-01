@@ -35,6 +35,10 @@ class HSVMaskEditingMixin:
 
     def start_freehand(self):
         self.freehand_mode = True
+        # Keep the freehand line visually clean: hide vertex markers
+        # for the current shape until the user explicitly switches back
+        # to a vertex-editing mode.
+        self._hide_vertices_for_current_shape = True
         self._record_history()
 
         # unbind the old click-based handlers
@@ -509,6 +513,7 @@ class HSVMaskEditingMixin:
 
         self.edited_edge_points = []
         self.edit_history = []
+        self._hide_vertices_for_current_shape = False
         self._record_history()
         self.redraw_canvas()
         self.creation_mode = True
@@ -537,6 +542,7 @@ class HSVMaskEditingMixin:
 
         self.edited_edge_points = []
         self.edit_history = []
+        self._hide_vertices_for_current_shape = False
         self._record_history()
         self.redraw_canvas()
         self.creation_mode = True
@@ -602,6 +608,7 @@ class HSVMaskEditingMixin:
             return
 
         self._record_history()
+        self._hide_vertices_for_current_shape = False
         self.creation_mode = True
         # Keep is_polygon_mode as-is (if user was editing a polygon, continue as polygon)
 
@@ -1305,6 +1312,11 @@ class HSVMaskEditingMixin:
         if not hasattr(self, "_vertex_ids"):
             self._vertex_ids = []
 
+        hide_vertices = bool(
+            getattr(self, "freehand_mode", False)
+            or getattr(self, "_hide_vertices_for_current_shape", False)
+        )
+
         # add missing
         while len(self._vertex_ids) < len(pts):
             vid = self.edit_canvas.create_oval(0, 0, 0, 0,
@@ -1317,11 +1329,23 @@ class HSVMaskEditingMixin:
             try: self.edit_canvas.delete(vid)
             except: pass
 
+        if hide_vertices:
+            for vid in self._vertex_ids:
+                try:
+                    self.edit_canvas.itemconfigure(vid, state="hidden")
+                except Exception:
+                    pass
+            return
+
         # position all
         for i, (x, y) in enumerate(pts):
             sx, sy = self._scaled(x, y)
             vid = self._vertex_ids[i]
             self.edit_canvas.coords(vid, sx - r, sy - r, sx + r, sy + r)
+            try:
+                self.edit_canvas.itemconfigure(vid, state="normal")
+            except Exception:
+                pass
 
     def _refresh_overlays(self):
         if getattr(self, "_skip_overlay", False):
@@ -1488,6 +1512,7 @@ class HSVMaskEditingMixin:
 
     def set_vertex_mode(self, mode):
         self.vertex_mode = mode
+        self._hide_vertices_for_current_shape = False
 
         # If we were in creation mode (single-click adds points),
         # turn it off and restore the normal edit bindings.

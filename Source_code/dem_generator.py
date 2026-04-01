@@ -29,64 +29,11 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 import matplotlib.dates as mdates
 import matplotlib
-from osgeo import osr
-osr.DontUseExceptions()
+
+from utils import fit_geometry, resource_path, setup_console, restore_console
 matplotlib.use("Agg")
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("green")
-
-# %% window resizer 
-
-def fit_geometry(window, design_w, design_h, resizable=True, margin=0.90):
-    """
-    Scale a window to fit the current screen while preserving
-    the aspect ratio of the original design size.
-    Centers the result on screen.  Never upscales beyond the design size.
-
-    Parameters
-    ----------
-    window      : Tk / CTk / CTkToplevel instance
-    design_w/h  : the "intended" pixel size (the old hardcoded values)
-    resizable   : whether the user can drag-resize afterward
-    margin      : fraction of screen to occupy at most (0.90 = 90 %)
-    """
-    screen_w = window.winfo_screenwidth()
-    screen_h = window.winfo_screenheight()
-
-    max_w = int(screen_w * margin)
-    max_h = int(screen_h * margin)
-
-    scale = min(max_w / design_w, max_h / design_h, 1.0)
-
-    final_w = int(design_w * scale)
-    final_h = int(design_h * scale)
-
-    x = (screen_w - final_w) // 2
-    y = max(0, (screen_h - final_h) // 2)
-
-    window.geometry(f"{final_w}x{final_h}+{x}+{y}")
-    window.resizable(resizable, resizable)
-
-# %% ————————————————————————————— util helpers ————————————————————————
-def resource_path(relative_path: str) -> str:
-    try:
-        base_path = sys._MEIPASS  # type: ignore
-    except Exception:
-        base_path = os.path.dirname(__file__)
-    return os.path.join(base_path, relative_path)
-
-
-class StdoutRedirector:
-    def __init__(self, text_widget: tk.Text):
-        self.text_widget = text_widget
-
-    def write(self, message: str):
-        self.text_widget.insert(tk.END, message)
-        self.text_widget.see(tk.END)
-
-    def flush(self):
-        pass
-
 
 # %% ————————————————————————————— main window ——————————————————————————
 class CreateDemWindow(ctk.CTkToplevel):
@@ -110,6 +57,9 @@ class CreateDemWindow(ctk.CTkToplevel):
         except Exception as err:
             print("Warning: could not load window icon:", err)
 
+        # ——— close handler ———
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
         # cached data
         self.df_wl_1min: pd.DataFrame | None = None
         self.shorelines_gdf: gpd.GeoDataFrame | None = None
@@ -123,6 +73,7 @@ class CreateDemWindow(ctk.CTkToplevel):
 
         # UI state variables
         self.export_xyz_var = tk.BooleanVar(value=False)
+        self.beach_shape_var = tk.StringVar(value="Straight")
 
         # default filename pattern
         DEFAULT_PATTERN = (
@@ -138,15 +89,16 @@ class CreateDemWindow(ctk.CTkToplevel):
         # console
         console_frame = ctk.CTkFrame(self)
         console_frame.pack(side="bottom", fill="both", expand=False, padx=5, pady=5)
-        console_text = tk.Text(console_frame, wrap="word", height=10)
-        console_text.pack(fill="both", expand=True, padx=5, pady=5)
-        sys.stdout = StdoutRedirector(console_text)
-        sys.stderr = sys.stdout
-        print("Here you may see console outputs\n--------------------------------\n")
+        self.console_text = tk.Text(console_frame, wrap="word", height=10)
+        self.console_text.pack(fill="both", expand=True, padx=5, pady=5)
+        self._console_redir = setup_console(
+            self.console_text,
+            "Here you may see console outputs\n--------------------------------\n",
+        )
 
     # ————————————————————————— UI helpers ——————————————————————————————
     def _create_top_panel(self):
-        self.top_frame = ctk.CTkFrame(self)
+        self.top_frame = ctk.CTkFrame(self, fg_color="black")
         self.top_frame.pack(side="top", fill="both", expand=True)
 
         self.top_left_container = ctk.CTkFrame(self.top_frame)
@@ -176,78 +128,118 @@ class CreateDemWindow(ctk.CTkToplevel):
 
     def _create_bottom_panel(self):
         self.bottom_frame = ctk.CTkFrame(self)
-        self.bottom_frame.pack(side="bottom", fill="x", expand=False, padx=5, pady=25, ipady=10)
-
+        self.bottom_frame.pack(side="bottom", fill="x", expand=False, padx=5, pady=15)
+    
+        def left_row(parent, pady=4):
+            outer = ctk.CTkFrame(parent, fg_color="transparent")
+            outer.pack(side="top", fill="x", padx=5, pady=pady)
+    
+            row = ctk.CTkFrame(outer, fg_color="transparent")
+            row.pack(side="left", anchor="w")
+            return row
+    
         # ————————————— inputs row —————————————
-        inputs = ctk.CTkFrame(self.bottom_frame)
-        inputs.pack(side="top", fill="x", padx=5, pady=5)
-
+        inputs = left_row(self.bottom_frame)
+    
         self.wl_csv_var = tk.StringVar()
         ctk.CTkEntry(inputs, textvariable=self.wl_csv_var, width=240).pack(side="left", padx=5)
-        ctk.CTkButton(inputs, text="Browse Water‑Level CSV",
-                       command=self.browse_wl_csv).pack(side="left", padx=5)
-
+        ctk.CTkButton(
+            inputs,
+            text="Browse Water‑Level CSV",
+            command=self.browse_wl_csv
+        ).pack(side="left", padx=5)
+    
         self.geojson_dir_var = tk.StringVar()
         ctk.CTkEntry(inputs, textvariable=self.geojson_dir_var, width=240).pack(side="left", padx=5)
-        ctk.CTkButton(inputs, text="Browse GeoJSON Folder",
-                       command=self.browse_geojson_dir).pack(side="left", padx=5)
-
-        ctk.CTkLabel(inputs, text="Filename pattern:").pack(side="left", padx=15)
+        ctk.CTkButton(
+            inputs,
+            text="Browse GeoJSON Folder",
+            command=self.browse_geojson_dir
+        ).pack(side="left", padx=5)
+    
+        ctk.CTkLabel(inputs, text="Filename pattern:").pack(side="left", padx=(15, 5))
         ctk.CTkEntry(inputs, textvariable=self.regex_var, width=320).pack(side="left", padx=5)
-
+    
         # ————————————— DEM settings row —————————————
-        dem = ctk.CTkFrame(self.bottom_frame)
-        dem.pack(side="top", fill="x", padx=5, pady=5)
-
+        dem = left_row(self.bottom_frame)
+    
         ctk.CTkLabel(dem, text="Resolution (m):").pack(side="left", padx=5)
         self.resolution_var = tk.StringVar(value="1")
         ctk.CTkEntry(dem, textvariable=self.resolution_var, width=60).pack(side="left", padx=5)
-
-        ctk.CTkLabel(dem, text="Vertex spacing (m):").pack(side="left", padx=10)
+    
+        ctk.CTkLabel(dem, text="Vertex spacing (m):").pack(side="left", padx=(10, 5))
         self.spacing_var = tk.StringVar(value="1")
         ctk.CTkEntry(dem, textvariable=self.spacing_var, width=60).pack(side="left", padx=5)
-
-        ctk.CTkLabel(dem, text="Smoothing σ:").pack(side="left", padx=10)
+    
+        ctk.CTkLabel(dem, text="Smoothing σ:").pack(side="left", padx=(10, 5))
         self.sigma_var = tk.StringVar(value="1.5")
         ctk.CTkEntry(dem, textvariable=self.sigma_var, width=60).pack(side="left", padx=5)
-
-        ctk.CTkButton(dem, text="Generate next DEM",
-                       command=self.on_generate_next_dem, fg_color="#0F52BA").pack(side="left", padx=15)
-
+    
+        ctk.CTkLabel(dem, text="Beach shape:").pack(side="left", padx=(10, 5))
+        ctk.CTkOptionMenu(
+            dem,
+            variable=self.beach_shape_var,
+            values=["Straight", "Curved"],
+            width=110,
+        ).pack(side="left", padx=5)
+    
+        ctk.CTkButton(
+            dem,
+            text="Generate next DEM",
+            command=self.on_generate_next_dem,
+            fg_color="#0F52BA"
+        ).pack(side="left", padx=(15, 5))
+    
         # ————————————— output row —————————————
-        out = ctk.CTkFrame(self.bottom_frame)
-        out.pack(side="top", fill="x", padx=5, pady=5)
-
+        out = left_row(self.bottom_frame)
+    
         self.out_dir_var = tk.StringVar()
         ctk.CTkEntry(out, textvariable=self.out_dir_var, width=240).pack(side="left", padx=5)
-        ctk.CTkButton(out, text="Browse Output Folder",
-                       command=self.browse_out_dir, fg_color="#8C7738").pack(side="left", padx=5)
-        self.out_dir_display_label = ctk.CTkLabel(out, text="", width=240)
+        ctk.CTkButton(
+            out,
+            text="Browse Output Folder",
+            command=self.browse_out_dir,
+            fg_color="#8C7738"
+        ).pack(side="left", padx=5)
+    
+        self.out_dir_display_label = ctk.CTkLabel(out, text="", width=240, anchor="w")
         self.out_dir_display_label.pack(side="left", padx=5)
-
-        ctk.CTkCheckBox(out, text="Export XYZ?",
-                        variable=self.export_xyz_var).pack(side="left", padx=20)
-
-        ctk.CTkButton(out, text="Batch process",
-                       command=self.on_batch_process, fg_color="#0F52BA").pack(side="left", padx=25)
-
-        ctk.CTkButton(out, text="Reset", command=self.reset_to_initial,
-                       fg_color="red", text_color="white").pack(side="left", padx=10)
+    
+        ctk.CTkCheckBox(
+            out,
+            text="Export XYZ?",
+            variable=self.export_xyz_var
+        ).pack(side="left", padx=(20, 5))
+    
+        ctk.CTkButton(
+            out,
+            text="Batch process",
+            command=self.on_batch_process,
+            fg_color="#0F52BA"
+        ).pack(side="left", padx=(25, 5))
+    
+        ctk.CTkButton(
+            out,
+            text="Reset",
+            command=self.reset_to_initial,
+            fg_color="red",
+            text_color="white"
+        ).pack(side="left", padx=10)
 
     # ————————————————————————— file‑dialog callbacks ——————————————————
     def browse_wl_csv(self):
-        path = filedialog.askopenfilename(parent= self,filetypes=[("CSV files", "*.csv")])
+        path = filedialog.askopenfilename(filetypes=[("CSV files", "*.csv")])
         if path:
             self.wl_csv_var.set(path)
 
     def browse_geojson_dir(self):
-        path = filedialog.askdirectory(parent= self)
+        path = filedialog.askdirectory()
         if path:
             self.geojson_dir_var.set(path)
             self._invalidate_caches()
 
     def browse_out_dir(self):
-        path = filedialog.askdirectory(parent= self)
+        path = filedialog.askdirectory()
         if path:
             self.out_dir_var.set(path)
             self.out_dir_display_label.configure(text=path)
@@ -355,6 +347,37 @@ class CreateDemWindow(ctk.CTkToplevel):
         self.plot_waterlevel_overlay()
 
     # ————————————————— PCA shore orientation ——————————————————————————
+    def _pca_from_xy(self, xy: np.ndarray):
+        """Return (center, along, cross) from an Nx2 array of XY points."""
+        if xy is None or len(xy) < 3:
+            return (np.array([0.0, 0.0]), np.array([0.0, 1.0]), np.array([1.0, 0.0]))
+
+        xy = np.asarray(xy, dtype=float)[:, :2]
+        center = xy.mean(axis=0)
+        cov = np.cov(xy.T)
+        eigvals, eigvecs = np.linalg.eigh(cov)
+        idx_sort = np.argsort(eigvals)[::-1]
+
+        along = eigvecs[:, idx_sort[0]].astype(float)
+        cross = eigvecs[:, idx_sort[1]].astype(float)
+
+        along_norm = np.linalg.norm(along)
+        cross_norm = np.linalg.norm(cross)
+        if along_norm < 1e-12 or cross_norm < 1e-12:
+            return (center, np.array([0.0, 1.0]), np.array([1.0, 0.0]))
+
+        along /= along_norm
+        cross /= cross_norm
+        return center, along, cross
+
+    def _align_local_axes(self, along: np.ndarray, cross: np.ndarray):
+        """Keep local PCA axes sign-consistent with the dataset-wide PCA axes."""
+        if self._pca_along is not None and float(np.dot(along, self._pca_along)) < 0:
+            along = -along
+        if self._pca_cross is not None and float(np.dot(cross, self._pca_cross)) < 0:
+            cross = -cross
+        return along, cross
+
     def _compute_pca_directions(self):
         """
         Determine the along‑shore / cross‑shore principal directions
@@ -378,16 +401,9 @@ class CreateDemWindow(ctk.CTkToplevel):
             self._pca_cross = np.array([1.0, 0.0])
             return
 
-        xy = np.array(all_xy)[:, :2]
-        self._pca_center = xy.mean(axis=0)
-
-        cov = np.cov(xy.T)
-        eigvals, eigvecs = np.linalg.eig(cov)
-        idx_sort = np.argsort(eigvals)[::-1]
-        # along‑shore = direction of largest variance
-        self._pca_along = eigvecs[:, idx_sort[0]]
-        # cross‑shore = perpendicular
-        self._pca_cross = eigvecs[:, idx_sort[1]]
+        self._pca_center, self._pca_along, self._pca_cross = self._pca_from_xy(
+            np.array(all_xy)[:, :2]
+        )
         print(f"PCA along‑shore direction: {self._pca_along}")
         print(f"PCA cross‑shore direction: {self._pca_cross}")
 
@@ -473,29 +489,21 @@ class CreateDemWindow(ctk.CTkToplevel):
     # ————————————————————— transect interpolation —————————————————————
     def _interpolate_transects(self, dense_shorelines, grid_x, grid_y,
                                grid_x_vals, grid_y_vals, res):
+        """Dispatch DEM interpolation according to the selected beach shape."""
+        beach_shape = self.beach_shape_var.get().strip().lower()
+        if beach_shape == "curved":
+            return self._interpolate_transects_curved(
+                dense_shorelines, grid_x, grid_y, grid_x_vals, grid_y_vals, res
+            )
+        return self._interpolate_transects_straight(
+            dense_shorelines, grid_x, grid_y, grid_x_vals, grid_y_vals, res
+        )
+
+    def _interpolate_transects_straight(self, dense_shorelines, grid_x, grid_y,
+                                        grid_x_vals, grid_y_vals, res):
         """
-        Cross‑shore transect interpolation aligned to PCA directions.
-
-        For each along‑shore position, a perpendicular transect is cast
-        through the shoreline contours.  Elevation is interpolated
-        linearly between the contour crossings along each transect,
-        producing a physically meaningful monotonic profile.
-
-        Parameters
-        ----------
-        dense_shorelines : list[dict]
-            Each entry has keys 'wl' (float) and 'coords' (np.ndarray Nx2).
-        grid_x, grid_y : np.ndarray
-            Meshgrid arrays for the output DEM.
-        grid_x_vals, grid_y_vals : np.ndarray
-            1‑D arrays of the grid coordinates.
-        res : float
-            Grid resolution in metres.
-
-        Returns
-        -------
-        dem : np.ndarray
-            Interpolated DEM on the output grid (NaN outside data).
+        Cross‑shore transect interpolation aligned to one global PCA direction.
+        Best suited to beaches whose shoreline direction is approximately constant.
         """
         center = self._pca_center
         along_dir = self._pca_along
@@ -560,13 +568,11 @@ class CreateDemWindow(ctk.CTkToplevel):
             dem_rotated[ia, :] = f(cross_vals)
 
         # map rotated DEM back to geographic grid
-        # pre‑compute grid projections
         grid_diff_x = grid_x - center[0]
         grid_diff_y = grid_y - center[1]
         grid_a = grid_diff_x * along_dir[0] + grid_diff_y * along_dir[1]
         grid_c = grid_diff_x * cross_dir[0] + grid_diff_y * cross_dir[1]
 
-        # nearest‑index lookup into the rotated grid
         ia_idx = np.round((grid_a - along_vals[0]) / res).astype(int)
         ic_idx = np.round((grid_c - cross_vals[0]) / res).astype(int)
 
@@ -576,6 +582,93 @@ class CreateDemWindow(ctk.CTkToplevel):
         dem = np.full(grid_x.shape, np.nan)
         dem[valid] = dem_rotated[ia_idx[valid], ic_idx[valid]]
 
+        return dem
+
+    def _interpolate_transects_curved(self, dense_shorelines, grid_x, grid_y,
+                                      grid_x_vals, grid_y_vals, res):
+        """
+        Curved-beach mode: estimate a local PCA direction in a moving window
+        for each along-shore step, then cast the cross-shore transect in that
+        local frame. This preserves the current waterline method, but lets the
+        orientation bend with the shoreline instead of remaining globally fixed.
+        """
+        global_center = self._pca_center
+        global_along = self._pca_along
+
+        all_xy = np.vstack([sl["coords"] for sl in dense_shorelines])
+        all_along_global = (all_xy - global_center) @ global_along
+        a_min, a_max = all_along_global.min(), all_along_global.max()
+        along_vals = np.arange(a_min, a_max + res, res)
+        extent_m = max(float(a_max - a_min), res)
+        window_m = max(25.0, 20.0 * res, 0.08 * extent_m)
+
+        z_sum = np.zeros(grid_x.shape, dtype=float)
+        z_count = np.zeros(grid_x.shape, dtype=float)
+
+        for a_target in along_vals:
+            local_mask = np.abs(all_along_global - a_target) <= (window_m / 2.0)
+            local_xy = all_xy[local_mask]
+            if len(local_xy) < 6:
+                continue
+
+            local_center, local_along, local_cross = self._pca_from_xy(local_xy)
+            local_along, local_cross = self._align_local_axes(local_along, local_cross)
+
+            xz_pairs = []
+            local_cross_cloud = (local_xy - local_center) @ local_cross
+
+            for sl in dense_shorelines:
+                diff = sl["coords"] - local_center
+                sl_along = diff @ local_along
+                sl_cross = diff @ local_cross
+                for k in range(len(sl_along) - 1):
+                    a0, a1 = sl_along[k], sl_along[k + 1]
+                    if (a0 <= 0.0 <= a1) or (a1 <= 0.0 <= a0):
+                        denom = a1 - a0
+                        if abs(denom) < 1e-10:
+                            c_interp = (sl_cross[k] + sl_cross[k + 1]) / 2.0
+                        else:
+                            t = -a0 / denom
+                            c_interp = sl_cross[k] + t * (sl_cross[k + 1] - sl_cross[k])
+                        xz_pairs.append((c_interp, sl["wl"]))
+
+            if len(xz_pairs) < 2:
+                continue
+
+            xz_pairs.sort(key=lambda p: p[0])
+            cs = np.array([p[0] for p in xz_pairs], dtype=float)
+            zs = np.array([p[1] for p in xz_pairs], dtype=float)
+            _, uidx = np.unique(cs, return_index=True)
+            cs, zs = cs[uidx], zs[uidx]
+            if len(cs) < 2:
+                continue
+
+            c_min = min(local_cross_cloud.min(), cs.min()) - 2.0
+            c_max = max(local_cross_cloud.max(), cs.max()) + 2.0
+            cross_vals = np.arange(c_min, c_max + res, res)
+            z_profile = interp1d(cs, zs, kind="linear", bounds_error=False, fill_value=np.nan)(cross_vals)
+
+            line_xy = local_center[None, :] + cross_vals[:, None] * local_cross[None, :]
+            x_world = line_xy[:, 0]
+            y_world = line_xy[:, 1]
+
+            ix = np.round((x_world - grid_x_vals[0]) / res).astype(int)
+            iy = np.round((grid_y_vals[0] - y_world) / res).astype(int)
+
+            valid = (~np.isnan(z_profile) &
+                     (ix >= 0) & (ix < grid_x.shape[1]) &
+                     (iy >= 0) & (iy < grid_x.shape[0]))
+            if not np.any(valid):
+                continue
+
+            z_sum[iy[valid], ix[valid]] += z_profile[valid]
+            z_count[iy[valid], ix[valid]] += 1.0
+
+        dem = np.full(grid_x.shape, np.nan)
+        valid = z_count > 0
+        dem[valid] = z_sum[valid] / z_count[valid]
+
+        print(f"Curved-beach mode used moving-window PCA (window ≈ {window_m:.1f} m).")
         return dem
 
     def _smooth_dem(self, dem, sigma):
@@ -658,6 +751,7 @@ class CreateDemWindow(ctk.CTkToplevel):
         grid_x, grid_y = np.meshgrid(grid_x_vals, grid_y_vals)
 
         # --- transect interpolation ---
+        print(f"Beach shape mode: {self.beach_shape_var.get()}")
         grid_z = self._interpolate_transects(
             dense_shorelines, grid_x, grid_y, grid_x_vals, grid_y_vals, res)
 
@@ -755,6 +849,10 @@ class CreateDemWindow(ctk.CTkToplevel):
             self.progress_bar = self.progress_label = None
         self.top_left_container.pack(side="left", fill="both", expand=True, padx=5, pady=5)
         self.top_right_frame.pack(side="left", fill="both", expand=True, padx=5, pady=5)
+
+    def _on_close(self):
+        restore_console(getattr(self, "_console_redir", None))
+        self.destroy()
 
 
 # —————————————————————————————— entry point ———————————————————————————
