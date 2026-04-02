@@ -152,6 +152,7 @@ Visualise single‑ or multi‑camera field‑of‑view footprints on an optiona
 *Inputs*: Camera position (lat/lon), azimuth, horizontal & vertical FOV, optional GeoTIFF basemap, optional DEM.
 
 *Outputs*: FOV footprint plot (PNG) with distance rings and coordinate grid.
+<img width="1919" height="1031" alt="Image" src="https://github.com/user-attachments/assets/51c3c62d-d180-4f61-bf12-1add1674f8dc" />
 
 #### Lens Correction
 
@@ -160,6 +161,7 @@ Compute camera intrinsic parameters (camera matrix + distortion coefficients) fr
 *Inputs*: Folder of checkerboard images, number of squares (cols × rows), cell width & height (mm).
 
 *Outputs*: `.pkl` calibration file + summary `.txt` report. Undistorted preview shown in‑tool.
+<img width="1914" height="1030" alt="Image" src="https://github.com/user-attachments/assets/b491ca6c-0352-4417-8f89-53ed12130762" />
 
 #### Harmonise Images
 
@@ -173,6 +175,12 @@ Both harmonisation stages include a **preview system**: a random 5 % sample is p
 
 *Outputs*: `bad_images.txt`, `_brightness_harmonised/` subfolder, `_colour_harmonised/` subfolder.
 
+Harmonise colour
+<img width="1916" height="1030" alt="Image" src="https://github.com/user-attachments/assets/6be34210-3149-4371-abe6-5675eb046577" />
+
+Harmonise brightness
+<img width="1919" height="1032" alt="Image" src="https://github.com/user-attachments/assets/4a1b5c3b-e37a-4986-9535-a7647506c3da" />
+
 ---
 
 ### Georeferencing
@@ -182,6 +190,7 @@ Both harmonisation stages include a **preview system**: a random 5 % sample is p
 *Input*: A folder of `GCP_XX_cam*.jpg` images and a CSV of GCP lat/longs.
 
 *Output*: CSV mapping `Pixel_X  Pixel_Y ↔ Real_X  Real_Y` (optionally converted to UTM).
+<img width="1919" height="1031" alt="Image" src="https://github.com/user-attachments/assets/7694f340-ee30-4171-add9-c22734fbf205" />
 
 #### Homography Matrix Creator
 
@@ -192,7 +201,7 @@ Both harmonisation stages include a **preview system**: a random 5 % sample is p
 
 - Batch‑warp images using a previously computed homography.
 - Secondary AOI cropping and on‑the‑fly previews.
-
+<img width="1919" height="1030" alt="Image" src="https://github.com/user-attachments/assets/aef6c1c0-ee3a-4778-b7af-1805050130cb" />
 ---
 
 ### Feature Identifier
