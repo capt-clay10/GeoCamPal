@@ -17,7 +17,12 @@ from PIL import Image, ImageTk
 import cv2
 import numpy as np
 
-from utils import fit_geometry, StdoutRedirector
+from utils import (
+    fit_geometry, StdoutRedirector,
+    save_settings_json, load_settings_json,
+    make_selector_payload, describe_saved_path,
+    bring_child_to_front,
+)
 
 # %% Standalone helper classes
 # ──────────────────────────────────────────────
@@ -71,6 +76,9 @@ class BBoxSelectorWindow(tk.Toplevel):
         btn_confirm.pack(side="right", padx=5)
 
         self.display_image()
+
+        # Ensure selector opens on top
+        bring_child_to_front(self, master)
 
         # Rectangle selection
         self.rect_id = None
@@ -255,7 +263,7 @@ class HSVMaskUIMixin:
         ctk.CTkButton(aoi_method_row, text="Preview Profile", width=110,
                       command=self._aoi_preview_profile).pack(side="left", padx=5)
         ctk.CTkButton(aoi_method_row, text="Apply AOI", width=90,
-                      command=self._aoi_apply_filter, fg_color="#0F52BA").pack(side="left", padx=5)
+                      command=self._aoi_apply_filter, fg_color="#0F52BA", hover_color="#2A6BD1").pack(side="left", padx=5)
         ctk.CTkButton(aoi_method_row, text="Clear AOI", width=80,
                       command=self._aoi_clear,
                       fg_color="#8B0000", hover_color="#A52A2A").pack(side="left", padx=3)
@@ -427,7 +435,7 @@ class HSVMaskUIMixin:
         hsv_action_row = ctk.CTkFrame(self.hsv_controls_container)
         hsv_action_row.pack(side="top", fill="x", pady=(2, 5))
         if self.mode != "batch":
-            ctk.CTkButton(hsv_action_row, text="Calculate Mask", command=self.calculate_mask, fg_color="#0F52BA").pack(side="left", padx=5)
+            ctk.CTkButton(hsv_action_row, text="Calculate Mask", command=self.calculate_mask, fg_color="#0F52BA", hover_color="#2A6BD1").pack(side="left", padx=5)
         self.hsv_invert_check = ctk.CTkCheckBox(
             hsv_action_row, text="Invert Mask?", variable=self.do_invert_mask
         )
@@ -527,39 +535,7 @@ class HSVMaskUIMixin:
         edge_container = ctk.CTkFrame(parent)
         edge_container.pack(side="top", fill="x", pady=5)
 
-        calc_frame = ctk.CTkFrame(edge_container)
-        calc_frame.pack(side="top", fill="x", pady=2)
-
-        if self.mode == "ml":
-            btn_prev = ctk.CTkButton(calc_frame, text="Previous", command=self.prev_image)
-            btn_prev.pack(side="left", padx=5)
-            btn_next = ctk.CTkButton(calc_frame, text="Next", command=self.next_image)
-            btn_next.pack(side="left", padx=5)
-
-        if self.mode in ("ml", "individual"):
-            btn_boundary = ctk.CTkButton(calc_frame, text="Extract Boundary", command=self.extract_boundary_universal, fg_color="#0F52BA")
-            btn_boundary.pack(side="left", padx=5)
-            btn_polygon = ctk.CTkButton(calc_frame, text="Extract Polygon", command=self.extract_polygon_universal, fg_color="#0F52BA")
-            btn_polygon.pack(side="left", padx=5)
-            btn_cut_feature = ctk.CTkButton(
-                calc_frame, text="Edit Detected Feature", command=self.cut_detected_feature, fg_color="#0F52BA"
-            )
-            btn_cut_feature.pack(side="left", padx=5)
-
-            thickness_frame = ctk.CTkFrame(calc_frame)
-            thickness_frame.pack(side="left", padx=3)
-            ctk.CTkLabel(thickness_frame, text="Line Thickness (pixels)").pack(side="top")
-            self.thickness_value_label = ctk.CTkLabel(thickness_frame, text="2")
-            self.thickness_value_label.pack(side="top")
-            self.edge_thickness_slider = ctk.CTkSlider(
-                thickness_frame,
-                from_=1,
-                to=50,
-                command=lambda val: self.thickness_value_label.configure(text=f"{int(float(val))}")
-            )
-            self.edge_thickness_slider.set(2)
-            self.edge_thickness_slider.pack(side="top")
-
+        # Advanced settings row (above extract buttons)
         adv_frame = ctk.CTkFrame(edge_container)
         adv_frame.pack(side="top", fill="x", pady=2)
         self.advanced_check = ctk.CTkCheckBox(
@@ -580,6 +556,40 @@ class HSVMaskUIMixin:
         self.max_contour_label.pack_forget()
         self.max_contour_entry.pack_forget()
 
+        # Extract / edit buttons row
+        calc_frame = ctk.CTkFrame(edge_container)
+        calc_frame.pack(side="top", fill="x", pady=2)
+
+        if self.mode == "ml":
+            btn_prev = ctk.CTkButton(calc_frame, text="Previous", command=self.prev_image)
+            btn_prev.pack(side="left", padx=5)
+            btn_next = ctk.CTkButton(calc_frame, text="Next", command=self.next_image)
+            btn_next.pack(side="left", padx=5)
+
+        if self.mode in ("ml", "individual"):
+            btn_boundary = ctk.CTkButton(calc_frame, text="Extract Boundary", command=self.extract_boundary_universal, fg_color="#0F52BA", hover_color="#2A6BD1")
+            btn_boundary.pack(side="left", padx=5)
+            btn_polygon = ctk.CTkButton(calc_frame, text="Extract Polygon", command=self.extract_polygon_universal, fg_color="#0F52BA", hover_color="#2A6BD1")
+            btn_polygon.pack(side="left", padx=5)
+            btn_cut_feature = ctk.CTkButton(
+                calc_frame, text="Edit Detected Feature", command=self.cut_detected_feature, fg_color="#0F52BA",hover_color="#2A6BD1"
+            )
+            btn_cut_feature.pack(side="left", padx=5)
+
+            thickness_frame = ctk.CTkFrame(calc_frame)
+            thickness_frame.pack(side="left", padx=3)
+            ctk.CTkLabel(thickness_frame, text="Line Thickness (pixels)").pack(side="top")
+            self.thickness_value_label = ctk.CTkLabel(thickness_frame, text="2")
+            self.thickness_value_label.pack(side="top")
+            self.edge_thickness_slider = ctk.CTkSlider(
+                thickness_frame,
+                from_=1,
+                to=50,
+                command=lambda val: self.thickness_value_label.configure(text=f"{int(float(val))}")
+            )
+            self.edge_thickness_slider.set(2)
+            self.edge_thickness_slider.pack(side="top")
+
         # ── Row 5: Export Options ──────────────────────────────────────────────────
         export_frame = ctk.CTkFrame(parent)
         export_frame.pack(side="top", fill="x", pady=5)
@@ -587,7 +597,7 @@ class HSVMaskUIMixin:
         ctk.CTkLabel(export_frame, text="Export Folder:").pack(side="left", padx=5)
         self.export_path_entry = ctk.CTkEntry(export_frame, width=200)
         self.export_path_entry.pack(side="left", padx=5)
-        btn_browse = ctk.CTkButton(export_frame, text="Browse output folder", command=self.browse_export_folder, fg_color="#8C7738")
+        btn_browse = ctk.CTkButton(export_frame, text="Browse output folder", command=self.browse_export_folder, fg_color="#8C7738",hover_color="#A18A45")
         btn_browse.pack(side="left", padx=5)
 
         # ── Row 6: Feature frame ───────────────────────────────────────────────────
@@ -614,20 +624,20 @@ class HSVMaskUIMixin:
 
         if self.mode in ("individual", "ml"):
             btn_export_edge = ctk.CTkButton(
-                export_buttons_frame, text="Export feature as training data", command=self.export_training_data, fg_color="#6693F5"
+                export_buttons_frame, text="Export feature as training data", command=self.export_training_data, fg_color="#6693F5" ,hover_color="#7DA5F7"
             )
             btn_export_edge.pack(side="left", padx=5)
             btn_export_mask = ctk.CTkButton(
-                export_buttons_frame, text="Export mask as training data", command=self.export_mask_as_training_data, fg_color="#6693F5"
+                export_buttons_frame, text="Export mask as training data", command=self.export_mask_as_training_data, fg_color="#6693F5" , hover_color="#7DA5F7"
             )
             btn_export_mask.pack(side="left", padx=5)
             btn_export_test = ctk.CTkButton(
-                export_buttons_frame, text="Export as Test Data", command=self.export_as_test_data, fg_color="#6693F5"
+                export_buttons_frame, text="Export as Test Data", command=self.export_as_test_data, fg_color="#6693F5", hover_color="#7DA5F7"
             )
             btn_export_test.pack(side="left", padx=5)
             if self.mode == "individual":
                 btn_export_overlay = ctk.CTkButton(
-                    export_buttons_frame, text="Export as Overlay", command=self.export_as_overlay, fg_color="#6693F5"
+                    export_buttons_frame, text="Export as Overlay", command=self.export_as_overlay, fg_color="#6693F5",hover_color="#7DA5F7"
                 )
                 btn_export_overlay.pack(side="left", padx=5)
         else:
@@ -635,14 +645,14 @@ class HSVMaskUIMixin:
             btn_batch_process = ctk.CTkButton(export_frame, text="Batch Process", command=self.batch_process)
             btn_batch_process.pack(side="left", padx=5)
 
-        btn_save_settings = ctk.CTkButton(export_frame, text="Save Settings", command=self.save_settings)
+        btn_save_settings = ctk.CTkButton(export_frame, text="Save Settings",fg_color="#4F5D75",hover_color="#61708A", command=self.save_settings)
         btn_save_settings.pack(side="left", padx=5)
-        btn_load_settings = ctk.CTkButton(export_frame, text="Load Settings", command=self.load_settings)
+        btn_load_settings = ctk.CTkButton(export_frame, text="Load Settings",fg_color="#4F5D75",hover_color="#61708A", command=self.load_settings)
         btn_load_settings.pack(side="left", padx=5)
 
         # Reset button (all modes)
         btn_reset = ctk.CTkButton(
-            export_frame, text="Reset Session", command=self.reset_session,
+            export_frame, text="Reset", command=self.reset_session,
             fg_color="#8B0000", hover_color="#A52A2A", width=110)
         btn_reset.pack(side="left", padx=10)
 
@@ -664,13 +674,11 @@ class HSVMaskUIMixin:
             shortcut_frame.pack(side="top", fill="x", pady=5)
             ctk.CTkLabel(shortcut_frame, text="Shortcuts:", font=("Arial", 10, "bold")).pack(side="left", padx=5)
             shortcuts = [
-                ("Left/Right", "Prev/Next"),
-                ("Plus", "Calculate HSV mask"),
-                ("Minus", "Invert HSV mask"),
-                ("F5", "Extract boundary"),
-                ("F6", "Extract boundary w/ inverted mask"),
-                ("Space", "Export Test"),
-                ("Return", "Export Training data"),
+                ("Left/Right", "Prev/Next image"),
+                ("E", "Extract boundary"),
+                ("P", "Extract polygon"),
+                ("R", "Edit detected feature"),
+                ("Return", "Export Training data / Confirm feature (in edit mode)"),
             ]
             for i, (key, action) in enumerate(shortcuts):
                 ctk.CTkLabel(shortcut_frame, text=key, font=("Arial", 10, "bold")).pack(side="left")
@@ -1451,14 +1459,21 @@ class HSVMaskUIMixin:
             self.export_path_entry.insert(0, folder)
 
     def save_settings(self):
-        file_path = filedialog.asksaveasfilename(parent=self,
-            defaultextension=".json",
-            filetypes=[("JSON Files", "*.json"), ("All Files", "*.*")]
-        )
-        if not file_path:
-            return
+        # Build the same flat payload as before, plus paths
         data = {
-            "bbox_text": self.bbox_entry.get(),
+            # ── paths (new) ──
+            "paths": {
+                "image_path": describe_saved_path(
+                    getattr(self, "image_path", None)),
+                "image_folder": describe_saved_path(
+                    os.path.dirname(getattr(self, "image_path", "") or "")
+                    if getattr(self, "image_files", None) else None),
+                "export_path": describe_saved_path(
+                    self.export_path_entry.get().strip() or None),
+            },
+            # ── bbox / selector geometry (pixel-first) ──
+            "selector": self._build_selector_payload(),
+            # ── pipeline flags ──
             "enable_enhancements": bool(self.enable_enhancements.get()),
             "s_multiplier": int(self.s_multiplier_slider.get()),
             "v_multiplier": int(self.v_multiplier_slider.get()),
@@ -1481,7 +1496,7 @@ class HSVMaskUIMixin:
             "advanced_settings_enabled": self.advanced_check_var.get(),
             "min_contour_size": self.min_contour_entry.get(),
             "max_contour_size": self.max_contour_entry.get(),
-            # New ML mask settings
+            # ML mask settings
             "use_ml_pred_mask": bool(self.use_ml_pred_mask.get()),
             "ml_mask_file_path": self.ml_mask_file_path.get(),
             "ml_mask_folder_path": self.ml_mask_folder_path.get(),
@@ -1508,27 +1523,63 @@ class HSVMaskUIMixin:
             "color_pick_keep_points": [list(pt) for pt in self._normalise_color_pick_points().get("keep", [])],
             "color_pick_class_a_name": self.color_pick_class_a_name.get(),
             "color_pick_class_b_name": self.color_pick_class_b_name.get(),
+            # ── bbox_text kept for backward compat ──
+            "bbox_text": self.bbox_entry.get(),
         }
+
         try:
-            with open(file_path, "w") as f:
-                json.dump(data, f, indent=2)
-            messagebox.showinfo(
-                "Save Settings", f"Settings saved to {file_path}")
+            export_dir = self.export_path_entry.get().strip() or None
+            path = save_settings_json(
+                self, "feature_identifier", data, initialdir=export_dir)
+            if path:
+                messagebox.showinfo(
+                    "Save Settings", f"Settings saved to {path}")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to save settings: {e}")
 
-    def load_settings(self):
-        file_path = filedialog.askopenfilename(parent=self,
-            filetypes=[("JSON Files", "*.json"), ("All Files", "*.*")]
+    def _build_selector_payload(self):
+        """Build selector geometry dict (pixel-first, world when available)."""
+        bbox_text = self.bbox_entry.get().strip()
+        bbox_px = None
+        if bbox_text:
+            try:
+                parts = [int(x.strip()) for x in bbox_text.split(",")]
+                if len(parts) == 4:
+                    bbox_px = parts
+            except Exception:
+                pass
+
+        aoi_pts = getattr(self, '_aoi_polygon_pts', None)
+        points_px = aoi_pts if aoi_pts else None
+
+        return make_selector_payload(
+            mode=self.aoi_method.get() if hasattr(self, 'aoi_method') else "Threshold",
+            bbox_px=bbox_px,
+            points_px=points_px,
         )
-        if not file_path:
+
+    def load_settings(self):
+        export_dir = self.export_path_entry.get().strip() or None
+        data, file_path = load_settings_json(
+            self, "feature_identifier", initialdir=export_dir)
+        if not data:
             return
-        try:
-            with open(file_path, "r") as f:
-                data = json.load(f)
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to load settings: {e}")
-            return
+
+        # ── Restore paths (new format) — backward-compatible ──
+        paths = data.get("paths", {})
+        if paths:
+            ep = paths.get("export_path", {})
+            if isinstance(ep, dict) and ep.get("path"):
+                self.export_path_entry.delete(0, "end")
+                self.export_path_entry.insert(0, ep["path"])
+
+        # ── Restore selector geometry if present ──
+        selector = data.get("selector", {})
+        if selector:
+            bbox_px = selector.get("bbox_px")
+            if bbox_px and len(bbox_px) == 4:
+                data.setdefault("bbox_text",
+                                ", ".join(str(int(v)) for v in bbox_px))
 
         self.bbox_entry.delete(0, "end")
         self.bbox_entry.insert(0, data.get("bbox_text", ""))
@@ -1718,3 +1769,4 @@ class HSVMaskUIMixin:
             self.settings_summary_label.configure(text="\n".join(lines))
         except Exception:
             pass
+        

@@ -15,6 +15,8 @@ from pathlib import Path
 import re
 import sys
 import os
+import time
+import threading
 import pandas as pd
 import geopandas as gpd
 from scipy.interpolate import interp1d
@@ -30,7 +32,10 @@ from tkinter import filedialog, messagebox
 import matplotlib.dates as mdates
 import matplotlib
 
-from utils import fit_geometry, resource_path, setup_console, restore_console
+from utils import (
+    fit_geometry, resource_path, setup_console, restore_console,
+    save_settings_json, load_settings_json, compute_eta, format_eta,
+)
 matplotlib.use("Agg")
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("green")
@@ -53,9 +58,9 @@ class CreateDemWindow(ctk.CTkToplevel):
         #self.resizable(True, True)
         fit_geometry(self,1200,700,resizable=True)
         try:
-            self.iconbitmap(resource_path("launch_logo.ico"))
-        except Exception as err:
-            print("Warning: could not load window icon:", err)
+            self.after(200, lambda: self.iconphoto(False, tk.PhotoImage(file=resource_path("launch_logo.png"))))
+        except Exception:
+            pass  # .ico may not exist on all platforms
 
         # ——— close handler ———
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -70,6 +75,8 @@ class CreateDemWindow(ctk.CTkToplevel):
         self._pca_center: np.ndarray | None = None
         self._pca_along: np.ndarray | None = None
         self._pca_cross: np.ndarray | None = None
+        self._cancel_flag = False
+        self._batch_thread = None
 
         # UI state variables
         self.export_xyz_var = tk.BooleanVar(value=False)
@@ -187,7 +194,7 @@ class CreateDemWindow(ctk.CTkToplevel):
             dem,
             text="Generate next DEM",
             command=self.on_generate_next_dem,
-            fg_color="#0F52BA"
+            fg_color="#0F52BA", hover_color="#3A7AE0",
         ).pack(side="left", padx=(15, 5))
     
         # ————————————— output row —————————————
@@ -199,7 +206,7 @@ class CreateDemWindow(ctk.CTkToplevel):
             out,
             text="Browse Output Folder",
             command=self.browse_out_dir,
-            fg_color="#8C7738"
+            fg_color="#8C7738", hover_color="#B19749"
         ).pack(side="left", padx=5)
     
         self.out_dir_display_label = ctk.CTkLabel(out, text="", width=240, anchor="w")
@@ -215,31 +222,50 @@ class CreateDemWindow(ctk.CTkToplevel):
             out,
             text="Batch process",
             command=self.on_batch_process,
-            fg_color="#0F52BA"
+            fg_color="#0F52BA", hover_color="#3A7AE0"
         ).pack(side="left", padx=(25, 5))
+
+        ctk.CTkButton(
+            out,
+            text="Cancel batch",
+            command=self._cancel_batch,
+            fg_color="#8B0000",
+            hover_color="#A52A2A",
+        ).pack(side="left", padx=5)
     
         ctk.CTkButton(
             out,
             text="Reset",
             command=self.reset_to_initial,
             fg_color="red",
+            hover_color="#A52A2A",
             text_color="white"
         ).pack(side="left", padx=10)
 
+        ctk.CTkButton(
+            out, text="Save Settings", fg_color="#4F5D75",hover_color="#6C7C97",
+            command=self._save_settings,
+        ).pack(side="left", padx=5)
+
+        ctk.CTkButton(
+            out, text="Load Settings", fg_color="#4F5D75",hover_color="#6C7C97",
+            command=self._load_settings,
+        ).pack(side="left", padx=5)
+
     # ————————————————————————— file‑dialog callbacks ——————————————————
     def browse_wl_csv(self):
-        path = filedialog.askopenfilename(filetypes=[("CSV files", "*.csv")])
+        path = filedialog.askopenfilename(parent = self,filetypes=[("CSV files", "*.csv")])
         if path:
             self.wl_csv_var.set(path)
 
     def browse_geojson_dir(self):
-        path = filedialog.askdirectory()
+        path = filedialog.askdirectory(parent = self)
         if path:
             self.geojson_dir_var.set(path)
             self._invalidate_caches()
 
     def browse_out_dir(self):
-        path = filedialog.askdirectory()
+        path = filedialog.askdirectory(parent = self)
         if path:
             self.out_dir_var.set(path)
             self.out_dir_display_label.configure(text=path)
@@ -258,7 +284,8 @@ class CreateDemWindow(ctk.CTkToplevel):
         self._pca_cross = None
 
     def reset_to_initial(self):
-        """Full reset: clear caches, restore plots to placeholders."""
+        """Full reset: cancel batch, clear caches, restore plots to placeholders."""
+        self._cancel_flag = True
         self._invalidate_caches()
 
         # restore plot labels to defaults
@@ -272,11 +299,19 @@ class CreateDemWindow(ctk.CTkToplevel):
             image=None,
             text="Daily DEM")
 
-        # clear path displays
+        # clear path displays and entries
+        self.wl_csv_var.set("")
+        self.geojson_dir_var.set("")
+        self.out_dir_var.set("")
         self.out_dir_display_label.configure(text="")
         self.export_xyz_var.set(False)
+        self.resolution_var.set("1")
+        self.spacing_var.set("1")
+        self.sigma_var.set("1.5")
+        self.beach_shape_var.set("Straight")
 
-        print("\n--- Session reset. All caches cleared. ---\n")
+        self.console_text.delete("1.0", tk.END)
+        print("--- Session reset. All caches cleared. ---\n")
 
     # ————————————————————————— data loading & plotting ————————————————
     def load_data_if_needed(self):
@@ -815,23 +850,41 @@ class CreateDemWindow(ctk.CTkToplevel):
             self.load_data_if_needed()
         except Exception:
             return
-        self.top_left_container.pack_forget()
-        self.top_right_frame.pack_forget()
-        self.show_progress_bar()
         out_dir = self.out_dir_var.get().strip()
         if not out_dir:
             messagebox.showerror("Error", "Please specify output folder.")
-            self.hide_progress_bar()
             return
+        self._cancel_flag = False
+        self.top_left_container.pack_forget()
+        self.top_right_frame.pack_forget()
+        self.show_progress_bar()
+        self._batch_thread = threading.Thread(
+            target=self._batch_worker, daemon=True)
+        self._batch_thread.start()
+
+    def _batch_worker(self):
         total = len(self.daily_dates)
+        t0 = time.time()
         print("Batch process has started")
         for i, date_val in enumerate(self.daily_dates, 1):
-            self.progress_bar.set(i / total)
-            self.progress_label.configure(text=f"Batch {i}/{total}")
-            self.update_idletasks()
+            if self._cancel_flag:
+                print("Batch cancelled by user.")
+                self.after(0, self.hide_progress_bar)
+                return
+            self.after(0, self.progress_bar.set, i / total)
+            eta = compute_eta(t0, i, total)
+            eta_str = format_eta(eta)
+            self.after(0, self.progress_label.configure,
+                       {"text": f"Batch {i}/{total} — ETA {eta_str}"})
             self.create_dem_for_day(date_val)
-        self.hide_progress_bar()
-        messagebox.showinfo("Done", f"Batch DEM creation finished ({total} days).")
+        self.after(0, self.hide_progress_bar)
+        elapsed = format_eta(time.time() - t0)
+        self.after(0, lambda: messagebox.showinfo(
+            "Done", f"Batch DEM creation finished ({total} days, {elapsed})."))
+
+    def _cancel_batch(self):
+        self._cancel_flag = True
+        print("Cancelling batch…")
 
     # progress helpers
     def show_progress_bar(self):
@@ -850,7 +903,77 @@ class CreateDemWindow(ctk.CTkToplevel):
         self.top_left_container.pack(side="left", fill="both", expand=True, padx=5, pady=5)
         self.top_right_frame.pack(side="left", fill="both", expand=True, padx=5, pady=5)
 
+    # ————————————————————— save / load settings ——————————————————————————
+    def _settings_payload(self):
+        return {
+            "paths": {
+                "wl_csv": self.wl_csv_var.get(),
+                "geojson_dir": self.geojson_dir_var.get(),
+                "output_dir": self.out_dir_var.get(),
+            },
+            "parameters": {
+                "resolution": self.resolution_var.get(),
+                "vertex_spacing": self.spacing_var.get(),
+                "smoothing_sigma": self.sigma_var.get(),
+                "beach_shape": self.beach_shape_var.get(),
+                "filename_pattern": self.regex_var.get(),
+                "export_xyz": bool(self.export_xyz_var.get()),
+            },
+        }
+
+    def _save_settings(self):
+        try:
+            initialdir = self.out_dir_var.get().strip() or None
+            path = save_settings_json(
+                self, "dem_generator", self._settings_payload(),
+                initialdir=initialdir)
+            if path:
+                print(f"Settings saved: {path}")
+        except Exception as e:
+            messagebox.showerror("Save Settings",
+                                 f"Could not save settings:\n{e}", parent=self)
+
+    def _load_settings(self):
+        try:
+            initialdir = self.out_dir_var.get().strip() or None
+            data, path = load_settings_json(
+                self, "dem_generator", initialdir=initialdir)
+            if not data:
+                return
+
+            paths = data.get("paths", {})
+            params = data.get("parameters", {})
+
+            if paths.get("wl_csv"):
+                self.wl_csv_var.set(paths["wl_csv"])
+            if paths.get("geojson_dir"):
+                self.geojson_dir_var.set(paths["geojson_dir"])
+            if paths.get("output_dir"):
+                self.out_dir_var.set(paths["output_dir"])
+                self.out_dir_display_label.configure(text=paths["output_dir"])
+
+            if params.get("resolution"):
+                self.resolution_var.set(params["resolution"])
+            if params.get("vertex_spacing"):
+                self.spacing_var.set(params["vertex_spacing"])
+            if params.get("smoothing_sigma"):
+                self.sigma_var.set(params["smoothing_sigma"])
+            if params.get("beach_shape"):
+                self.beach_shape_var.set(params["beach_shape"])
+            if params.get("filename_pattern"):
+                self.regex_var.set(params["filename_pattern"])
+            self.export_xyz_var.set(bool(params.get("export_xyz", False)))
+
+            # invalidate caches so data reloads with new paths
+            self._invalidate_caches()
+
+            print(f"Settings loaded: {path}")
+        except Exception as e:
+            messagebox.showerror("Load Settings",
+                                 f"Could not load settings:\n{e}", parent=self)
+
     def _on_close(self):
+        self._cancel_flag = True
         restore_console(getattr(self, "_console_redir", None))
         self.destroy()
 

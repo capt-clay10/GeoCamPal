@@ -10,7 +10,10 @@ import sys
 import time
 import threading
 
-from utils import fit_geometry, resource_path, setup_console, restore_console
+from utils import (
+    fit_geometry, resource_path, setup_console, restore_console,
+    save_settings_json, load_settings_json, compute_eta, format_eta,
+)
 
 # ── shared CSV utility ──
 try:
@@ -35,9 +38,9 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
         fit_geometry(self, 850, 800, resizable=True)
 
         try:
-            self.iconbitmap(resource_path("launch_logo.ico"))
-        except Exception as e:
-            print("Warning: Could not load window icon:", e)
+            self.after(200, lambda: self.iconphoto(False, tk.PhotoImage(file=resource_path("launch_logo.png"))))
+        except Exception:
+            pass
 
         # ——— close handler ———
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -52,6 +55,9 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
         self.best_H_annealing = None
         self.best_cost = None
         self.detected_epsg = None
+        self._cancel_requested = False
+        self._sa_running = False
+        self._sa_thread = None
 
         # -------------------------------  Panel 1  -------------------------------
         self.panel1 = ctk.CTkFrame(self)
@@ -86,7 +92,7 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
         self.entry_output_name = ctk.CTkEntry(self.panel2)
         self.entry_output_name.pack(side="left", padx=5, pady=5, fill="x", expand=True)
 
-        self.btn_browse_output = ctk.CTkButton(self.panel2, text="Browse Output Folder", command=self.browse_output, fg_color="#8C7738")
+        self.btn_browse_output = ctk.CTkButton(self.panel2, text="Browse Output Folder", command=self.browse_output, fg_color="#8C7738", hover_color="#A18A45")
         self.btn_browse_output.pack(side="left", padx=5, pady=5)
 
         self.output_folder_label = ctk.CTkLabel(self.panel2, text="No folder selected", fg_color="transparent")
@@ -114,11 +120,26 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
         self.panel3 = ctk.CTkFrame(self)
         self.panel3.pack(padx=10, pady=10, fill="x")
 
-        self.btn_compute = ctk.CTkButton(self.panel3, text="Compute Matrix", command=self.compute_matrix, fg_color="#0F52BA")
+        self.btn_compute = ctk.CTkButton(self.panel3, text="Compute Matrix", command=self.compute_matrix, fg_color="#0F52BA",  hover_color="#2A6BD1")
         self.btn_compute.grid(row=0, column=0, padx=5, pady=5)
 
-        self.btn_compute_accuracy = ctk.CTkButton(self.panel3, text="Compute Accuracy", command=self.compute_accuracy, fg_color="#6693F5")
+        self.btn_compute_accuracy = ctk.CTkButton(self.panel3, text="Compute Accuracy", command=self.compute_accuracy, fg_color="#6693F5", hover_color="#7DA5F7")
         self.btn_compute_accuracy.grid(row=0, column=1, padx=5, pady=5)
+
+        self.btn_save_settings = ctk.CTkButton(
+            self.panel3, text="Save Settings",fg_color="#4F5D75",hover_color="#61708A", command=self.save_settings
+        )
+        self.btn_save_settings.grid(row=0, column=2, padx=5, pady=5)
+
+        self.btn_load_settings = ctk.CTkButton(
+            self.panel3, text="Load Settings",fg_color="#4F5D75",hover_color="#61708A", command=self.load_settings
+        )
+        self.btn_load_settings.grid(row=0, column=3, padx=5, pady=5)
+
+        self.btn_reset = ctk.CTkButton(
+            self.panel3, text="Reset", command=self.reset_to_initial, fg_color="#8B0000", hover_color="#A52A2A", text_color="white"
+        )
+        self.btn_reset.grid(row=0, column=4, padx=5, pady=5)
 
         # -------------------------------  Panel 4 (Advanced)  -------------------------------
         self.panel_adv = ctk.CTkFrame(self)
@@ -166,6 +187,13 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
         )
         self.btn_accept_export.grid(row=0, column=1, padx=5, pady=5)
 
+        self.sa_progress = ctk.CTkProgressBar(self.advanced_frame)
+        self.sa_progress.grid(row=len(adv_options) + 1, column=0, columnspan=2, sticky="ew", padx=5, pady=(0, 5))
+        self.sa_progress.set(0)
+
+        self.sa_status_label = ctk.CTkLabel(self.advanced_frame, text="")
+        self.sa_status_label.grid(row=len(adv_options) + 2, column=0, columnspan=2, sticky="w", padx=5, pady=(0, 5))
+
         # -------------------------------  Panel 5 (Console)  -------------------------------
         self.panel5 = ctk.CTkFrame(self)
         self.panel5.pack(padx=10, pady=10, fill="both", expand=True)
@@ -179,6 +207,7 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
     # ——————————————————————————— close handler —————————————————————————
     def _on_close(self):
         """Clean up and close the window."""
+        self._request_cancel()
         restore_console(self._console_redir)
         self.destroy()
 
@@ -207,6 +236,102 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
             self.output_folder = folder
             self.output_folder_label.configure(text=folder)
             self.log(f"Selected output folder: {folder}")
+
+
+    def _request_cancel(self):
+        self._cancel_requested = True
+
+    def _set_sa_progress(self, done: int, total: int, eta_seconds=None, message: str = ""):
+        def _update():
+            frac = 0.0 if total <= 0 else max(0.0, min(1.0, done / float(total)))
+            self.sa_progress.set(frac)
+            if message:
+                self.sa_status_label.configure(text=message)
+            elif total > 0:
+                eta_txt = format_eta(eta_seconds)
+                self.sa_status_label.configure(text=f"SA {done}/{total} — ETA {eta_txt}")
+            else:
+                self.sa_status_label.configure(text="")
+        self.after(0, _update)
+
+    def save_settings(self):
+        data = {
+            "input_file": self.input_file or "",
+            "output_folder": self.output_folder or "",
+            "output_name": self.entry_output_name.get().strip(),
+            "exclude_enabled": bool(self.exclude_var.get()),
+            "exclude_text": self.entry_exclude.get().strip(),
+            "advanced_enabled": bool(self.advanced_var.get()),
+            "advanced_values": {label: ent.get().strip() for label, ent in self.adv_inputs.items()},
+        }
+        saved = save_settings_json(self, "homography", data, initialdir=self.output_folder)
+        if saved:
+            self.log(f"Settings saved: {saved}")
+
+    def load_settings(self):
+        data, loaded_path = load_settings_json(self, "homography", initialdir=self.output_folder)
+        if not data:
+            return
+
+        self.input_file = data.get("input_file") or None
+        self.output_folder = data.get("output_folder") or None
+        self.input_file_label.configure(text=os.path.basename(self.input_file) if self.input_file else "No file selected")
+        self.output_folder_label.configure(text=self.output_folder if self.output_folder else "No folder selected")
+
+        self.entry_output_name.delete(0, tk.END)
+        self.entry_output_name.insert(0, data.get("output_name", ""))
+
+        self.exclude_var.set(bool(data.get("exclude_enabled", False)))
+        self.entry_exclude.delete(0, tk.END)
+        self.entry_exclude.insert(0, data.get("exclude_text", ""))
+
+        adv_enabled = bool(data.get("advanced_enabled", False))
+        self.advanced_var.set(adv_enabled)
+        self.toggle_advanced()
+        adv_values = data.get("advanced_values", {}) or {}
+        for label, ent in self.adv_inputs.items():
+            if label in adv_values:
+                ent.delete(0, tk.END)
+                ent.insert(0, str(adv_values[label]))
+
+        if loaded_path:
+            self.log(f"Settings loaded: {loaded_path}")
+
+    def reset_to_initial(self):
+        self._request_cancel()
+        self.input_file = None
+        self.output_folder = None
+        self.H_final = None
+        self.pixel_points = None
+        self.utm_points = None
+        self.gcp_ids = None
+        self.best_H_annealing = None
+        self.best_cost = None
+        self.detected_epsg = None
+
+        self.input_file_label.configure(text="No file selected")
+        self.output_folder_label.configure(text="No folder selected")
+        self.entry_output_name.delete(0, tk.END)
+        self.exclude_var.set(False)
+        self.entry_exclude.delete(0, tk.END)
+        self.advanced_var.set(False)
+        self.toggle_advanced()
+
+        defaults = {
+            "Number of GCPs": "90",
+            "Max iterations": "300000",
+            "Initial temperature": "100000.0",
+            "Cooling rate": "0.99995",
+            "Number of swaps": "1",
+            "RANSAC threshold": "0.7",
+        }
+        for label, ent in self.adv_inputs.items():
+            ent.delete(0, tk.END)
+            ent.insert(0, defaults.get(label, ""))
+
+        self.sa_progress.set(0)
+        self.sa_status_label.configure(text="")
+        self.log("\n--- Session reset. Active SA search will stop at the next safe check. ---\n")
 
     def toggle_advanced(self):
         if self.advanced_var.get():
@@ -280,6 +405,9 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
 
         # -------------- extract EPSG if available ----------------
         self.detected_epsg = None
+        self._cancel_requested = False
+        self._sa_running = False
+        self._sa_thread = None
         if "EPSG" in gcp_data.columns:
             epsg_vals = gcp_data["EPSG"].dropna().unique()
             epsg_vals = [int(v) for v in epsg_vals if int(v) > 0]
@@ -393,84 +521,111 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
     # %%                        Simulated-annealing main loop
 
     def run_simulated_annealing(self):
-        threading.Thread(target=self.run_simulated_annealing_thread, daemon=True).start()
+        if self._sa_running:
+            self.log("Simulated annealing is already running.")
+            return
+        self._cancel_requested = False
+        self._sa_running = True
+        self.sa_progress.set(0)
+        self.sa_status_label.configure(text="Starting simulated annealing…")
+        self._sa_thread = threading.Thread(target=self.run_simulated_annealing_thread, daemon=True)
+        self._sa_thread.start()
 
     def run_simulated_annealing_thread(self):
-        if self.pixel_points is None or self.utm_points is None:
-            self.thread_log("Error: compute the homography matrix first.")
-            return
-
         try:
-            n_subset = int(self.adv_inputs["Number of GCPs"].get())
-            max_iter = int(self.adv_inputs["Max iterations"].get())
-            temp = float(self.adv_inputs["Initial temperature"].get())
-            cooling = float(self.adv_inputs["Cooling rate"].get())
-            swaps = int(self.adv_inputs["Number of swaps"].get())
-            r_thresh = float(self.adv_inputs["RANSAC threshold"].get())
-        except Exception as e:
-            self.thread_log(f"Invalid advanced configuration: {e}")
-            return
+            if self.pixel_points is None or self.utm_points is None:
+                self.thread_log("Error: compute the homography matrix first.")
+                self._set_sa_progress(0, 1, message="")
+                return
 
-        n_total = len(self.pixel_points)
-        if n_subset > n_total:
-            self.thread_log("Error: subset size exceeds total GCPs.")
-            return
-        idx_all = np.arange(n_total)
+            try:
+                n_subset = int(self.adv_inputs["Number of GCPs"].get())
+                max_iter = int(self.adv_inputs["Max iterations"].get())
+                temp = float(self.adv_inputs["Initial temperature"].get())
+                cooling = float(self.adv_inputs["Cooling rate"].get())
+                swaps = int(self.adv_inputs["Number of swaps"].get())
+                r_thresh = float(self.adv_inputs["RANSAC threshold"].get())
+            except Exception as e:
+                self.thread_log(f"Invalid advanced configuration: {e}")
+                self._set_sa_progress(0, 1, message="")
+                return
 
-        def cost(m, med, sd, mx, inl, big):
-            pen = (mx > 10) * 15000 + (1 - inl) * 8000
-            return m + 2 * sd + pen
+            n_total = len(self.pixel_points)
+            if n_subset > n_total:
+                self.thread_log("Error: subset size exceeds total GCPs.")
+                self._set_sa_progress(0, 1, message="")
+                return
+            idx_all = np.arange(n_total)
 
-        subset = np.random.choice(idx_all, n_subset, replace=False)
-        _, _, _, _, _, _, H = self.compute_homography_and_errors(
-            self.pixel_points, self.utm_points, subset, r_thresh
-        )
-        if H is None:
-            self.thread_log("Error: could not compute an initial homography for SA.")
-            return
+            def cost(m, med, sd, mx, inl, big):
+                pen = (mx > 10) * 15000 + (1 - inl) * 8000
+                return m + 2 * sd + pen
 
-        current_subset, current_H = subset.copy(), H
-        current_cost = cost(*self.compute_full_errors(current_H, self.pixel_points, self.utm_points))
-        best_subset, best_H = current_subset.copy(), current_H
-        best_cost = current_cost
-
-        self.thread_log("Starting simulated annealing …")
-        t0 = time.time()
-        for it in range(max_iter):
-            new_subset = current_subset.copy()
-            for _ in range(swaps):
-                out = random.choice(new_subset)
-                inp = random.choice(np.setdiff1d(idx_all, new_subset))
-                new_subset[np.where(new_subset == out)[0][0]] = inp
-            _, _, _, _, _, _, H2 = self.compute_homography_and_errors(
-                self.pixel_points, self.utm_points, new_subset, r_thresh
+            subset = np.random.choice(idx_all, n_subset, replace=False)
+            _, _, _, _, _, _, H = self.compute_homography_and_errors(
+                self.pixel_points, self.utm_points, subset, r_thresh
             )
-            if H2 is None:
-                temp *= cooling
-                continue
-            new_cost = cost(*self.compute_full_errors(H2, self.pixel_points, self.utm_points))
-            dc = new_cost - current_cost
-            if dc < 0 or random.random() < np.exp(-dc / temp):
-                current_subset, current_cost, current_H = new_subset.copy(), new_cost, H2
-                if new_cost < best_cost:
-                    best_subset, best_cost, best_H = new_subset.copy(), new_cost, H2
-            temp *= cooling
-            if (it + 1) % 50000 == 0:
-                self.thread_log(
-                    f"Iter {it+1}/{max_iter} | Temp={temp:.4f} | BestCost={best_cost:.2f}"
-                )
+            if H is None:
+                self.thread_log("Error: could not compute an initial homography for SA.")
+                self._set_sa_progress(0, 1, message="")
+                return
 
-        self.best_H_annealing = best_H
-        self.best_cost = best_cost
-        elapsed = time.time() - t0
-        m, med, sd, mx, inl, big = self.compute_full_errors(
-            best_H, self.pixel_points, self.utm_points
-        )
-        self.thread_log(
-            f"SA finished in {elapsed:.2f}s | cost={best_cost:.2f}\n"
-            f"Mean={m:.2f} m, Median={med:.2f} m, σ={sd:.2f} m, Max={mx:.2f} m, "
-            f"Inlier={inl*100:.1f} %, >5m={big}"
-        )
+            current_subset, current_H = subset.copy(), H
+            current_cost = cost(*self.compute_full_errors(current_H, self.pixel_points, self.utm_points))
+            best_subset, best_H = current_subset.copy(), current_H
+            best_cost = current_cost
+
+            self.thread_log("Starting simulated annealing …")
+            t0 = time.time()
+            update_every = max(100, min(5000, max_iter // 200 if max_iter > 0 else 100))
+            for it in range(max_iter):
+                if self._cancel_requested:
+                    self.thread_log("Simulated annealing cancelled.")
+                    self._set_sa_progress(it, max_iter, message="Cancelled")
+                    return
+
+                new_subset = current_subset.copy()
+                for _ in range(swaps):
+                    out = random.choice(new_subset)
+                    inp = random.choice(np.setdiff1d(idx_all, new_subset))
+                    new_subset[np.where(new_subset == out)[0][0]] = inp
+                _, _, _, _, _, _, H2 = self.compute_homography_and_errors(
+                    self.pixel_points, self.utm_points, new_subset, r_thresh
+                )
+                if H2 is None:
+                    temp *= cooling
+                    if (it + 1) % update_every == 0 or it == 0 or (it + 1) == max_iter:
+                        eta = compute_eta(t0, it + 1, max_iter)
+                        self._set_sa_progress(it + 1, max_iter, eta_seconds=eta)
+                    continue
+                new_cost = cost(*self.compute_full_errors(H2, self.pixel_points, self.utm_points))
+                dc = new_cost - current_cost
+                if dc < 0 or random.random() < np.exp(-dc / max(temp, 1e-12)):
+                    current_subset, current_cost, current_H = new_subset.copy(), new_cost, H2
+                    if new_cost < best_cost:
+                        best_subset, best_cost, best_H = new_subset.copy(), new_cost, H2
+                temp *= cooling
+                if (it + 1) % update_every == 0 or (it + 1) == max_iter:
+                    eta = compute_eta(t0, it + 1, max_iter)
+                    self._set_sa_progress(it + 1, max_iter, eta_seconds=eta)
+                    self.thread_log(
+                        f"Iter {it+1}/{max_iter} | Temp={temp:.4f} | BestCost={best_cost:.2f} | ETA={format_eta(eta)}"
+                    )
+
+            self.best_H_annealing = best_H
+            self.best_cost = best_cost
+            elapsed = time.time() - t0
+            m, med, sd, mx, inl, big = self.compute_full_errors(
+                best_H, self.pixel_points, self.utm_points
+            )
+            self._set_sa_progress(max_iter, max_iter, eta_seconds=0, message="Completed")
+            self.thread_log(
+                f"SA finished in {elapsed:.2f}s | cost={best_cost:.2f}\n"
+                f"Mean={m:.2f} m, Median={med:.2f} m, σ={sd:.2f} m, Max={mx:.2f} m, "
+                f"Inlier={inl*100:.1f} %, >5m={big}"
+            )
+        finally:
+            self._sa_running = False
 
     #%%                           Export SA result
 

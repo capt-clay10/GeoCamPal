@@ -34,7 +34,10 @@ import customtkinter as ctk
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
-from utils import fit_geometry, resource_path, setup_console, restore_console
+from utils import (
+    fit_geometry, resource_path, setup_console, restore_console,
+    save_settings_json, load_settings_json,
+)
 
 try:
     import rasterio
@@ -593,7 +596,7 @@ class FOVGeneratorWindow(ctk.CTkToplevel):
         self.title("Field of View Generator")
         fit_geometry(self, 1400, 1050, resizable=True)
         try:
-            self.iconbitmap(resource_path("launch_logo.ico"))
+            self.after(200, lambda: self.iconphoto(False, tk.PhotoImage(file=resource_path("launch_logo.png"))))
         except Exception:
             pass
 
@@ -604,6 +607,8 @@ class FOVGeneratorWindow(ctk.CTkToplevel):
         self.dem_path = None
         self.output_folder = None
         self.ax_vs = None
+        self._is_generating = False
+        self._generation_token = 0
 
         # ——— layout: top display, console, bottom controls ———
         self.grid_rowconfigure(0, weight=4)
@@ -737,17 +742,24 @@ class FOVGeneratorWindow(ctk.CTkToplevel):
         row6.pack(fill="x", padx=5, pady=2)
 
         ctk.CTkButton(row6, text="Browse Output Folder",
-                      command=self._browse_output, fg_color="#8C7738").grid(row=0, column=0, padx=5, pady=5)
+                      command=self._browse_output, fg_color="#8C7738", hover_color="#B19749").grid(row=0, column=0, padx=5, pady=5)
         self.output_label = ctk.CTkLabel(row6, text="No output folder selected")
         self.output_label.grid(row=0, column=1, padx=5, pady=5, sticky="w")
 
+        ctk.CTkButton(
+            row6, text="Save Settings", command=self._save_settings, fg_color="#4F5D75", hover_color="#6C7C97"
+        ).grid(row=0, column=2, padx=5, pady=5)
+        ctk.CTkButton(
+            row6, text="Load Settings", command=self._load_settings, fg_color="#4F5D75", hover_color="#6C7C97"
+        ).grid(row=0, column=3, padx=5, pady=5)
+
         ctk.CTkButton(row6, text="Generate FOV Map",
-                      command=self._generate_threaded, fg_color="#0F52BA").grid(row=0, column=2, padx=10, pady=5)
+                      command=self._generate_threaded, fg_color="#0F52BA", hover_color="#3A7AE0").grid(row=0, column=4, padx=10, pady=5)
 
         self.btn_reset = ctk.CTkButton(
             row6, text="Reset", command=self._reset,
             width=80, fg_color="#8B0000", hover_color="#A52A2A")
-        self.btn_reset.grid(row=0, column=3, padx=5, pady=5, sticky="e")
+        self.btn_reset.grid(row=0, column=5, padx=5, pady=5, sticky="e")
 
         # ---- CONSOLE ----
         self.console_frame = ctk.CTkFrame(self)
@@ -768,7 +780,85 @@ class FOVGeneratorWindow(ctk.CTkToplevel):
             "--------------------------------"
         )
 
+    def _set_entry_value(self, entry, value, default=""):
+        entry.delete(0, tk.END)
+        entry.insert(0, default if value is None else str(value))
+
+    def _build_settings_payload(self):
+        return {
+            "module": "fov_generator",
+            "settings_version": 1,
+            "paths": {
+                "basemap_path": self.basemap_path or "",
+                "dem_path": self.dem_path or "",
+                "output_folder": self.output_folder or "",
+            },
+            "ui_state": {
+                "location": {k: e.get().strip() for k, e in self.loc_entries.items()},
+                "range": {k: e.get().strip() for k, e in self.range_entries.items()},
+                "sensor": {k: e.get().strip() for k, e in self.sensor_entries.items()},
+                "num_cameras": self.num_cams_entry.get().strip(),
+                "overlap_pct": self.overlap_entry.get().strip(),
+                "viewshed_px": self.vs_res_entry.get().strip(),
+            },
+        }
+
+    def _apply_loaded_settings(self, data):
+        paths = data.get("paths", {}) if isinstance(data, dict) else {}
+        ui = data.get("ui_state", {}) if isinstance(data, dict) else {}
+
+        self.basemap_path = paths.get("basemap_path") or None
+        self.dem_path = paths.get("dem_path") or None
+        self.output_folder = paths.get("output_folder") or None
+
+        self.basemap_label.configure(
+            text=os.path.basename(self.basemap_path) if self.basemap_path else "No basemap (distance grid)"
+        )
+        self.dem_label.configure(
+            text=os.path.basename(self.dem_path) if self.dem_path else "No DEM (flat ground)"
+        )
+        self.output_label.configure(
+            text=self.output_folder if self.output_folder else "No output folder selected"
+        )
+
+        for key, entry in self.loc_entries.items():
+            self._set_entry_value(entry, ui.get("location", {}).get(key), entry.get())
+        for key, entry in self.range_entries.items():
+            self._set_entry_value(entry, ui.get("range", {}).get(key), entry.get())
+        for key, entry in self.sensor_entries.items():
+            self._set_entry_value(entry, ui.get("sensor", {}).get(key), entry.get())
+
+        self._set_entry_value(self.num_cams_entry, ui.get("num_cameras"), self.num_cams_entry.get())
+        self._set_entry_value(self.overlap_entry, ui.get("overlap_pct"), self.overlap_entry.get())
+        self._set_entry_value(self.vs_res_entry, ui.get("viewshed_px"), self.vs_res_entry.get())
+
+    def _save_settings(self):
+        try:
+            payload = self._build_settings_payload()
+            initialdir = self.output_folder or os.path.dirname(self.basemap_path or self.dem_path or "") or None
+            path = save_settings_json(self, "fov_generator", payload, initialdir=initialdir)
+            if path:
+                print(f"Settings saved to: {path}")
+        except Exception as err:
+            messagebox.showerror("Save Settings", f"Could not save settings:\n{err}", parent=self)
+
+    def _load_settings(self):
+        try:
+            initialdir = self.output_folder or os.path.dirname(self.basemap_path or self.dem_path or "") or None
+            data, path = load_settings_json(self, "fov_generator", initialdir=initialdir)
+            if data is None:
+                return
+            self._apply_loaded_settings(data)
+            print(f"Settings loaded from: {path}")
+        except Exception as err:
+            messagebox.showerror("Load Settings", f"Could not load settings:\n{err}", parent=self)
+
+    def _set_busy(self, busy: bool):
+        self._is_generating = busy
+
     def _on_close(self):
+        self._generation_token += 1
+        self._set_busy(False)
         restore_console(getattr(self, "_console_redir", None))
         self.destroy()
 
@@ -815,7 +905,7 @@ class FOVGeneratorWindow(ctk.CTkToplevel):
     # ——— browse callbacks ———
 
     def _browse_basemap(self):
-        p = filedialog.askopenfilename(parent=self,
+        p = filedialog.askopenfilename(
             title="Select Basemap GeoTIFF",
             filetypes=[("GeoTIFF", "*.tif *.tiff")])
         if p:
@@ -823,7 +913,7 @@ class FOVGeneratorWindow(ctk.CTkToplevel):
             self.basemap_label.configure(text=os.path.basename(p))
 
     def _browse_dem(self):
-        p = filedialog.askopenfilename(parent=self,
+        p = filedialog.askopenfilename(
             title="Select DEM GeoTIFF",
             filetypes=[("GeoTIFF", "*.tif *.tiff")])
         if p:
@@ -831,7 +921,7 @@ class FOVGeneratorWindow(ctk.CTkToplevel):
             self.dem_label.configure(text=os.path.basename(p))
 
     def _browse_output(self):
-        d = filedialog.askdirectory(parent=self,title="Select Output Folder")
+        d = filedialog.askdirectory(title="Select Output Folder")
         if d:
             self.output_folder = d
             self.output_label.configure(text=d)
@@ -839,6 +929,8 @@ class FOVGeneratorWindow(ctk.CTkToplevel):
     # ——— reset ———
 
     def _reset(self):
+        self._generation_token += 1
+        self._set_busy(False)
         self.basemap_path = None
         self.dem_path = None
         self.output_folder = None
@@ -909,11 +1001,20 @@ class FOVGeneratorWindow(ctk.CTkToplevel):
                 return 600
 
     def _generate_threaded(self):
+        if self._is_generating:
+            print("Generation already running.")
+            return
         cfg = self._collect_generate_config()
-        threading.Thread(target=self._generate, args=(cfg,), daemon=True).start()
+        self._generation_token += 1
+        token = self._generation_token
+        self._set_busy(True)
+        threading.Thread(target=self._generate, args=(cfg, token), daemon=True).start()
 
-    def _generate(self, cfg):
+    def _generate(self, cfg, token):
         try:
+            def _is_stale():
+                return token != self._generation_token
+
             # ---- read parameters (snapshot collected on main thread) ----
             lat = self._get_float_value(cfg["lat"], "Latitude")
             lon = self._get_float_value(cfg["lon"], "Longitude")
@@ -933,6 +1034,8 @@ class FOVGeneratorWindow(ctk.CTkToplevel):
             output_folder = cfg.get("output_folder")
 
             coc_mm = 0.00024  # standard CoC for small sensors
+            if _is_stale():
+                return
             best_band_hw = 2.0
 
             print(f"\nGenerating FOV for {n_cams} camera(s) at "
@@ -1063,6 +1166,9 @@ class FOVGeneratorWindow(ctk.CTkToplevel):
                     info_lines.append(line)
                     print(line)
 
+            if _is_stale():
+                return
+
             gdf = gpd.GeoDataFrame(records, crs=utm)
 
             # ---- collect wedge geometries for FOV-restricted viewshed ----
@@ -1118,6 +1224,9 @@ class FOVGeneratorWindow(ctk.CTkToplevel):
                 if e_lo is not None:
                     _dem_elev_range = [e_lo, e_hi]
 
+            if _is_stale():
+                return
+
             result = {
                 "gdf": gdf,
                 "utm": utm,
@@ -1142,6 +1251,8 @@ class FOVGeneratorWindow(ctk.CTkToplevel):
                 "dem_path": dem_path,
                 "output_folder": output_folder,
             }
+            if _is_stale():
+                return
             self._ui_call(self._apply_generate_results, result)
 
         except Exception as e:

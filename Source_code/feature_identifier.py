@@ -25,7 +25,10 @@ from PIL import Image
 import cv2
 import numpy as np
 
-from utils import fit_geometry, setup_console, resource_path as _resource_path
+from utils import (
+    fit_geometry, setup_console, resource_path as _resource_path,
+    bring_child_to_front,
+)
 
 # Import profile extraction from the profile tool (used for AOI filtering)
 try:
@@ -97,7 +100,7 @@ class FeatureIdentifier(HSVMaskEditingMixin, HSVMaskProcessingMixin, HSVMaskUIMi
         self.mode = mode
         ctk.set_widget_scaling(1)
         try:
-            self.iconbitmap(self.resource_path("launch_logo.ico"))
+            self.after(200, lambda: self.iconphoto(False, tk.PhotoImage(file=_resource_path("launch_logo.png"))))
         except Exception:
             pass
 
@@ -138,6 +141,15 @@ class FeatureIdentifier(HSVMaskEditingMixin, HSVMaskProcessingMixin, HSVMaskUIMi
         self.color_pick_class_a_name = tk.StringVar(master=self, value="water")
         self.color_pick_class_b_name = tk.StringVar(master=self, value="sand")
 
+        # ── Compatibility state for mixin settings/georef fields ──
+        # Tracks current input image/folder path for settings restore
+        self._current_input_path = None   # single image path
+        self._current_input_folder = None # folder path (batch/ml)
+        self._current_export_path = None  # export/output folder
+        # Georef state (populated by processing mixin when available)
+        self._georef_crs = None
+        self._georef_transform = None
+
 
         if self.mode in ("individual", "ml"):
             self.title("Feature Identifier- Configuration")
@@ -161,14 +173,12 @@ class FeatureIdentifier(HSVMaskEditingMixin, HSVMaskProcessingMixin, HSVMaskUIMi
             # Keybindings for configuration window.
             self.bind("<Left>", lambda e: self.prev_image())
             self.bind("<Right>", lambda e: self.next_image())
-            self.bind("<plus>", lambda e: self.calculate_mask())
-            self.bind("<KP_Add>", lambda e: self.calculate_mask())
-            self.bind("<minus>", lambda e: self.checkbox_invert_mask_toggle())
-            self.bind("<KP_Subtract>",
-                      lambda e: self.checkbox_invert_mask_toggle())
-            self.bind("<F5>", lambda e: self.f5_action())
-            self.bind("<F6>", lambda e: self.f6_action())
-            self.bind("<space>", lambda e: self.space_action())
+            self.bind("<e>", lambda e: self.extract_boundary_universal())
+            self.bind("<E>", lambda e: self.extract_boundary_universal())
+            self.bind("<p>", lambda e: self.extract_polygon_universal())
+            self.bind("<P>", lambda e: self.extract_polygon_universal())
+            self.bind("<r>", lambda e: self.cut_detected_feature())
+            self.bind("<R>", lambda e: self.cut_detected_feature())
             self.bind("<Return>", lambda e: self.export_training_data())
 
             # --------------------------
@@ -189,13 +199,16 @@ class FeatureIdentifier(HSVMaskEditingMixin, HSVMaskProcessingMixin, HSVMaskUIMi
             self.image_display_window = ctk.CTkToplevel(self)
             self.image_display_window.title(
                 "Feature identifier - Image display")
-            self.image_display_window.geometry("1200x800")
+            fit_geometry(self.image_display_window, 1200, 800, resizable=True)
 
             try:
                 self.image_display_window.iconbitmap(
                     self.resource_path("launch_logo.ico"))
             except:
                 pass
+
+            # Ensure image display window opens on top
+            bring_child_to_front(self.image_display_window, self)
 
             self.top_frame = ctk.CTkFrame(self.image_display_window, fg_color="black")
             self.top_frame.pack(fill="both", expand=True)
@@ -208,9 +221,7 @@ class FeatureIdentifier(HSVMaskEditingMixin, HSVMaskProcessingMixin, HSVMaskUIMi
             self.top_frame.grid_rowconfigure(0, weight=1)
 
             self.top_left_frame = ctk.CTkFrame(self.top_frame, fg_color="black")
-            self.top_left_frame.pack_propagate(False)
             self.top_left_frame.grid_propagate(False)
-            self.top_left_frame.configure(width=400, height=400)
 
             self.top_center_frame = ctk.CTkFrame(
                 self.top_frame, fg_color="black")
@@ -229,9 +240,60 @@ class FeatureIdentifier(HSVMaskEditingMixin, HSVMaskProcessingMixin, HSVMaskUIMi
                 self.top_center_frame, text="", fg_color="black", anchor="center")
             self.mask_label.pack(fill="both", expand=True)
 
+            # Zoom controls for the overlay (right) panel — pack bottom first
+            self._overlay_zoom = 1.0
+            zoom_bar = ctk.CTkFrame(self.top_right_frame, fg_color="transparent")
+            zoom_bar.pack(side="bottom", fill="x", pady=2)
+            ctk.CTkButton(zoom_bar, text="−", width=30,
+                          command=self._overlay_zoom_out
+                          ).pack(side="left", padx=3)
+            self._overlay_zoom_label = ctk.CTkLabel(
+                zoom_bar, text="100%", width=50)
+            self._overlay_zoom_label.pack(side="left", padx=3)
+            ctk.CTkButton(zoom_bar, text="+", width=30,
+                          command=self._overlay_zoom_in
+                          ).pack(side="left", padx=3)
+            ctk.CTkButton(zoom_bar, text="Fit", width=40,
+                          command=self._overlay_zoom_reset
+                          ).pack(side="left", padx=3)
+
+            # Scrollable canvas container for the overlay image
+            self._overlay_canvas_frame = tk.Frame(self.top_right_frame, bg="black")
+            self._overlay_canvas_frame.pack(fill="both", expand=True)
+
+            self._overlay_canvas = tk.Canvas(
+                self._overlay_canvas_frame, bg="black",
+                highlightthickness=0)
+            self._ov_vscroll = tk.Scrollbar(
+                self._overlay_canvas_frame, orient="vertical",
+                command=self._overlay_canvas.yview)
+            self._ov_hscroll = tk.Scrollbar(
+                self._overlay_canvas_frame, orient="horizontal",
+                command=self._overlay_canvas.xview)
+            self._overlay_canvas.configure(
+                yscrollcommand=self._ov_vscroll.set,
+                xscrollcommand=self._ov_hscroll.set)
+
+            self._ov_hscroll.pack(side="bottom", fill="x")
+            self._ov_vscroll.pack(side="right", fill="y")
+            self._overlay_canvas.pack(side="left", fill="both", expand=True)
+
+            self._overlay_photo_ref = None  # prevent GC
+
+            # Mouse wheel scrolling on overlay canvas
+            self._overlay_canvas.bind("<MouseWheel>",
+                                      self._overlay_on_mousewheel)      # Windows/macOS
+            self._overlay_canvas.bind("<Button-4>",
+                                      self._overlay_on_mousewheel)      # Linux scroll up
+            self._overlay_canvas.bind("<Button-5>",
+                                      self._overlay_on_mousewheel)      # Linux scroll down
+            self._overlay_canvas.bind("<Shift-MouseWheel>",
+                                      self._overlay_on_shift_mousewheel)  # horizontal
+
+            # Keep edge_label as a compatibility reference (some mixins check it)
             self.edge_label = ctk.CTkLabel(
                 self.top_right_frame, text="", fg_color="black", anchor="center")
-            self.edge_label.pack(fill="both", expand=True)
+            # Don't pack it — the canvas replaces it for display
 
             self.top_center_frame.grid_propagate(False)
             self.top_right_frame.grid_propagate(False)
@@ -398,8 +460,51 @@ class FeatureIdentifier(HSVMaskEditingMixin, HSVMaskProcessingMixin, HSVMaskUIMi
         except Exception:
             pass
 
+    # ═══════════════════════════════════════════════════════════════════
+    # OVERLAY (RIGHT PANEL) ZOOM
+    # ═══════════════════════════════════════════════════════════════════
+
+    def _overlay_zoom_in(self):
+        self._overlay_zoom = min(5.0, getattr(self, '_overlay_zoom', 1.0) + 0.25)
+        self._overlay_zoom_label.configure(text=f"{int(self._overlay_zoom * 100)}%")
+        self.update_edge_display()
+
+    def _overlay_zoom_out(self):
+        self._overlay_zoom = max(0.25, getattr(self, '_overlay_zoom', 1.0) - 0.25)
+        self._overlay_zoom_label.configure(text=f"{int(self._overlay_zoom * 100)}%")
+        self.update_edge_display()
+
+    def _overlay_zoom_reset(self):
+        self._overlay_zoom = 1.0
+        self._overlay_zoom_label.configure(text="100%")
+        self.update_edge_display()
+
+    def _overlay_on_mousewheel(self, event):
+        """Vertical scroll on overlay canvas (cross-platform)."""
+        canvas = getattr(self, '_overlay_canvas', None)
+        if canvas is None:
+            return
+        if event.num == 4:       # Linux scroll up
+            canvas.yview_scroll(-3, "units")
+        elif event.num == 5:     # Linux scroll down
+            canvas.yview_scroll(3, "units")
+        else:                    # Windows / macOS
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+    def _overlay_on_shift_mousewheel(self, event):
+        """Horizontal scroll on overlay canvas (Shift+wheel)."""
+        canvas = getattr(self, '_overlay_canvas', None)
+        if canvas is None:
+            return
+        canvas.xview_scroll(int(-1 * (event.delta / 120)), "units")
+
     def reset_session(self):
         """Reset all state to initial — clears image, masks, features, AOI, color picker."""
+        # Clear overlay zoom
+        self._overlay_zoom = 1.0
+        if hasattr(self, '_overlay_zoom_label'):
+            self._overlay_zoom_label.configure(text="100%")
+
         # Clear images
         self.cv_image = None
         self.full_image = None
@@ -436,6 +541,13 @@ class FeatureIdentifier(HSVMaskEditingMixin, HSVMaskProcessingMixin, HSVMaskUIMi
         self.color_pick_mask = None
         if hasattr(self, "_update_color_pick_labels"):
             self._update_color_pick_labels()
+
+        # Clear path/georef compatibility state
+        self._current_input_path = None
+        self._current_input_folder = None
+        self._current_export_path = None
+        self._georef_crs = None
+        self._georef_transform = None
 
         # Clear zoom/pan caches
         self.zoom_scale = 1.0

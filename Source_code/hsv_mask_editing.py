@@ -439,11 +439,11 @@ class HSVMaskEditingMixin:
         self.btn_delete_mode.pack(side="left", padx=2, pady=1)
         ctk.CTkButton(row2, text="Reset", width=BTN_W, height=BTN_H,
                        font=BTN_FONT, command=self.reset_to_initial,
-                       fg_color="red", text_color="white"
+                       fg_color="#8B0000", hover_color="#A52A2A", text_color="white"
                        ).pack(side="left", padx=2, pady=1)
         ctk.CTkButton(row2, text="Delete All", width=BTN_W, height=BTN_H,
                        font=BTN_FONT, command=self.delete_all_vertices,
-                       fg_color="red", text_color="white"
+                       fg_color="#8B0000", hover_color="#A52A2A", text_color="white"
                        ).pack(side="left", padx=2, pady=1)
 
         # ── ROW 3: Confirm Feature, ◀ Prev Polygon, feature list label, Next Polygon ▶ ──
@@ -453,7 +453,7 @@ class HSVMaskEditingMixin:
         self.confirm_button = ctk.CTkButton(
             row3, text="Confirm Feature", width=BTN_W + 10, height=BTN_H,
             font=BTN_FONT, command=self.confirm_feature_cuts,
-            fg_color="#0F52BA", text_color="white"
+            fg_color="#0F52BA",hover_color="#2A6BD1", text_color="white"
         )
         self.confirm_button.pack(side="left", padx=4, pady=1)
 
@@ -478,13 +478,20 @@ class HSVMaskEditingMixin:
         info_label = ctk.CTkLabel(
             self.control_frame,
             text="Scroll=zoom | Dbl-click=delete/add | "
-                 "Keys: d=del, m=move, f=freehand, e=line, p=polygon, c=continue, U=undo, R=redo",
+                 "Keys: d=del, m=move, f=freehand, e=line, p=polygon, c=continue, U=undo, R=redo, Enter=confirm",
             font=("Arial", 9)
         )
         info_label.pack(side="top", pady=1)
 
         # enable edit-mode shortcuts (binds d/m/f/e/p/c + U/R and keeps canvas focused)
         self._bind_edit_shortcuts()
+
+        # Enter key → confirm feature (works on canvas and parent window)
+        self.edit_canvas.bind("<Return>", lambda e: self.confirm_feature_cuts())
+        try:
+            self.image_display_window.bind("<Return>", lambda e: self.confirm_feature_cuts())
+        except Exception:
+            pass
 
         # Initial draw
         base = self._ensure_scaled_base_for_zoom(high_quality=False)
@@ -678,6 +685,12 @@ class HSVMaskEditingMixin:
 
         # disable edit-mode shortcuts
         self._unbind_edit_shortcuts()
+
+        # Remove edit-mode Enter binding from the display window
+        try:
+            self.image_display_window.unbind("<Return>")
+        except Exception:
+            pass
 
         # --- Reset editor canvas state so re-editing works ---
         self._poly_id = None

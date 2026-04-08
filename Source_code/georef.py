@@ -24,7 +24,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 from osgeo import gdal, osr
 
-from utils import fit_geometry, resource_path, setup_console, restore_console
+from utils import fit_geometry, resource_path, setup_console, restore_console, save_settings_json, load_settings_json
 
 try:
     from csv_utils import read_gcp_csv, normalise_columns
@@ -376,7 +376,7 @@ class InteractiveAOISelector(ctk.CTkToplevel):
         super().__init__(master)
         self.title("Select AOI — draw a rectangle, then Confirm")
         self.resizable(True, True)
-        try: self.iconbitmap(resource_path("launch_logo.ico"))
+        try: self.after(200, lambda: self.iconphoto(False, tk.PhotoImage(file=resource_path("launch_logo.png"))))
         except: pass
         self._rgb = preview_rgb; self._cb = on_done
         ih, iw = preview_rgb.shape[:2]; self._iw, self._ih = iw, ih
@@ -511,7 +511,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
 
     def _build_ui(self):
         self.grid_columnconfigure(0, weight=1); self.grid_rowconfigure(0, weight=1)
-        for r in range(1, 7): self.grid_rowconfigure(r, weight=0)
+        for r in range(1, 8): self.grid_rowconfigure(r, weight=0)
 
         pf = ctk.CTkFrame(self, fg_color="black")
         pf.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
@@ -557,17 +557,17 @@ class GeoReferenceModule(ctk.CTkToplevel):
 
         # Initial georef + AOI
         r2b = ctk.CTkFrame(self); r2b.grid(row=4, column=0, sticky="ew", padx=5, pady=2)
-        ctk.CTkButton(r2b, text="Initial Georeferencing", command=self._initial_georef, fg_color="#0F52BA",
+        ctk.CTkButton(r2b, text="Initial Georeferencing", command=self._initial_georef, fg_color="#0F52BA", hover_color="#2A6BD1",
                       font=("Arial", 12, "bold")).pack(side="left", padx=6)
         ctk.CTkButton(r2b, text="Select AOI Interactively", command=self._select_aoi, fg_color="#2E7D32").pack(side="left", padx=6)
         ctk.CTkLabel(r2b, text="or manual (x1,y1,x2,y2):").pack(side="left", padx=(8,2))
         self._aoi_ent = ctk.CTkEntry(r2b, width=200, placeholder_text="preview pixel coords"); self._aoi_ent.pack(side="left", padx=2)
-        ctk.CTkButton(r2b, text="Set", command=self._set_manual_aoi, width=50).pack(side="left", padx=2)
+        ctk.CTkButton(r2b, text="Set", command=self._set_manual_aoi, width=50, fg_color="#0F52BA", hover_color="#2A6BD1").pack(side="left", padx=2)
         self._aoi_status = ctk.CTkLabel(r2b, text="AOI: not set", text_color="gray"); self._aoi_status.pack(side="left", padx=8)
 
         # Accuracy + Secondary
         r3 = ctk.CTkFrame(self); r3.grid(row=5, column=0, sticky="ew", padx=5, pady=2)
-        ctk.CTkButton(r3, text="Compute Accuracy", command=self._compute_accuracy, fg_color="#6693F5").pack(side="left", padx=6)
+        ctk.CTkButton(r3, text="Compute Accuracy", command=self._compute_accuracy, fg_color="#6693F5", hover_color="#7DA5F7").pack(side="left", padx=6)
         ctk.CTkButton(r3, text="Optimise GCPs (SA)", command=self._run_sa, fg_color="#37474F").pack(side="left", padx=4)
         ctk.CTkLabel(r3, text="Exclude GCPs:").pack(side="left", padx=(10,2))
         self._excl_ent = ctk.CTkEntry(r3, width=140, placeholder_text="e.g. 5,7,11"); self._excl_ent.pack(side="left", padx=2)
@@ -584,15 +584,21 @@ class GeoReferenceModule(ctk.CTkToplevel):
         self._in_lbl = ctk.CTkLabel(r4, text="\u2014", text_color="gray"); self._in_lbl.pack(side="left", padx=4)
         self._subfolder_var = tk.BooleanVar(value=False)
         ctk.CTkCheckBox(r4, text="Include subfolders", variable=self._subfolder_var).pack(side="left", padx=8)
-        ctk.CTkButton(r4, text="Browse Output Folder", command=self._browse_out, fg_color="#8C7738").pack(side="left", padx=4)
+        ctk.CTkButton(r4, text="Browse Output Folder", command=self._browse_out, fg_color="#8C7738", hover_color="#A18A45").pack(side="left", padx=4)
         self._out_lbl = ctk.CTkLabel(r4, text="\u2014", text_color="gray"); self._out_lbl.pack(side="left", padx=4)
         self._epsg_ent = ctk.CTkEntry(r4, width=80, placeholder_text="EPSG"); self._epsg_ent.pack(side="left", padx=4)
-        ctk.CTkButton(r4, text="Process All", fg_color="#0F52BA", command=self._process_all,
+        ctk.CTkButton(r4, text="Process All", fg_color="#0F52BA", hover_color="#2A6BD1", command=self._process_all,
                       font=("Arial", 12, "bold")).pack(side="left", padx=6)
         self._prog = ctk.CTkProgressBar(r4, width=160); self._prog.set(0); self._prog.pack(side="left", padx=6)
         self._eta_lbl = ctk.CTkLabel(r4, text="ETA: ~"); self._eta_lbl.pack(side="left", padx=4)
-        ctk.CTkButton(r4, text="Reset", command=self._reset, width=60, fg_color="#8B0000", hover_color="#B22222").pack(side="right", padx=8)
 
+
+        # Settings row
+        r5 = ctk.CTkFrame(self); r5.grid(row=7, column=0, sticky="ew", padx=5, pady=2)
+        ctk.CTkButton(r5, text="Save Settings", command=self._save_settings, width=100, fg_color="#4F5D75",hover_color="#61708A").pack(side="left", padx=4)
+        ctk.CTkButton(r5, text="Load Settings", command=self._load_settings, width=100, fg_color="#4F5D75",hover_color="#61708A").pack(side="left", padx=4)
+        ctk.CTkButton(r5, text="Reset", command=self._reset, width=60, fg_color="#8B0000", hover_color="#B22222").pack(side="left", padx=8)
+        
         # Console
         cf = ctk.CTkFrame(self); cf.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
         ct = tk.Text(cf, wrap="word", height=10); ct.pack(fill="both", expand=True, padx=5, pady=5)
@@ -677,13 +683,13 @@ class GeoReferenceModule(ctk.CTkToplevel):
             return _corners_to_extent_affine(df, source_corners)
 
     def _browse_img(self):
-        p = filedialog.askopenfilename(filetypes=[("Images","*.jpg *.jpeg *.png *.bmp *.tif *.tiff")])
+        p = filedialog.askopenfilename(parent=self,filetypes=[("Images","*.jpg *.jpeg *.png *.bmp *.tif *.tiff")])
         if p:
             self._img_path = p; self._img_lbl.configure(text=os.path.basename(p), text_color="#81C784")
             self._show(p, self._orig_lbl)
 
     def _load_homo(self):
-        p = filedialog.askopenfilename(filetypes=[("Text","*.txt")])
+        p = filedialog.askopenfilename(parent=self,filetypes=[("Text","*.txt")])
         if not p: return
         try:
             self._homo_epsg = None
@@ -700,7 +706,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
         except Exception as e: messagebox.showerror("Error", f"Bad homography: {e}")
 
     def _load_gcp(self):
-        p = filedialog.askopenfilename(filetypes=[("CSV","*.csv"),("All","*.*")])
+        p = filedialog.askopenfilename(parent=self,filetypes=[("CSV","*.csv"),("All","*.*")])
         if not p: return
         try:
             df = read_gcp_csv(p)
@@ -717,7 +723,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
         except Exception as e: messagebox.showerror("GCP Error", str(e))
 
     def _load_cal(self):
-        p = filedialog.askopenfilename(filetypes=[("Pickle","*.pkl"),("All","*.*")])
+        p = filedialog.askopenfilename(parent=self,filetypes=[("Pickle","*.pkl"),("All","*.*")])
         if not p: return
         try:
             with open(p, "rb") as f: d = pickle.load(f)
@@ -1041,10 +1047,10 @@ class GeoReferenceModule(ctk.CTkToplevel):
 
     # ── Batch ──
     def _browse_in(self):
-        f = filedialog.askdirectory()
+        f = filedialog.askdirectory(parent=self)
         if f: self.input_folder = f; self._in_lbl.configure(text=os.path.basename(f), text_color="#81C784")
     def _browse_out(self):
-        f = filedialog.askdirectory()
+        f = filedialog.askdirectory(parent=self)
         if f: self.output_folder = f; self._out_lbl.configure(text=os.path.basename(f), text_color="#81C784")
     def _collect_images(self, folder):
         imgs = []
@@ -1108,6 +1114,101 @@ class GeoReferenceModule(ctk.CTkToplevel):
             else:
                 self.after(0, lambda: messagebox.showinfo("Complete", f"All {n} files processed!"))
         threading.Thread(target=_worker, daemon=True).start()
+
+    # ── Save / Load Settings ──
+    def _save_settings(self):
+        data = {
+            "paths": {
+                "image_path": self._img_path or "",
+                "input_folder": self.input_folder or "",
+                "output_folder": self.output_folder or "",
+            },
+            "method": self._method_var.get(),
+            "corner": self._corner_var.get(),
+            "manual_corners": self._manual_corner_ent.get().strip(),
+            "crop": {tag: ent.get().strip() for tag, ent in self._crop_entries.items()},
+            "scale": self._scale_ent.get().strip(),
+            "epsg": self._epsg_ent.get().strip(),
+            "elevation": self._elev_ent.get().strip(),
+            "excluded_gcps": self._excl_ent.get().strip(),
+            "aoi_manual": self._aoi_ent.get().strip(),
+            "include_subfolders": bool(self._subfolder_var.get()),
+        }
+        try:
+            initialdir = self.output_folder or None
+            path = save_settings_json(self, "georef", data, initialdir=initialdir)
+            if path:
+                print(f"Settings saved: {path}")
+        except Exception as e:
+            messagebox.showerror("Save Settings", f"Could not save:\n{e}", parent=self)
+
+    def _load_settings(self):
+        try:
+            initialdir = self.output_folder or None
+            data, path = load_settings_json(self, "georef", initialdir=initialdir)
+            if not data:
+                return
+
+            paths = data.get("paths", {})
+            if paths.get("image_path"):
+                self._img_path = paths["image_path"]
+                self._img_lbl.configure(text=os.path.basename(self._img_path), text_color="#81C784")
+            if paths.get("input_folder"):
+                self.input_folder = paths["input_folder"]
+                self._in_lbl.configure(text=os.path.basename(self.input_folder), text_color="#81C784")
+            if paths.get("output_folder"):
+                self.output_folder = paths["output_folder"]
+                self._out_lbl.configure(text=os.path.basename(self.output_folder), text_color="#81C784")
+
+            method = data.get("method")
+            if method and method in METHODS:
+                self._method_var.set(method)
+                self._on_method_change(method)
+
+            corner = data.get("corner")
+            if corner:
+                self._corner_var.set(corner)
+                self._on_corner_change()
+            manual = data.get("manual_corners", "")
+            if manual:
+                self._manual_corner_ent.delete(0, "end")
+                self._manual_corner_ent.insert(0, manual)
+
+            for tag, val in data.get("crop", {}).items():
+                if tag in self._crop_entries:
+                    self._crop_entries[tag].delete(0, "end")
+                    self._crop_entries[tag].insert(0, val or "0")
+
+            scale = data.get("scale", "")
+            if scale:
+                self._scale_ent.delete(0, "end")
+                self._scale_ent.insert(0, scale)
+
+            epsg = data.get("epsg", "")
+            if epsg:
+                self._epsg_ent.delete(0, "end")
+                self._epsg_ent.insert(0, epsg)
+
+            elev = data.get("elevation", "")
+            if elev:
+                self._elev_ent.delete(0, "end")
+                self._elev_ent.insert(0, elev)
+
+            excl = data.get("excluded_gcps", "")
+            if excl:
+                self._excl_ent.delete(0, "end")
+                self._excl_ent.insert(0, excl)
+
+            aoi = data.get("aoi_manual", "")
+            if aoi:
+                self._aoi_ent.delete(0, "end")
+                self._aoi_ent.insert(0, aoi)
+
+            self._subfolder_var.set(bool(data.get("include_subfolders", False)))
+
+            print(f"Settings loaded: {path}")
+        except Exception as e:
+            messagebox.showerror("Load Settings", f"Could not load:\n{e}", parent=self)
 
     # ── Reset ──
     def _reset(self):

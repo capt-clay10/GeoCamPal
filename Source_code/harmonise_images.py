@@ -18,9 +18,10 @@ with Next/Previous navigation.  The user can inspect and then commit
 with "Process All".
 
 Outputs:
-  • bad_images.txt                    — list of identified bad image filenames
-  • _brightness_harmonised/ subfolder — brightness‑corrected images
-  • _colour_harmonised/    subfolder  — colour‑corrected images
+  • bad_images.txt / bad_images.json  — list of identified bad images and reasons
+  • _filtered_good/                   — optional export of images that passed filtering
+  • _brightness_harmonised/           — brightness‑corrected images
+  • _colour_harmonised/               — colour‑corrected images
 
 Originals are NEVER modified or overwritten.
 """
@@ -33,6 +34,7 @@ import shutil
 import threading
 import time
 import random
+import json
 from pathlib import Path
 
 import numpy as np
@@ -47,7 +49,14 @@ import customtkinter as ctk
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
-from utils import fit_geometry, resource_path, setup_console, restore_console
+from utils import (
+    fit_geometry,
+    resource_path,
+    setup_console,
+    restore_console,
+    save_settings_json,
+    load_settings_json,
+)
 
 try:
     from skimage import exposure as sk_exposure
@@ -499,7 +508,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
         #self.geometry("1400x1020")
         fit_geometry(self, 1400, 1020, resizable=True)
         try:
-            self.iconbitmap(resource_path("launch_logo.ico"))
+            self.after(200, lambda: self.iconphoto(False, tk.PhotoImage(file=resource_path("launch_logo.png"))))
         except Exception:
             pass
 
@@ -510,7 +519,10 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
         self.input_folder = None
         self.output_folder = None
         self.bad_list = []
+        self.bad_details = []
         self.recursive_var = tk.BooleanVar(value=False)
+        self.export_filtered_good_var = tk.BooleanVar(value=False)
+        self._cancel_requested = False
 
         # colour harmonisation state
         self.ref_colour_path = None
@@ -651,14 +663,19 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
         row2.grid_columnconfigure(max_col + 2, weight=1)
 
         ctk.CTkButton(row2, text="Run Filter",
-                      command=self._filter_threaded, fg_color="#0F52BA").grid(
+                      command=self._filter_threaded, fg_color="#0F52BA", hover_color="#2A6BD1").grid(
             row=3, column=0, padx=5, pady=(6, 3), sticky="w")
+
+        ctk.CTkCheckBox(
+            row2, text="Export good filtered images",
+            variable=self.export_filtered_good_var
+        ).grid(row=3, column=1, padx=5, pady=(6, 3), sticky="w")
 
         ctk.CTkLabel(
             row2, text="-> Flags blurry, overexposed, dark,\n"
                        "   foggy, rain-on-lens & blocked images",
             font=("Arial", 10), text_color="gray", justify="left",
-        ).grid(row=3, column=1, columnspan=max_col + 1, padx=5, pady=(6, 3),
+        ).grid(row=3, column=2, columnspan=max_col + 1, padx=5, pady=(6, 3),
                sticky="w")
 
         # Row 3 — harmonise BRIGHTNESS (collapsible)
@@ -693,7 +710,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
 
         ctk.CTkButton(row3, text="Run Brightness",
                       command=self._harmonise_brightness_threaded,
-                      fg_color="#0F52BA").grid(
+                      fg_color="#0F52BA", hover_color="#2A6BD1").grid(
             row=0, column=7, padx=5, pady=3)
 
         ctk.CTkLabel(
@@ -739,7 +756,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
 
         ctk.CTkButton(row4, text="Run Colour",
                       command=self._harmonise_colour_threaded,
-                      fg_color="#0F52BA").grid(
+                      fg_color="#0F52BA", hover_color="#2A6BD1").grid(
             row=0, column=7, padx=5, pady=3)
 
         ctk.CTkLabel(
@@ -763,7 +780,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
         ).grid(row=0, column=1, padx=5, pady=3, sticky="w")
         ctk.CTkButton(row4b, text="Run Averaging",
                       command=self._average_images_threaded,
-                      fg_color="#0F52BA").grid(
+                      fg_color="#0F52BA", hover_color="#2A6BD1").grid(
             row=0, column=2, padx=10, pady=3)
 
         # Row 5 — output, progress, ETA, reset
@@ -771,7 +788,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
         row5.pack(fill="x", padx=5, pady=2)
 
         ctk.CTkButton(row5, text="Browse Output Folder",
-                      command=self._browse_output, fg_color="#8C7738").grid(
+                      command=self._browse_output, fg_color="#8C7738", hover_color="#A18A45").grid(
             row=0, column=0, padx=5, pady=5)
         self.output_label = ctk.CTkLabel(row5,
                                           text="No output folder selected")
@@ -785,10 +802,18 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
                                        font=("Arial", 10))
         self.eta_label.grid(row=0, column=3, padx=5, pady=5)
 
+        self.btn_save_settings = ctk.CTkButton(
+            row5, text="Save Settings",fg_color="#4F5D75",hover_color="#61708A", command=self._save_settings, width=110)
+        self.btn_save_settings.grid(row=0, column=4, padx=5, pady=5)
+
+        self.btn_load_settings = ctk.CTkButton(
+            row5, text="Load Settings",fg_color="#4F5D75",hover_color="#61708A", command=self._load_settings, width=110)
+        self.btn_load_settings.grid(row=0, column=5, padx=5, pady=5)
+
         self.btn_reset = ctk.CTkButton(
             row5, text="Reset", command=self._reset,
             width=80, fg_color="#8B0000", hover_color="#A52A2A")
-        self.btn_reset.grid(row=0, column=4, padx=5, pady=5, sticky="e")
+        self.btn_reset.grid(row=0, column=6, padx=5, pady=5, sticky="e")
 
         # ---- PREVIEW NAVIGATION (hidden by default) ----
         self.preview_nav_frame = ctk.CTkFrame(self)
@@ -898,8 +923,8 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
               "  'Accept & Process All' or 'Cancel Preview'.\n"
               "\n"
               "  Originals are NEVER modified - all output goes to\n"
-              "  _brightness_harmonised/ or _colour_harmonised/ "
-              "sub-folders.\n"
+              "  *_filtered_good/, *_brightness_harmonised/, or\n"
+              "  *_colour_harmonised/ folders under the chosen output path.\n"
               "================================\n")
 
     # ——— UI/thread helpers ———
@@ -961,6 +986,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
             "droplet_f": float(self.filter_entries["Droplet fraction"].get()),
             "obstruct_f": float(self.filter_entries["Obstruction fraction"].get()),
             "enabled": {k: v.get() for k, v in self.filter_enabled.items()},
+            "export_good": bool(self.export_filtered_good_var.get()),
         }
 
     def _collect_brightness_config(self):
@@ -1046,20 +1072,152 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
             self.axes[2].set_title(f"Colour Reference: {name}",
                                     fontsize=9)
             self.axes[2].axis("off")
+
             self.fig.tight_layout()
             self.canvas_plot.draw()
 
-    # ——— reset ———
+    # ——— settings / cancel helpers ———
 
-    def _on_close(self):
+    def _request_cancel(self):
+        if self._processing:
+            self._cancel_requested = True
+            self._ui_set_eta("Cancelling...")
+            print("Cancellation requested...")
+
+    def _poll_reset_after_cancel(self):
+        if self._processing:
+            self.after(150, self._poll_reset_after_cancel)
+            return
+        self._apply_reset_state()
+
+    def _poll_close_after_cancel(self):
+        if self._processing:
+            self.after(150, self._poll_close_after_cancel)
+            return
         restore_console(getattr(self, "_console_redir", None))
         self.destroy()
 
-    def _reset(self):
+    def _settings_payload(self):
+        return {
+            "module": "harmonise_images",
+            "settings_version": 1,
+            "paths": {
+                "input_folder": self.input_folder or "",
+                "output_folder": self.output_folder or "",
+                "ref_colour_path": self.ref_colour_path or "",
+            },
+            "ui_state": {
+                "recursive": bool(self.recursive_var.get()),
+                "run_filter": bool(self.run_filter_var.get()),
+                "run_brightness": bool(self.run_brightness_var.get()),
+                "run_colour": bool(self.run_colour_var.get()),
+                "run_average": bool(self.run_average_var.get()),
+                "exclude_bad_brightness": bool(self.exclude_bad_var.get()),
+                "exclude_bad_colour": bool(self.exclude_bad_colour_var.get()),
+                "export_filtered_good": bool(self.export_filtered_good_var.get()),
+                "tol": self.tol_entry.get().strip(),
+                "sky_pct": self.sky_entry.get().strip(),
+                "colour_algorithm": self.colour_algo_var.get(),
+                "filters_enabled": {k: bool(v.get()) for k, v in self.filter_enabled.items()},
+                "filter_values": {k: e.get().strip() for k, e in self.filter_entries.items()},
+            },
+        }
+
+    def _save_settings(self):
+        try:
+            initialdir = self.output_folder or self.input_folder or None
+            path = save_settings_json(
+                self,
+                "harmonise_images",
+                self._settings_payload(),
+                initialdir=initialdir,
+            )
+            if path:
+                print(f"Settings saved: {path}")
+        except Exception as e:
+            messagebox.showerror("Save Settings", f"Could not save settings:\n{e}", parent=self)
+
+    def _load_settings(self):
+        try:
+            initialdir = self.output_folder or self.input_folder or None
+            data, path = load_settings_json(self, "harmonise_images", initialdir=initialdir)
+            if not data:
+                return
+
+            paths = data.get("paths", {})
+            ui = data.get("ui_state", {})
+
+            self.input_folder = paths.get("input_folder") or None
+            self.output_folder = paths.get("output_folder") or None
+            self.input_label.configure(text=self.input_folder or "No folder selected")
+            self.output_label.configure(text=self.output_folder or "No output folder selected")
+
+            self.recursive_var.set(bool(ui.get("recursive", False)))
+            self.run_filter_var.set(bool(ui.get("run_filter", True)))
+            self.run_brightness_var.set(bool(ui.get("run_brightness", True)))
+            self.run_colour_var.set(bool(ui.get("run_colour", True)))
+            self.run_average_var.set(bool(ui.get("run_average", False)))
+            self.exclude_bad_var.set(bool(ui.get("exclude_bad_brightness", True)))
+            self.exclude_bad_colour_var.set(bool(ui.get("exclude_bad_colour", True)))
+            self.export_filtered_good_var.set(bool(ui.get("export_filtered_good", False)))
+
+            self.tol_entry.delete(0, tk.END)
+            self.tol_entry.insert(0, str(ui.get("tol", "5")))
+            self.sky_entry.delete(0, tk.END)
+            self.sky_entry.insert(0, str(ui.get("sky_pct", "0")))
+
+            algo = ui.get("colour_algorithm", "Iterative Transfer (best)")
+            if algo in COLOUR_ALGORITHMS:
+                self.colour_algo_var.set(algo)
+
+            saved_enabled = ui.get("filters_enabled", {})
+            for k, var in self.filter_enabled.items():
+                if k in saved_enabled:
+                    var.set(bool(saved_enabled[k]))
+
+            saved_values = ui.get("filter_values", {})
+            for k, entry in self.filter_entries.items():
+                if k in saved_values:
+                    entry.delete(0, tk.END)
+                    entry.insert(0, str(saved_values[k]))
+
+            ref_path = paths.get("ref_colour_path") or ""
+            self.ref_colour_path = ref_path or None
+            self.ref_colour_bgr = None
+            if self.ref_colour_path and os.path.isfile(self.ref_colour_path):
+                img = cv2.imread(self.ref_colour_path)
+                if img is not None:
+                    self.ref_colour_bgr = img
+                    self.ref_colour_label.configure(
+                        text=f"{os.path.basename(self.ref_colour_path)}  ({img.shape[1]}x{img.shape[0]})"
+                    )
+                else:
+                    self.ref_colour_label.configure(text="Saved reference missing/unreadable")
+            else:
+                self.ref_colour_label.configure(text="No reference selected")
+
+            self._toggle_task_sections()
+            print(f"Settings loaded: {path}")
+        except Exception as e:
+            messagebox.showerror("Load Settings", f"Could not load settings:\n{e}", parent=self)
+
+    def _build_output_root(self, output_folder, input_root, suffix):
+        return Path(output_folder) / f"{input_root.name}_{suffix}"
+
+    def _build_preserved_output_path(self, source_path, input_root, output_folder, suffix):
+        rel = Path(source_path).relative_to(input_root)
+        out_root = self._build_output_root(output_folder, input_root, suffix)
+        out_path = out_root / rel
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        return out_path
+
+    def _apply_reset_state(self):
         self._cancel_preview()
+        self._cancel_requested = False
         self.input_folder = None
         self.output_folder = None
         self.bad_list = []
+        self.bad_details = []
         self.ref_colour_path = None
         self.ref_colour_bgr = None
         self.input_label.configure(text="No folder selected")
@@ -1074,6 +1232,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
         self.run_average_var.set(False)
         self.exclude_bad_var.set(True)
         self.exclude_bad_colour_var.set(True)
+        self.export_filtered_good_var.set(False)
         for var in self.filter_enabled.values():
             var.set(True)
 
@@ -1081,6 +1240,25 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
         self._toggle_task_sections()
         self.console_text.delete("1.0", tk.END)
         print("Session reset.\n--------------------------------")
+
+    # ——— reset ———
+
+    def _on_close(self):
+        self._cancel_preview()
+        if self._processing:
+            self._request_cancel()
+            self.after(150, self._poll_close_after_cancel)
+            return
+        restore_console(getattr(self, "_console_redir", None))
+        self.destroy()
+
+    def _reset(self):
+        self._cancel_preview()
+        if self._processing:
+            self._request_cancel()
+            self.after(150, self._poll_reset_after_cancel)
+            return
+        self._apply_reset_state()
 
     # ——— plot management ———
 
@@ -1221,6 +1399,13 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
         self._ui_set_progress_fraction(frac)
         self._ui_set_eta(eta_text)
 
+    def _cancelled(self):
+        if self._cancel_requested:
+            print("Processing cancelled.")
+            self._ui_set_eta("Cancelled")
+            return True
+        return False
+
     def _render_filter_plot(self, reason_counts, n_bad, n_good):
         self._restore_normal_plots()
         self.axes[1].clear()
@@ -1322,6 +1507,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
     def _run_filter(self, cfg):
         try:
             self._processing = True
+            self._cancel_requested = False
             self._ui_set_progress_fraction(0)
             self._ui_set_eta("ETA: --")
 
@@ -1344,6 +1530,10 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
             start_time = time.time()
 
             for idx, p in enumerate(images):
+                if self._cancel_requested:
+                    self._ui_set_eta("Cancelled")
+                    print("Filtering cancelled.")
+                    return
                 img = cv2.imread(str(p))
                 if img is None:
                     print(f"[WARN] Cannot read: {p.name}")
@@ -1374,18 +1564,53 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
                 self._update_progress(idx, len(images), start_time)
 
             self.bad_list = bad_list
+            details = []
+            input_root = Path(cfg["input_folder"])
+            for bp in bad_list:
+                bp_path = Path(bp)
+                details.append({
+                    "absolute_path": str(bp_path),
+                    "relative_path": str(bp_path.relative_to(input_root)),
+                    "filename": bp_path.name,
+                    "reasons": bad_reasons.get(bp_path.name, []),
+                })
+            self.bad_details = details
+
             n_bad = len(bad_list)
             n_good = len(images) - n_bad
             print(f"\nFilter complete: {n_bad} bad / {n_good} good out of {len(images)} images.")
 
             txt_path = os.path.join(cfg["output_folder"], "bad_images.txt")
             with open(txt_path, "w", encoding="utf-8") as f:
-                f.write("filename\treason\n")
-                for bp in bad_list:
-                    name = os.path.basename(bp)
-                    reasons = bad_reasons.get(name, [])
-                    f.write(f"{name}\t{','.join(reasons)}\n")
+                f.write("relative_path\tfilename\treason\n")
+                for item in details:
+                    f.write(f"{item['relative_path']}\t{item['filename']}\t{','.join(item['reasons'])}\n")
             print(f"Bad image list saved: {txt_path}")
+
+            json_path = os.path.join(cfg["output_folder"], "bad_images.json")
+            with open(json_path, "w", encoding="utf-8") as f:
+                json.dump({
+                    "input_folder": cfg["input_folder"],
+                    "recursive": bool(cfg["recursive"]),
+                    "bad_images": details,
+                }, f, indent=2, ensure_ascii=False)
+            print(f"Bad image JSON saved: {json_path}")
+
+            if cfg.get("export_good"):
+                out_root = self._build_output_root(cfg["output_folder"], input_root, "filtered_good")
+                copied = 0
+                bad_set = set(bad_list)
+                for p in images:
+                    if self._cancel_requested:
+                        self._ui_set_eta("Cancelled")
+                        print("Filtered-good export cancelled.")
+                        return
+                    if str(p) in bad_set:
+                        continue
+                    out_path = self._build_preserved_output_path(p, input_root, cfg["output_folder"], "filtered_good")
+                    shutil.copy2(str(p), str(out_path))
+                    copied += 1
+                print(f"Good filtered images exported: {copied} -> {out_root}")
 
             self._ui_call(self._render_filter_plot, reason_counts, n_bad, n_good)
             self._ui_set_eta("Done")
@@ -1413,6 +1638,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
     def _run_preview_brightness(self, cfg):
         try:
             self._processing = True
+            self._cancel_requested = False
             self._ui_set_progress_fraction(0)
 
             images = self._gather_images_from(cfg["input_folder"], recursive=cfg["recursive"],
@@ -1428,6 +1654,10 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
 
             means = []
             for p in images:
+                if self._cancel_requested:
+                    self._ui_set_eta("Cancelled")
+                    print("Brightness preview cancelled.")
+                    return
                 img = cv2.imread(str(p))
                 if img is None:
                     means.append(np.nan)
@@ -1445,6 +1675,10 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
             preview_pairs = []
             start_time = time.time()
             for i, si in enumerate(sample_indices):
+                if self._cancel_requested:
+                    self._ui_set_eta("Cancelled")
+                    print("Preview cancelled.")
+                    return
                 p = images[si]
                 img = cv2.imread(str(p))
                 if img is None:
@@ -1493,6 +1727,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
     def _run_harmonise_brightness(self, cfg):
         try:
             self._processing = True
+            self._cancel_requested = False
             self._ui_set_progress_fraction(0)
             self._ui_set_eta("ETA: --")
 
@@ -1508,6 +1743,10 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
             means = []
             loaded = []
             for p in images:
+                if self._cancel_requested:
+                    self._ui_set_eta("Cancelled")
+                    print("Brightness harmonisation cancelled.")
+                    return
                 img = cv2.imread(str(p))
                 if img is None:
                     means.append(np.nan)
@@ -1531,6 +1770,10 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
             start_time = time.time()
 
             for idx, (p, img, m) in enumerate(zip(images, loaded, means)):
+                if self._cancel_requested:
+                    self._ui_set_eta("Cancelled")
+                    print("Brightness harmonisation cancelled.")
+                    return
                 if img is None:
                     continue
                 delta = m - ref_mean
@@ -1552,14 +1795,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
                         print(f"  [REVERT] {p.name}: correction made luminance worse - kept original")
                 counts[mode] = counts.get(mode, 0) + 1
 
-                rel = Path(p).relative_to(input_root)
-                if len(rel.parts) > 1:
-                    parent = rel.parent
-                    out_parent = Path(cfg["output_folder"]) / (str(parent) + "_brightness_harmonised")
-                else:
-                    out_parent = Path(cfg["output_folder"]) / (input_root.name + "_brightness_harmonised")
-                out_parent.mkdir(parents=True, exist_ok=True)
-                out_path = out_parent / rel.name
+                out_path = self._build_preserved_output_path(p, input_root, cfg["output_folder"], "brightness_harmonised")
                 cv2.imwrite(str(out_path), corrected)
 
                 if (idx + 1) % 20 == 0 or idx == 0:
@@ -1595,6 +1831,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
     def _run_preview_colour(self, cfg):
         try:
             self._processing = True
+            self._cancel_requested = False
             self._ui_set_progress_fraction(0)
 
             images = self._gather_images_from(cfg["input_folder"], recursive=cfg["recursive"],
@@ -1614,6 +1851,10 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
             preview_pairs = []
             start_time = time.time()
             for i, si in enumerate(sample_indices):
+                if self._cancel_requested:
+                    self._ui_set_eta("Cancelled")
+                    print("Preview cancelled.")
+                    return
                 p = images[si]
                 img = cv2.imread(str(p))
                 if img is None:
@@ -1650,6 +1891,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
     def _run_harmonise_colour(self, cfg):
         try:
             self._processing = True
+            self._cancel_requested = False
             self._ui_set_progress_fraction(0)
             self._ui_set_eta("ETA: --")
 
@@ -1671,6 +1913,10 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
             start_time = time.time()
 
             for idx, p in enumerate(images):
+                if self._cancel_requested:
+                    self._ui_set_eta("Cancelled")
+                    print("Colour harmonisation cancelled.")
+                    return
                 img = cv2.imread(str(p))
                 if img is None:
                     print(f"[WARN] Cannot read: {p.name}")
@@ -1683,14 +1929,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
                 else:
                     counts["corrected"] += 1
 
-                rel = Path(p).relative_to(input_root)
-                if len(rel.parts) > 1:
-                    parent = rel.parent
-                    out_parent = Path(cfg["output_folder"]) / (str(parent) + "_colour_harmonised")
-                else:
-                    out_parent = Path(cfg["output_folder"]) / (input_root.name + "_colour_harmonised")
-                out_parent.mkdir(parents=True, exist_ok=True)
-                out_path = out_parent / rel.name
+                out_path = self._build_preserved_output_path(p, input_root, cfg["output_folder"], "colour_harmonised")
                 cv2.imwrite(str(out_path), corrected)
 
                 if (idx + 1) % 10 == 0 or idx == 0:
@@ -1726,6 +1965,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
     def _run_average_images(self, cfg):
         try:
             self._processing = True
+            self._cancel_requested = False
             self._ui_set_progress_fraction(0)
             self._ui_set_eta("ETA: --")
 
@@ -1751,11 +1991,19 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
             print(f"\nAveraging images for {len(jobs)} folder(s)...")
 
             for idx, (folder_path, imgs) in enumerate(jobs):
+                if self._cancel_requested:
+                    self._ui_set_eta("Cancelled")
+                    print("Averaging cancelled.")
+                    return
                 accum = None
                 ref_shape = None
                 valid_count = 0
                 skipped_local = 0
                 for p in imgs:
+                    if self._cancel_requested:
+                        self._ui_set_eta("Cancelled")
+                        print("Averaging cancelled.")
+                        return
                     img = cv2.imread(str(p), cv2.IMREAD_COLOR)
                     if img is None:
                         skipped_local += 1

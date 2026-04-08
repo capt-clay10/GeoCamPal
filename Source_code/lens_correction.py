@@ -23,6 +23,7 @@ import os
 import glob
 import pickle
 import threading
+import time
 
 import numpy as np
 import cv2
@@ -36,7 +37,10 @@ import customtkinter as ctk
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
-from utils import fit_geometry, resource_path, setup_console, restore_console
+from utils import (
+    fit_geometry, resource_path, setup_console, restore_console,
+    save_settings_json, load_settings_json, compute_eta, format_eta,
+)
 
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("green")
@@ -52,7 +56,7 @@ class LensCorrectionWindow(ctk.CTkToplevel):
         #self.geometry("1200x800")
         fit_geometry(self, 1200, 800, resizable = True)
         try:
-            self.iconbitmap(resource_path("launch_logo.ico"))
+            self.after(200, lambda: self.iconphoto(False, tk.PhotoImage(file=resource_path("launch_logo.png"))))
         except Exception:
             pass
 
@@ -63,6 +67,10 @@ class LensCorrectionWindow(ctk.CTkToplevel):
         self.input_folder = None
         self.output_folder = None
         self.calibration_data = None
+        self._cancel_requested = False
+        self._job_running = False
+        self._worker_thread = None
+        self._job_start_time = None
 
         # ——— layout ———
         self.grid_rowconfigure(0, weight=3)
@@ -130,23 +138,37 @@ class LensCorrectionWindow(ctk.CTkToplevel):
         row3.pack(fill="x", padx=5, pady=2)
 
         ctk.CTkButton(row3, text="Browse Output Folder",
-                      command=self._browse_output, fg_color="#8C7738").grid(
+                      command=self._browse_output, fg_color="#8C7738", hover_color="#A18A45").grid(
             row=0, column=0, padx=5, pady=5)
         self.output_label = ctk.CTkLabel(row3, text="No output folder selected")
         self.output_label.grid(row=0, column=1, padx=5, pady=5, sticky="w")
 
         ctk.CTkButton(row3, text="Generate Lens Correction File",
-                      command=self._calibrate_threaded, fg_color="#0F52BA").grid(
+                      command=self._calibrate_threaded, fg_color="#0F52BA", hover_color="#2A6BD1").grid(
             row=0, column=2, padx=10, pady=5)
 
         self.progress_bar = ctk.CTkProgressBar(row3, width=200)
         self.progress_bar.grid(row=0, column=3, padx=5, pady=5)
         self.progress_bar.set(0)
 
+        self.eta_label = ctk.CTkLabel(row3, text="ETA: --")
+        self.eta_label.grid(row=0, column=4, padx=5, pady=5, sticky="w")
+
         self.btn_reset = ctk.CTkButton(
             row3, text="Reset", command=self._reset,
             width=80, fg_color="#8B0000", hover_color="#A52A2A")
-        self.btn_reset.grid(row=0, column=4, padx=5, pady=5, sticky="e")
+        self.btn_reset.grid(row=0, column=5, padx=5, pady=5, sticky="e")
+
+        row4 = ctk.CTkFrame(self.bottom_panel)
+        row4.pack(fill="x", padx=5, pady=2)
+
+        ctk.CTkButton(
+            row4, text="Save Settings",fg_color="#4F5D75",hover_color="#61708A", command=self._save_settings
+        ).grid(row=0, column=0, padx=5, pady=5, sticky="w")
+
+        ctk.CTkButton(
+            row4, text="Load Settings",fg_color="#4F5D75",hover_color="#61708A", command=self._load_settings
+        ).grid(row=0, column=1, padx=5, pady=5, sticky="w")
 
         # ---- CONSOLE ----
         self.console_frame = ctk.CTkFrame(self)
@@ -167,6 +189,7 @@ class LensCorrectionWindow(ctk.CTkToplevel):
     # ——————————————————————————— close handler —————————————————————————
     def _on_close(self):
         """Clean up and close the window."""
+        self._request_cancel(quiet=True)
         restore_console(self._console_redir)
         self.destroy()
 
@@ -185,6 +208,64 @@ class LensCorrectionWindow(ctk.CTkToplevel):
             self.output_folder = d
             self.output_label.configure(text=d)
 
+    def _get_settings_dict(self):
+        return {
+            "module": "lens_correction",
+            "settings_version": 1,
+            "paths": {
+                "input_folder": self.input_folder or "",
+                "output_folder": self.output_folder or "",
+            },
+            "ui_state": {
+                "sq_cols": self.cols_entry.get().strip(),
+                "sq_rows": self.rows_entry.get().strip(),
+                "cell_w_mm": self.cell_w_entry.get().strip(),
+                "cell_h_mm": self.cell_h_entry.get().strip(),
+            },
+        }
+
+    def _save_settings(self):
+        data = self._get_settings_dict()
+        initialdir = self.output_folder or self.input_folder or None
+        path = save_settings_json(self, "lens_correction", data, initialdir=initialdir)
+        if path:
+            print(f"Saved settings: {path}")
+
+    def _load_settings(self):
+        initialdir = self.output_folder or self.input_folder or None
+        data, path = load_settings_json(self, "lens_correction", initialdir=initialdir)
+        if not data:
+            return
+
+        paths = data.get("paths", {})
+        ui_state = data.get("ui_state", {})
+
+        self.input_folder = paths.get("input_folder") or None
+        self.output_folder = paths.get("output_folder") or None
+
+        if self.input_folder:
+            n = len(self._collect_images(self.input_folder)) if os.path.isdir(self.input_folder) else 0
+            label_text = f"{self.input_folder}  ({n} images)" if n else self.input_folder
+            self.input_label.configure(text=label_text)
+        else:
+            self.input_label.configure(text="No folder selected")
+
+        if self.output_folder:
+            self.output_label.configure(text=self.output_folder)
+        else:
+            self.output_label.configure(text="No output folder selected")
+
+        for entry, key, default in (
+            (self.cols_entry, "sq_cols", "10"),
+            (self.rows_entry, "sq_rows", "7"),
+            (self.cell_w_entry, "cell_w_mm", "25"),
+            (self.cell_h_entry, "cell_h_mm", "25"),
+        ):
+            entry.delete(0, tk.END)
+            entry.insert(0, str(ui_state.get(key, default)))
+
+        print(f"Loaded settings: {path}")
+
     # ——— helpers ———
 
     @staticmethod
@@ -195,15 +276,28 @@ class LensCorrectionWindow(ctk.CTkToplevel):
             imgs.extend(glob.glob(os.path.join(folder, ext)))
         return sorted(imgs)
 
+    def _request_cancel(self, quiet=False):
+        if self._job_running:
+            self._cancel_requested = True
+            if not quiet:
+                print("Cancellation requested…")
+
+    def _update_progress_ui(self, value=None, eta_text=None):
+        if value is not None:
+            self.progress_bar.set(value)
+        if eta_text is not None:
+            self.eta_label.configure(text=eta_text)
+
     # ——— reset ———
 
     def _reset(self):
+        self._request_cancel(quiet=True)
         self.input_folder = None
         self.output_folder = None
         self.calibration_data = None
         self.input_label.configure(text="No folder selected")
         self.output_label.configure(text="No output folder selected")
-        self.progress_bar.set(0)
+        self._update_progress_ui(0, "ETA: --")
         self.cols_entry.delete(0, tk.END)
         self.cols_entry.insert(0, "10")
         self.rows_entry.delete(0, tk.END)
@@ -232,8 +326,8 @@ class LensCorrectionWindow(ctk.CTkToplevel):
         fn = getattr(messagebox, f"show{kind}")
         self._ui_call(fn, title, message)
 
-    def _ui_progress(self, value):
-        self._ui_call(self.progress_bar.set, value)
+    def _ui_progress(self, value, eta_text=None):
+        self._ui_call(self._update_progress_ui, value, eta_text)
 
     def _apply_preview(self, vis_bgr, undist_bgr):
         self.axes[0].clear()
@@ -259,8 +353,20 @@ class LensCorrectionWindow(ctk.CTkToplevel):
         }
 
     def _calibrate_threaded(self):
-        cfg = self._collect_calibration_config()
-        threading.Thread(target=self._calibrate, args=(cfg,), daemon=True).start()
+        if self._job_running:
+            messagebox.showinfo("Busy", "Calibration is already running.", parent=self)
+            return
+        try:
+            cfg = self._collect_calibration_config()
+        except Exception as e:
+            messagebox.showerror("Error", str(e), parent=self)
+            return
+        self._cancel_requested = False
+        self._job_running = True
+        self._job_start_time = time.time()
+        self._update_progress_ui(0, "ETA: estimating...")
+        self._worker_thread = threading.Thread(target=self._calibrate, args=(cfg,), daemon=True)
+        self._worker_thread.start()
 
     def _calibrate(self, cfg):
         try:
@@ -326,6 +432,11 @@ class LensCorrectionWindow(ctk.CTkToplevel):
                         cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
 
             for idx, img_path in enumerate(images):
+                if self._cancel_requested:
+                    print("Calibration cancelled.")
+                    self._ui_progress(0, "ETA: Cancelled")
+                    return
+
                 img = cv2.imread(img_path)
                 if img is None:
                     print(f"[WARN] Cannot read: {os.path.basename(img_path)}")
@@ -356,7 +467,8 @@ class LensCorrectionWindow(ctk.CTkToplevel):
                     print(f"  ✗ {os.path.basename(img_path)} — corners NOT found")
 
                 frac = (idx + 1) / len(images)
-                self._ui_progress(frac)
+                eta = compute_eta(self._job_start_time or time.time(), idx + 1, len(images))
+                self._ui_progress(frac, f"ETA: {format_eta(eta)}")
 
             print(f"\nDetected corners in {detected_count}/{len(images)} images.")
 
@@ -445,6 +557,7 @@ class LensCorrectionWindow(ctk.CTkToplevel):
                 undist = cv2.undistort(sample_img, camera_matrix, dist_coeffs, None, new_mtx)
                 self._ui_call(self._apply_preview, vis, undist)
 
+            self._ui_progress(1.0, "ETA: Completed")
             self._ui_message(
                 "info",
                 "Done",
@@ -452,7 +565,11 @@ class LensCorrectionWindow(ctk.CTkToplevel):
 
         except Exception as e:
             print(f"[ERROR] {e}")
+            self._ui_progress(0, "ETA: Error")
             self._ui_message("error", "Error", str(e))
+        finally:
+            self._job_running = False
+            self._worker_thread = None
 
 
 # ——— standalone ———

@@ -43,7 +43,11 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 from PIL import Image, ImageTk
 
-from utils import fit_geometry, resource_path, setup_console, restore_console
+from utils import (
+    fit_geometry, resource_path, setup_console, restore_console,
+    save_settings_json, load_settings_json, bring_child_to_front,
+    format_eta as shared_format_eta,
+)
 
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("green")
@@ -208,7 +212,7 @@ class ColorSpaceExplorerWindow(ctk.CTkToplevel):
         #self.geometry("1400x920")
         fit_geometry(self, 1400,920, resizable = True) 
         try:
-            self.iconbitmap(resource_path("launch_logo.ico"))
+            self.after(200, lambda: self.iconphoto(False, tk.PhotoImage(file=resource_path("launch_logo.png"))))
         except Exception:
             pass
 
@@ -223,6 +227,11 @@ class ColorSpaceExplorerWindow(ctk.CTkToplevel):
         self.sampled_pixels = None   # (M, 3) combined sample for scatter
         self.aoi_polygon_pts = None  # list of (x, y) in full-image coords
         self.aoi_mask = None         # uint8 H×W mask (255 = inside AOI)
+        self._cancel_requested = False
+        self._is_running = False
+        self._analysis_thread = None
+        self._pending_reset = False
+        self._pending_close = False
 
         # ——— layout: 3 rows — plots | console | controls ———
         self.grid_rowconfigure(0, weight=3)
@@ -397,34 +406,43 @@ class ColorSpaceExplorerWindow(ctk.CTkToplevel):
         r3.pack(fill="x", padx=5, pady=2)
 
         ctk.CTkButton(r3, text="Browse Output Folder",
-                      command=self._browse_output, fg_color="#8C7738").grid(
+                      command=self._browse_output, fg_color="#8C7738",hover_color="#B19749").grid(
             row=0, column=0, padx=5, pady=5)
         self.output_label = ctk.CTkLabel(r3, text="No output folder selected")
         self.output_label.grid(row=0, column=1, padx=5, pady=5, sticky="w")
 
+        ctk.CTkButton(r3, text="Save Settings",
+        fg_color="#4F5D75", hover_color="#61708A",
+                      command=self._save_settings).grid(
+            row=0, column=2, padx=5, pady=5)
+        ctk.CTkButton(r3, text="Load Settings",
+        fg_color="#4F5D75", hover_color="#61708A",
+                      command=self._load_settings).grid(
+            row=0, column=3, padx=5, pady=5)
+
         self.progress_bar = ctk.CTkProgressBar(r3, width=200)
-        self.progress_bar.grid(row=0, column=2, padx=10, pady=5)
+        self.progress_bar.grid(row=0, column=4, padx=10, pady=5)
         self.progress_bar.set(0)
 
         self.eta_label = ctk.CTkLabel(r3, text="", font=("Arial", 10),
                                       text_color="gray")
-        self.eta_label.grid(row=0, column=3, padx=3, pady=5, sticky="w")
+        self.eta_label.grid(row=0, column=5, padx=3, pady=5, sticky="w")
 
         ctk.CTkButton(r3, text="Run Analysis",
                       command=self._run_threaded,
-                      fg_color="#0F52BA").grid(
-            row=0, column=4, padx=10, pady=5)
+                      fg_color="#0F52BA",hover_color="#3A7AE0").grid(
+            row=0, column=6, padx=10, pady=5)
 
         ctk.CTkButton(r3, text="Reset", command=self._reset,
                       width=80, fg_color="#8B0000",
                       hover_color="#A52A2A").grid(
-            row=0, column=5, padx=5, pady=5)
+            row=0, column=7, padx=5, pady=5)
 
         ctk.CTkLabel(
             r3,
             text="→ Generates histograms, scatter density, timeline & outlier report",
             font=("Arial", 10), text_color="gray",
-        ).grid(row=0, column=6, padx=5, pady=5, sticky="w")
+        ).grid(row=0, column=8, padx=5, pady=5, sticky="w")
 
         # ———————————— BOTTOM: console ————————————————————————
         self.console_frame = ctk.CTkFrame(self)
@@ -438,6 +456,15 @@ class ColorSpaceExplorerWindow(ctk.CTkToplevel):
     # ——————————————————————————— close handler —————————————————————————
     def _on_close(self):
         """Clean up and close the window."""
+        if self._is_running:
+            self._cancel_requested = True
+            self._pending_close = True
+            self._update_eta("Cancelling…")
+            print("Cancellation requested. Window will close after the current step.")
+            return
+        self._finalize_close()
+
+    def _finalize_close(self):
         restore_console(self._console_redir)
         self.destroy()
 
@@ -504,6 +531,88 @@ class ColorSpaceExplorerWindow(ctk.CTkToplevel):
             self.output_folder = d
             self.output_label.configure(text=d)
 
+    def _save_settings(self):
+        settings = {
+            "paths": {
+                "input_folder": self.input_folder or "",
+                "output_folder": self.output_folder or "",
+            },
+            "ui_state": {
+                "recursive": bool(self.recursive_var.get()),
+                "color_space": self.cs_var.get(),
+                "scatter_x": self.scatter_x_var.get(),
+                "scatter_y": self.scatter_y_var.get(),
+                "sky_pct": self.sky_entry.get().strip(),
+                "ground_pct": self.ground_entry.get().strip(),
+                "pixels_per_image": self.sample_entry.get().strip(),
+                "sigma": self.sigma_entry.get().strip(),
+                "timeline_stat": self.timeline_stat_var.get(),
+                "timestamp_format": self.ts_fmt_entry.get().strip(),
+                "feature_class": self.feature_class_entry.get().strip(),
+            },
+            "selectors": {
+                "aoi_polygon_pts": self.aoi_polygon_pts or [],
+            },
+        }
+        path = save_settings_json(self, "colour_explorer", settings)
+        if path:
+            print(f"Settings saved: {path}")
+
+    def _load_settings(self):
+        data, path = load_settings_json(self, "colour_explorer")
+        if not data:
+            return
+
+        paths = data.get("paths", {})
+        ui = data.get("ui_state", {})
+        selectors = data.get("selectors", {})
+
+        self.input_folder = paths.get("input_folder") or None
+        self.output_folder = paths.get("output_folder") or None
+
+        self.input_label.configure(text=self.input_folder or "No folder selected")
+        self.output_label.configure(text=self.output_folder or "No output folder selected")
+
+        self.recursive_var.set(bool(ui.get("recursive", False)))
+        if ui.get("color_space") in ["RGB", "HSV", "LAB", "Normalised RGB"]:
+            self.cs_var.set(ui.get("color_space"))
+        if ui.get("scatter_x") in ["Ch 0", "Ch 1", "Ch 2"]:
+            self.scatter_x_var.set(ui.get("scatter_x"))
+        if ui.get("scatter_y") in ["Ch 0", "Ch 1", "Ch 2"]:
+            self.scatter_y_var.set(ui.get("scatter_y"))
+
+        self.sky_entry.delete(0, tk.END)
+        self.sky_entry.insert(0, str(ui.get("sky_pct", "0")))
+        self.ground_entry.delete(0, tk.END)
+        self.ground_entry.insert(0, str(ui.get("ground_pct", "0")))
+        self.sample_entry.delete(0, tk.END)
+        self.sample_entry.insert(0, str(ui.get("pixels_per_image", "2000")))
+        self.sigma_entry.delete(0, tk.END)
+        self.sigma_entry.insert(0, str(ui.get("sigma", "2.5")))
+
+        if ui.get("timeline_stat") in ["mean", "median", "std", "p05-p95 range"]:
+            self.timeline_stat_var.set(ui.get("timeline_stat"))
+
+        self.ts_fmt_entry.delete(0, tk.END)
+        if ui.get("timestamp_format"):
+            self.ts_fmt_entry.insert(0, str(ui.get("timestamp_format")))
+
+        self.feature_class_entry.delete(0, tk.END)
+        if ui.get("feature_class"):
+            self.feature_class_entry.insert(0, str(ui.get("feature_class")))
+
+        pts = selectors.get("aoi_polygon_pts") or []
+        self.aoi_polygon_pts = [tuple(p) for p in pts] if pts else None
+        self.aoi_mask = None
+        if self.aoi_polygon_pts:
+            self.aoi_status_label.configure(
+                text=f"AOI loaded: {len(self.aoi_polygon_pts)} vertices (mask rebuilt on next draw/run if needed)"
+            )
+        else:
+            self.aoi_status_label.configure(text="No AOI set (full image)")
+
+        print("Settings loaded.")
+
     def _reset(self):
         self.input_folder = None
         self.output_folder = None
@@ -558,7 +667,7 @@ class ColorSpaceExplorerWindow(ctk.CTkToplevel):
         win = tk.Toplevel(self)
         win.title("Draw AOI Polygon — click vertices, double-click to close")
         win.geometry("920x680")
-        win.grab_set()
+        bring_child_to_front(win, self, modal=True)
 
         canvas = tk.Canvas(win, cursor="cross", bg="black")
         canvas.pack(fill="both", expand=True)
@@ -697,7 +806,15 @@ class ColorSpaceExplorerWindow(ctk.CTkToplevel):
 
     # ——————————————————————————— run analysis —————————————————————————
     def _run_threaded(self):
-        threading.Thread(target=self._run_analysis, daemon=True).start()
+        if self._is_running:
+            self._show_info("Busy", "Analysis is already running.")
+            return
+        self._cancel_requested = False
+        self._pending_reset = False
+        self._pending_close = False
+        self._is_running = True
+        self._analysis_thread = threading.Thread(target=self._run_analysis, daemon=True)
+        self._analysis_thread.start()
 
     def _format_eta(self, elapsed, done, total):
         """Return a human-readable ETA string."""
@@ -705,15 +822,7 @@ class ColorSpaceExplorerWindow(ctk.CTkToplevel):
             return ""
         rate = elapsed / done
         remaining = rate * (total - done)
-        if remaining < 60:
-            return f"{remaining:.0f}s left"
-        elif remaining < 3600:
-            m, s = divmod(remaining, 60)
-            return f"{int(m)}m {int(s)}s left"
-        else:
-            h, rem = divmod(remaining, 3600)
-            m = rem // 60
-            return f"{int(h)}h {int(m)}m left"
+        return shared_format_eta(remaining)
 
     def _ui_call(self, func, *args, **kwargs):
         """Run a UI callback on Tk's main thread."""
@@ -741,10 +850,20 @@ class ColorSpaceExplorerWindow(ctk.CTkToplevel):
     def _draw_canvas(self):
         self._ui_call(self.canvas_plot.draw)
 
+    def _cancel_if_requested(self):
+        if self._cancel_requested:
+            print("\nAnalysis cancelled.")
+            self._update_eta("Cancelled")
+            return True
+        return False
+
     def _run_analysis(self):
         try:
             self._set_progress(0)
             self._update_eta("")
+
+            if self._cancel_if_requested():
+                return
 
             if not self.input_folder:
                 self._show_warning("Warning",
@@ -796,6 +915,8 @@ class ColorSpaceExplorerWindow(ctk.CTkToplevel):
             t_start = time.time()
 
             for idx, img_path in enumerate(images):
+                if self._cancel_if_requested():
+                    return
                 img = cv2.imread(str(img_path))
                 if img is None:
                     print(f"  [SKIP] Cannot read: {img_path.name}")
@@ -856,6 +977,9 @@ class ColorSpaceExplorerWindow(ctk.CTkToplevel):
             print(f"\nProcessed {len(all_stats)} images, "
                   f"{self.sampled_pixels.shape[0]} sampled pixels total.")
 
+            if self._cancel_if_requested():
+                return
+
             # ---- Plot 1: channel histograms (smooth KDE curves) ---------
             print("Generating channel histograms …")
             ax0 = self.axes[0]
@@ -887,6 +1011,9 @@ class ColorSpaceExplorerWindow(ctk.CTkToplevel):
             ax0.grid(True, alpha=0.2)
             self._set_progress(0.7)
 
+            if self._cancel_if_requested():
+                return
+
             # ---- Plot 2: 2-D scatter density --------------------------
             print("Generating 2-D scatter density …")
             ax1 = self.axes[1]
@@ -912,6 +1039,9 @@ class ColorSpaceExplorerWindow(ctk.CTkToplevel):
             ax1.set_ylabel(ch_names[sy])
             ax1.grid(True, alpha=0.2)
             self._set_progress(0.8)
+
+            if self._cancel_if_requested():
+                return
 
             # ---- Plot 3: color timeline -------------------------------
             print("Generating color timeline …")
@@ -971,6 +1101,9 @@ class ColorSpaceExplorerWindow(ctk.CTkToplevel):
             self._draw_canvas()
             self._set_progress(0.9)
 
+            if self._cancel_if_requested():
+                return
+
             # ---- Outlier detection ------------------------------------
             print("\nOutlier detection …")
             sigma = params["sigma_thr"]
@@ -996,6 +1129,9 @@ class ColorSpaceExplorerWindow(ctk.CTkToplevel):
                         "value": means_arr[i, ch_worst],
                     })
 
+            if self._cancel_if_requested():
+                return
+
             if outliers:
                 outliers.sort(key=lambda o: o["max_z"], reverse=True)
                 print(f"  Found {len(outliers)} outlier images "
@@ -1009,6 +1145,9 @@ class ColorSpaceExplorerWindow(ctk.CTkToplevel):
                 print(f"  No outliers found (threshold: {sigma:.1f}σ).")
 
             # ---- Save outputs -----------------------------------------
+            if self._cancel_if_requested():
+                return
+
             if self.output_folder:
                 aoi_active = "yes" if aoi is not None else "no"
 

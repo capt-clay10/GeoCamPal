@@ -9,7 +9,14 @@ import pandas as pd
 from PIL import Image, ImageTk
 import utm
 
-from utils import fit_geometry, resource_path, setup_console, restore_console
+from utils import (
+    fit_geometry,
+    resource_path,
+    setup_console,
+    restore_console,
+    save_settings_json,
+    load_settings_json,
+)
 
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("green")
@@ -80,9 +87,9 @@ class PixelToGCPWindow(ctk.CTkToplevel):
         fit_geometry(self, 1200, 800, resizable=True)
 
         try:
-            self.iconbitmap(resource_path("launch_logo.ico"))
-        except Exception as e:
-            print("Warning: Could not load window icon:", e)
+            self.after(200, lambda: self.iconphoto(False, tk.PhotoImage(file=resource_path("launch_logo.png"))))
+        except Exception:
+            pass  # .ico may not exist on all platforms
 
         # ——— close handler ———
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -242,7 +249,7 @@ class PixelToGCPWindow(ctk.CTkToplevel):
             pnl_output_folder,
             text="Browse Output Folder",
             command=self.browse_output_folder,
-            fg_color="#8C7738",
+            fg_color="#8C7738", hover_color="#A18A45",
         ).pack(side="left")
         self.label_output_folder = ctk.CTkLabel(pnl_output_folder, text="No folder selected")
         self.label_output_folder.pack(side="left", padx=5)
@@ -259,8 +266,25 @@ class PixelToGCPWindow(ctk.CTkToplevel):
             pnl_start,
             text="Start Process",
             command=self.start_process,
-            fg_color="#0F52BA",
+            fg_color="#0F52BA",hover_color="#2A6BD1",
         ).pack(side="left")
+        ctk.CTkButton(
+            pnl_start,
+            text="Save Settings",fg_color="#4F5D75", hover_color="#61708A",
+            command=self.save_settings,
+        ).pack(side="left", padx=5)
+        ctk.CTkButton(
+            pnl_start,
+            text="Load Settings",fg_color="#4F5D75", hover_color="#61708A",
+            command=self.load_settings,
+        ).pack(side="left", padx=5)
+        ctk.CTkButton(
+            pnl_start,
+            text="Reset",
+            command=self.reset_to_initial,
+            fg_color="#8B0000",
+            hover_color="#A52A2A",
+        ).pack(side="left", padx=5)
 
         # BIND keys to the entire window (zoom + next image)
         self.bind("<Return>", self.next_image)
@@ -274,6 +298,100 @@ class PixelToGCPWindow(ctk.CTkToplevel):
         """Clean up and close the window."""
         restore_console(self._console_redir)
         self.destroy()
+
+    def reset_to_initial(self):
+        """Clear current session state and restore the UI defaults."""
+        self.image_folder = None
+        self.gcp_file = None
+        self.output_folder = None
+        self.bad_gcp_list = []
+        self.gcp_df = None
+        self.image_list = []
+        self.current_index = 0
+        self.selected_points = {}
+        self.scale_factor = 1.0
+        self.current_pil_img = None
+        self.current_filename = None
+        self._bg_image_id = None
+        self._bg_photo_ref = None
+        self._vp_render_bounds = None
+        self._vp_render_zoom = None
+        self._scroll_job = None
+        self._selection_ids = []
+
+        self.label_image_folder.configure(text="No folder selected")
+        self.label_gcp_file.configure(text="No file selected")
+        self.label_output_folder.configure(text="No folder selected")
+        self.entry_bad_gcps.delete(0, tk.END)
+        self.entry_output_filename.delete(0, tk.END)
+        self.convert_to_utm_var.set(True)
+
+        try:
+            self.main_canvas.delete("all")
+            self.main_canvas.config(scrollregion=(0, 0, 1, 1))
+        except Exception:
+            pass
+        try:
+            self.overview_canvas.delete("all")
+        except Exception:
+            pass
+        self.title("Pixel to GCP Tool")
+        self.log("Session reset. Ready for new data.")
+
+    def _settings_payload(self):
+        return {
+            "module": "pixel_to_gcp",
+            "settings_version": 1,
+            "paths": {
+                "image_folder": self.image_folder or "",
+                "gcp_file": self.gcp_file or "",
+                "output_folder": self.output_folder or "",
+            },
+            "ui_state": {
+                "bad_gcps": self.entry_bad_gcps.get().strip(),
+                "output_filename": self.entry_output_filename.get().strip(),
+                "convert_to_utm": bool(self.convert_to_utm_var.get()),
+            },
+        }
+
+    def save_settings(self):
+        initialdir = self.output_folder or self.image_folder or os.getcwd()
+        try:
+            path = save_settings_json(self, "pixel_to_gcp", self._settings_payload(), initialdir=initialdir)
+            if path:
+                self.log(f"Settings saved: {path}")
+        except Exception as e:
+            messagebox.showerror("Save Settings", f"Failed to save settings:\n{e}", parent=self)
+
+    def load_settings(self):
+        initialdir = self.output_folder or self.image_folder or os.getcwd()
+        try:
+            data, path = load_settings_json(self, "pixel_to_gcp", initialdir=initialdir)
+            if not data:
+                return
+            paths = data.get("paths", {})
+            state = data.get("ui_state", {})
+
+            self.image_folder = paths.get("image_folder") or None
+            self.gcp_file = paths.get("gcp_file") or None
+            self.output_folder = paths.get("output_folder") or None
+
+            self.label_image_folder.configure(text=self.image_folder or "No folder selected")
+            self.label_gcp_file.configure(text=os.path.basename(self.gcp_file) if self.gcp_file else "No file selected")
+            self.label_output_folder.configure(text=self.output_folder or "No folder selected")
+
+            self.entry_bad_gcps.delete(0, tk.END)
+            if state.get("bad_gcps"):
+                self.entry_bad_gcps.insert(0, str(state.get("bad_gcps")))
+
+            self.entry_output_filename.delete(0, tk.END)
+            if state.get("output_filename"):
+                self.entry_output_filename.insert(0, str(state.get("output_filename")))
+
+            self.convert_to_utm_var.set(bool(state.get("convert_to_utm", True)))
+            self.log(f"Settings loaded: {path}")
+        except Exception as e:
+            messagebox.showerror("Load Settings", f"Failed to load settings:\n{e}", parent=self)
 
     # LOGGING TO CONSOLE
     # ---------------
@@ -388,6 +506,7 @@ class PixelToGCPWindow(ctk.CTkToplevel):
                     df["easting"] = df["longitude"]
                     df["northing"] = df["latitude"]
                     df["EPSG"] = 0
+                    self.log("Using geographic coordinates without UTM conversion: Real_X = longitude, Real_Y = latitude, EPSG = 0")
 
                 self.gcp_df = df
                 self.log(f"GCP file loaded: {os.path.basename(self.gcp_file)}")

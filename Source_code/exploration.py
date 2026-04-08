@@ -26,6 +26,7 @@ import sys
 import os
 import re
 import shutil
+import time
 import threading
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -42,7 +43,10 @@ import customtkinter as ctk
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
-from utils import fit_geometry, resource_path, setup_console, restore_console
+from utils import (
+    fit_geometry, resource_path, setup_console, restore_console,
+    save_settings_json, load_settings_json, compute_eta, format_eta,
+)
 
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("green")
@@ -718,7 +722,7 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
         self.title("Multi-Time-Series Image Explorer")
         fit_geometry(self, 1400, 900, resizable=True)
         try:
-            self.iconbitmap(resource_path("launch_logo.ico"))
+            self.after(200, lambda: self.iconphoto(False, tk.PhotoImage(file=resource_path("launch_logo.png"))))
         except Exception:
             pass
 
@@ -729,6 +733,7 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
         self.image_folder = None
         self.output_folder = None
         self.matched_results = []
+        self._cancel_flag = False
         self.recursive_var = tk.BooleanVar(value=False)
         self.copy_images_var = tk.BooleanVar(value=False)
         self.plot_scatter_list = []   # one scatter per subplot
@@ -776,8 +781,14 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
 
         # start with a single subplot — rebuilt dynamically
         self.fig, self.axes = plt.subplots(1, 1, figsize=(12, 4))
+        self.fig.patch.set_facecolor("#1a1a1a")
         if not isinstance(self.axes, np.ndarray):
             self.axes = np.array([self.axes])
+        for ax in self.axes:
+            ax.set_facecolor("#2b2b2b")
+            ax.tick_params(colors="white", labelsize=8)
+            for spine in ax.spines.values():
+                spine.set_color("#555555")
         self.fig.tight_layout()
 
         self.canvas_plot = FigureCanvasTkAgg(
@@ -861,7 +872,7 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
 
         ctk.CTkButton(actions_bar, text="Browse Output Folder",
                       command=self._browse_output,
-                      fg_color="#8C7738"
+                      fg_color="#8C7738", hover_color="#B19749"
                       ).grid(row=0, column=4, padx=5, pady=5)
         self.output_label = ctk.CTkLabel(
             actions_bar, text="No output folder selected")
@@ -870,18 +881,36 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
 
         ctk.CTkButton(actions_bar, text="Run Analysis",
                       command=self._run_threaded,
-                      fg_color="#0F52BA"
+                      fg_color="#0F52BA", hover_color="#3A7AE0"
                       ).grid(row=0, column=6, padx=10, pady=5)
 
         self.progress_bar = ctk.CTkProgressBar(actions_bar, width=160)
         self.progress_bar.grid(row=0, column=7, padx=5, pady=5)
         self.progress_bar.set(0)
 
-        ctk.CTkButton(actions_bar, text="Reset",
+        self.eta_label = ctk.CTkLabel(actions_bar, text="", width=120)
+        self.eta_label.grid(row=0, column=8, padx=3, pady=5, sticky="w")
+
+
+        # ── Row: settings ──
+        settings_bar = ctk.CTkFrame(self.bottom_panel)
+        settings_bar.pack(fill="x", padx=5, pady=2)
+
+        ctk.CTkButton(settings_bar, text="Save Settings",
+                      command=self._save_settings,
+                      width=100, fg_color="#4F5D75", hover_color="#6C7C97"
+                      ).pack(side="left", padx=5, pady=5)
+
+        ctk.CTkButton(settings_bar, text="Load Settings",
+                      command=self._load_settings,
+                      width=100, fg_color="#4F5D75", hover_color="#6C7C97"
+                      ).pack(side="left", padx=5, pady=5)
+        
+        ctk.CTkButton(settings_bar, text="Reset",
                       command=self._reset,
                       width=80, fg_color="#8B0000",
                       hover_color="#A52A2A"
-                      ).grid(row=0, column=8, padx=5, pady=5)
+                      ).pack(side="left", padx=5, pady=5)
 
     def _create_series_panel(self, idx):
         """Build the widgets for one series input row."""
@@ -1145,10 +1174,22 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
             n_plots = 1
         height_per = max(2.5, 10.0 / n_plots)
         self.fig.set_size_inches(12, height_per * n_plots)
+
+        # Dark-theme styling
+        self.fig.patch.set_facecolor("#1a1a1a")
+
         self.axes = self.fig.subplots(
             n_plots, 1, squeeze=False, sharex=True)[:, 0]
         self.hover_annotations = []
         for ax in self.axes:
+            ax.set_facecolor("#2b2b2b")
+            ax.tick_params(colors="white", labelsize=8)
+            ax.xaxis.label.set_color("white")
+            ax.yaxis.label.set_color("white")
+            ax.title.set_color("white")
+            for spine in ax.spines.values():
+                spine.set_color("#555555")
+
             ann = ax.annotate(
                 "", xy=(0, 0), xytext=(12, 12),
                 textcoords="offset points",
@@ -1180,9 +1221,11 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
                 ax.plot(df["datetime"], df["value"],
                         color=color, linewidth=0.5, alpha=0.6,
                         label=label)
-                ax.set_ylabel(label, fontsize=9)
-                ax.grid(True, alpha=0.3)
-                ax.legend(fontsize="small", loc="upper right")
+                ax.set_ylabel(label, fontsize=9, color="white")
+                ax.grid(True, alpha=0.3, color="#555555")
+                ax.legend(fontsize="small", loc="upper right",
+                          facecolor="#333333", edgecolor="#555555",
+                          labelcolor="white")
 
                 # overlay matched results on this series
                 if results:
@@ -1243,17 +1286,24 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
         for ax in self.axes:
             if ax.get_visible():
                 last_visible = ax
-        last_visible.set_xlabel("Date")
+        last_visible.set_xlabel("Date", color="white")
         last_visible.xaxis.set_major_formatter(
             mdates.DateFormatter(
                 "%Y-%m-%d %H:%M" if results else "%Y-%m-%d"))
 
         if title:
-            self.axes[0].set_title(title, fontsize=11)
+            self.axes[0].set_title(title, fontsize=11, color="white")
 
-        self.fig.autofmt_xdate()
+        self.fig.autofmt_xdate(rotation=30, ha="right")
         self.fig.tight_layout()
-        self.canvas_plot.draw_idle()
+
+        # Force the canvas widget to resize to the updated figure
+        self.canvas_plot.draw()
+        self.canvas_plot.get_tk_widget().configure(
+            width=int(self.fig.get_figwidth() * self.fig.dpi),
+            height=int(self.fig.get_figheight() * self.fig.dpi),
+        )
+        self.canvas_plot.get_tk_widget().update_idletasks()
 
     def _on_plot_hover(self, event):
         if not self.scatter_meta:
@@ -1269,8 +1319,9 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
                 continue
 
             contains, info = scatter.contains(event)
-            if contains and info.get("ind"):
-                i = info["ind"][0]
+            ind = info.get("ind", [])
+            if contains and len(ind) > 0:
+                i = ind[0]
                 meta = meta_batch[i]
                 ann.xy = (mdates.date2num(meta["x"]), meta["y"])
                 ann.set_text(meta["text"])
@@ -1306,12 +1357,14 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
     # ═══════════════════════════════════════════════════════════════════
 
     def _reset(self):
+        self._cancel_flag = True
         self.image_folder = None
         self.output_folder = None
         self.matched_results = []
         self.img_label.configure(text="No folder selected")
         self.output_label.configure(text="No output folder selected")
         self.progress_bar.set(0)
+        self.eta_label.configure(text="")
         self.recursive_var.set(False)
         self.copy_images_var.set(False)
         self.num_series_var.set(1)
@@ -1342,6 +1395,123 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
         print("Session reset.\n--------------------------------")
 
     # ═══════════════════════════════════════════════════════════════════
+    # SAVE / LOAD SETTINGS
+    # ═══════════════════════════════════════════════════════════════════
+
+    def _save_settings(self):
+        n = self._get_active_count()
+        series_data = []
+        for idx in range(n):
+            w = self.series_widgets[idx]
+            series_data.append({
+                "csv_path": self.series_state[idx].get("csv_path") or "",
+                "label": w["label_entry"].get().strip(),
+                "criterion": w["criterion_var"].get(),
+                "threshold": w["thresh_entry"].get().strip(),
+                "tolerance": w["tol_entry"].get().strip(),
+                "peak_sep": w["sep_entry"].get().strip(),
+                "prominence": w["prom_entry"].get().strip(),
+                "nodata": w["nodata_entry"].get().strip(),
+            })
+
+        data = {
+            "paths": {
+                "image_folder": self.image_folder or "",
+                "output_folder": self.output_folder or "",
+            },
+            "global": {
+                "num_series": n,
+                "buffer_min": self.buffer_entry.get().strip(),
+                "filename_format": self.fmt_entry.get().strip(),
+                "recursive": bool(self.recursive_var.get()),
+                "copy_images": bool(self.copy_images_var.get()),
+            },
+            "series": series_data,
+        }
+
+        try:
+            initialdir = self.output_folder or None
+            path = save_settings_json(
+                self, "exploration", data, initialdir=initialdir)
+            if path:
+                print(f"Settings saved: {path}")
+        except Exception as e:
+            messagebox.showerror("Save Settings",
+                                 f"Could not save settings:\n{e}", parent=self)
+
+    def _load_settings(self):
+        try:
+            initialdir = self.output_folder or None
+            data, path = load_settings_json(
+                self, "exploration", initialdir=initialdir)
+            if not data:
+                return
+
+            paths = data.get("paths", {})
+            glb = data.get("global", {})
+            series_list = data.get("series", [])
+
+            # paths
+            self.image_folder = paths.get("image_folder") or None
+            self.output_folder = paths.get("output_folder") or None
+            self.img_label.configure(
+                text=self.image_folder or "No folder selected")
+            self.output_label.configure(
+                text=self.output_folder or "No output folder selected")
+
+            # global params
+            n = int(glb.get("num_series", 1))
+            self.num_series_var.set(n)
+            self._on_num_series_change(n)
+            self.buffer_entry.delete(0, tk.END)
+            self.buffer_entry.insert(0, str(glb.get("buffer_min", "30")))
+            self.fmt_entry.delete(0, tk.END)
+            if glb.get("filename_format"):
+                self.fmt_entry.insert(0, glb["filename_format"])
+            self.recursive_var.set(bool(glb.get("recursive", False)))
+            self.copy_images_var.set(bool(glb.get("copy_images", False)))
+
+            # per-series
+            default_labels = ["Water_Level", "Wave_Height", "Wind_Speed",
+                              "Current", "Series_5"]
+            for idx, sd in enumerate(series_list):
+                if idx >= MAX_SERIES:
+                    break
+                w = self.series_widgets[idx]
+                csv_path = sd.get("csv_path", "")
+                if csv_path:
+                    self.series_state[idx]["csv_path"] = csv_path
+                    w["file_label"].configure(
+                        text=os.path.basename(csv_path))
+                    self._load_series(idx)
+
+                w["label_entry"].delete(0, tk.END)
+                w["label_entry"].insert(
+                    0, sd.get("label", default_labels[idx]))
+
+                criterion = sd.get("criterion", "No Filter")
+                w["criterion_var"].set(criterion)
+                self._on_criterion_change(idx, criterion)
+
+                w["thresh_entry"].delete(0, tk.END)
+                w["thresh_entry"].insert(0, sd.get("threshold", ""))
+                w["tol_entry"].delete(0, tk.END)
+                w["tol_entry"].insert(0, sd.get("tolerance", "0.5"))
+                w["sep_entry"].delete(0, tk.END)
+                w["sep_entry"].insert(0, sd.get("peak_sep", "5"))
+                w["prom_entry"].delete(0, tk.END)
+                w["prom_entry"].insert(0, sd.get("prominence", "0.2"))
+                w["nodata_entry"].delete(0, tk.END)
+                if sd.get("nodata"):
+                    w["nodata_entry"].insert(0, sd["nodata"])
+
+            print(f"Settings loaded: {path}")
+
+        except Exception as e:
+            messagebox.showerror("Load Settings",
+                                 f"Could not load settings:\n{e}", parent=self)
+
+    # ═══════════════════════════════════════════════════════════════════
     # RUN ANALYSIS
     # ═══════════════════════════════════════════════════════════════════
 
@@ -1350,6 +1520,9 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
 
     def _set_progress_safe(self, value):
         self._ui_call(self.progress_bar.set, value)
+
+    def _set_eta_safe(self, text):
+        self._ui_call(self.eta_label.configure, text=text)
 
     def _show_warning_safe(self, title, message):
         self._ui_call(messagebox.showwarning, title, message)
@@ -1407,6 +1580,8 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
             else:
                 messagebox.showerror(title, msg)
             return
+        self._cancel_flag = False
+        self._set_eta_safe("Running…")
         threading.Thread(target=self._run_analysis, args=(cfg,), daemon=True).start()
 
     def _run_analysis(self, cfg):
@@ -1527,11 +1702,19 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
                 print("Copying images …")
                 copy_dir = os.path.join(cfg["output_folder"], f"images_{mode_tag}")
                 os.makedirs(copy_dir, exist_ok=True)
+                t0_copy = time.time()
                 for i, r in enumerate(results):
+                    if self._cancel_flag:
+                        print("Cancelled during copy.")
+                        self._set_eta_safe("Cancelled")
+                        return
                     shutil.copy2(
                         str(r["image_path"]),
                         os.path.join(copy_dir, r["image_path"].name))
-                    self._set_progress_safe(0.6 + 0.35 * (i + 1) / len(results))
+                    frac = 0.6 + 0.35 * (i + 1) / len(results)
+                    self._set_progress_safe(frac)
+                    eta = compute_eta(t0_copy, i + 1, len(results))
+                    self._set_eta_safe(f"Copying {i+1}/{len(results)} — ETA {format_eta(eta)}")
                 print(f"  Copied to: {copy_dir}")
 
             # --- update plot ---
@@ -1541,6 +1724,7 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
                 title=f"Matched: {crit_desc}")
 
             self._set_progress_safe(1.0)
+            self._set_eta_safe("Done")
             self._show_info_safe(
                 "Done",
                 f"Matched {len(results)} images.\n"
@@ -1550,6 +1734,7 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
             print(f"[ERROR] {e}")
             import traceback
             traceback.print_exc()
+            self._set_eta_safe("Error")
             self._show_error_safe("Error", str(e))
 
 

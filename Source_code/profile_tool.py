@@ -38,7 +38,7 @@ import customtkinter as ctk
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
-from utils import fit_geometry, resource_path, setup_console, restore_console
+from utils import fit_geometry, resource_path, setup_console, restore_console, save_settings_json, load_settings_json
 
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("green")
@@ -304,13 +304,13 @@ class ProfileHovmullerWindow(ctk.CTkToplevel):
         self.fmt_entry.grid(row=0, column=1, padx=3, pady=5)
 
         ctk.CTkButton(row3, text="Browse Output Folder",
-                      command=self._browse_output, fg_color="#8C7738").grid(
+                      command=self._browse_output, fg_color="#8C7738", hover_color="#A18A45").grid(
             row=0, column=2, padx=5, pady=5)
         self.output_label = ctk.CTkLabel(row3, text="No output folder")
         self.output_label.grid(row=0, column=3, padx=5, pady=5, sticky="w")
 
         ctk.CTkButton(row3, text="Generate Hovmöller",
-                      command=self._generate_threaded, fg_color="#0F52BA").grid(
+                      command=self._generate_threaded, fg_color="#0F52BA", hover_color="#2A6BD1").grid(
             row=0, column=4, padx=10, pady=5)
 
         self.progress_bar = ctk.CTkProgressBar(row3, width=180)
@@ -321,6 +321,13 @@ class ProfileHovmullerWindow(ctk.CTkToplevel):
             row3, text="Reset", command=self._reset,
             width=80, fg_color="#8B0000", hover_color="#A52A2A")
         self.btn_reset.grid(row=0, column=6, padx=5, pady=5, sticky="e")
+
+        ctk.CTkButton(row3, text="Save Settings", command=self._save_settings,
+                      width=100, fg_color="#4F5D75", hover_color="#61708A").grid(
+            row=0, column=7, padx=5, pady=5)
+        ctk.CTkButton(row3, text="Load Settings", command=self._load_settings,
+                      width=100, fg_color="#4F5D75", hover_color="#61708A").grid(
+            row=0, column=8, padx=5, pady=5)
 
         # ---- CONSOLE ----
         self.console_frame = ctk.CTkFrame(self)
@@ -601,6 +608,78 @@ class ProfileHovmullerWindow(ctk.CTkToplevel):
         self._draw_sample()
 
     # ——— reset ———
+
+    # ═══════════════════════════════════════════════════════════════════
+    # SAVE / LOAD SETTINGS
+    # ═══════════════════════════════════════════════════════════════════
+
+    def _save_settings(self):
+        data = {
+            "paths": {
+                "image_folder": self.image_folder or "",
+                "output_folder": self.output_folder or "",
+            },
+            "profile": {
+                "x1": self.x1_entry.get().strip(),
+                "y1": self.y1_entry.get().strip(),
+                "x2": self.x2_entry.get().strip(),
+                "y2": self.y2_entry.get().strip(),
+                "width": self.width_entry.get().strip(),
+            },
+            "mode": self.mode_var.get(),
+            "filename_format": self.fmt_entry.get().strip(),
+            "recursive": bool(self.recursive_var.get()),
+        }
+        try:
+            initialdir = self.output_folder or None
+            path = save_settings_json(self, "profile_tool", data, initialdir=initialdir)
+            if path:
+                print(f"Settings saved: {path}")
+        except Exception as e:
+            messagebox.showerror("Save Settings", f"Could not save:\n{e}", parent=self)
+
+    def _load_settings(self):
+        try:
+            initialdir = self.output_folder or None
+            data, path = load_settings_json(self, "profile_tool", initialdir=initialdir)
+            if not data:
+                return
+
+            paths = data.get("paths", {})
+            if paths.get("image_folder"):
+                self.image_folder = paths["image_folder"]
+                self.folder_label.configure(text=self.image_folder)
+            if paths.get("output_folder"):
+                self.output_folder = paths["output_folder"]
+                self.output_label.configure(text=self.output_folder)
+
+            prof = data.get("profile", {})
+            for key, entry in [("x1", self.x1_entry), ("y1", self.y1_entry),
+                               ("x2", self.x2_entry), ("y2", self.y2_entry),
+                               ("width", self.width_entry)]:
+                val = prof.get(key, "")
+                entry.delete(0, tk.END)
+                if val:
+                    entry.insert(0, val)
+
+            mode = data.get("mode")
+            if mode in ("RGB", "Intensity"):
+                self.mode_var.set(mode)
+
+            fmt = data.get("filename_format", "")
+            self.fmt_entry.delete(0, tk.END)
+            if fmt:
+                self.fmt_entry.insert(0, fmt)
+
+            self.recursive_var.set(bool(data.get("recursive", False)))
+
+            print(f"Settings loaded: {path}")
+        except Exception as e:
+            messagebox.showerror("Load Settings", f"Could not load:\n{e}", parent=self)
+
+    # ═══════════════════════════════════════════════════════════════════
+    # RESET
+    # ═══════════════════════════════════════════════════════════════════
 
     def _reset(self):
         self.image_folder = None

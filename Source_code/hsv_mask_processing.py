@@ -43,6 +43,14 @@ class HSVMaskProcessingMixin:
             lbl.configure(image=self._blank_img)
             lbl.image = self._blank_img           # keep reference
 
+    @staticmethod
+    def _fit_size(img_w, img_h, panel_w, panel_h):
+        """Return (w, h) that fits img inside panel, preserving aspect ratio."""
+        if img_w <= 0 or img_h <= 0 or panel_w <= 0 or panel_h <= 0:
+            return max(1, panel_w), max(1, panel_h)
+        scale = min(panel_w / img_w, panel_h / img_h, 1.0)
+        return max(1, int(img_w * scale)), max(1, int(img_h * scale))
+
     # --- path display helpers for ML rows ---
     def _shorten_path(self, path, maxlen=40):
         """Return a middle-ellipsized path for display only."""
@@ -182,9 +190,9 @@ class HSVMaskProcessingMixin:
     def update_image_display(self, event=None):
         if self.cv_image is None:
             return
-        width  = self.top_left_frame.winfo_width()
-        height = self.top_left_frame.winfo_height()
-        if width < 1 or height < 1:
+        panel_w = self.top_left_frame.winfo_width()
+        panel_h = self.top_left_frame.winfo_height()
+        if panel_w < 1 or panel_h < 1:
             return
 
         disp = self.cv_image.copy()
@@ -197,11 +205,12 @@ class HSVMaskProcessingMixin:
             w = int(w  * self.scale); h = int(h  * self.scale)
             cv2.rectangle(disp, (x, y), (x + w, y + h), (0, 0, 255), 2)
 
-        # now resize once to panel size
-        resized = cv2.resize(disp, (width, height), interpolation=cv2.INTER_AREA)
+        # Fit to panel preserving aspect ratio
+        fit_w, fit_h = self._fit_size(w0, h0, panel_w, panel_h)
+        resized = cv2.resize(disp, (fit_w, fit_h), interpolation=cv2.INTER_AREA)
         rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
         pil = Image.fromarray(rgb)
-        ctk_img = ctk.CTkImage(light_image=pil, dark_image=pil, size=(width, height))
+        ctk_img = ctk.CTkImage(light_image=pil, dark_image=pil, size=(fit_w, fit_h))
         self.image_label.configure(image=ctk_img)
         self.image_label.image = ctk_img
 
@@ -210,18 +219,22 @@ class HSVMaskProcessingMixin:
         if not self.mask_label.winfo_exists():
             return
         if self.current_mask is not None:
-            width = self.top_center_frame.winfo_width()
-            height = self.top_center_frame.winfo_height()
-            if width > 0 and height > 0:
-                mask_rgb = cv2.cvtColor(self.current_mask, cv2.COLOR_GRAY2RGB)
+            panel_w = self.top_center_frame.winfo_width()
+            panel_h = self.top_center_frame.winfo_height()
+            if panel_w > 0 and panel_h > 0:
+                h0, w0 = self.current_mask.shape[:2]
+                fit_w, fit_h = self._fit_size(w0, h0, panel_w, panel_h)
+                mask_resized = cv2.resize(self.current_mask, (fit_w, fit_h),
+                                          interpolation=cv2.INTER_AREA)
+                mask_rgb = cv2.cvtColor(mask_resized, cv2.COLOR_GRAY2RGB)
                 pil_img = Image.fromarray(mask_rgb)
                 ctk_img = ctk.CTkImage(
-                    light_image=pil_img, dark_image=pil_img, size=(width, height))
+                    light_image=pil_img, dark_image=pil_img, size=(fit_w, fit_h))
                 self.mask_label.configure(image=ctk_img)
                 self.mask_label.image = ctk_img
 
     def update_edge_display(self, event=None):
-        """Display all stored features in the right panel."""
+        """Display all stored features in the right panel (scrollable canvas)."""
         if self.full_image is None:
             return
 
@@ -231,11 +244,17 @@ class HSVMaskProcessingMixin:
         except Exception:
             pass
 
-        width = self.top_right_frame.winfo_width()
-        height = self.top_right_frame.winfo_height()
+        # Use the canvas frame for panel dimensions
+        canvas = getattr(self, '_overlay_canvas', None)
+        if canvas is None:
+            # Fallback: no canvas setup (batch mode)
+            return
+
+        panel_w = canvas.winfo_width()
+        panel_h = canvas.winfo_height()
 
         # If frame is still too small, schedule a retry
-        if width < 50 or height < 50:
+        if panel_w < 50 or panel_h < 50:
             self.after(100, self.update_edge_display)
             return
 
@@ -245,24 +264,40 @@ class HSVMaskProcessingMixin:
                 continue
             pts_np = np.array(points, dtype=np.int32).reshape((-1, 1, 2))
             if feature_type == "polygon":
-                # Outline in green, thickness=2
                 cv2.polylines(overlay, [pts_np], isClosed=True, color=(
                     0, 255, 0), thickness=2)
             else:
-                # polyline
                 thickness = int(self.edge_thickness_slider.get()) if hasattr(
                     self, 'edge_thickness_slider') else 2
                 cv2.polylines(overlay, [pts_np], isClosed=False, color=(
                     0, 255, 0), thickness=thickness)
 
-        resized = cv2.resize(overlay, (width, height),
+        h0, w0 = overlay.shape[:2]
+
+        # Apply overlay zoom factor (default 1.0 = fit-to-panel)
+        overlay_zoom = getattr(self, '_overlay_zoom', 1.0)
+        fit_w, fit_h = self._fit_size(w0, h0, panel_w, panel_h)
+        disp_w = max(1, int(fit_w * overlay_zoom))
+        disp_h = max(1, int(fit_h * overlay_zoom))
+
+        resized = cv2.resize(overlay, (disp_w, disp_h),
                              interpolation=cv2.INTER_AREA)
         overlay_rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
         pil_img = Image.fromarray(overlay_rgb)
-        ctk_img = ctk.CTkImage(light_image=pil_img,
-                               dark_image=pil_img, size=(width, height))
-        self.edge_label.configure(image=ctk_img)
-        self.edge_label.image = ctk_img
+
+        # Draw on the scrollable canvas
+        from PIL import ImageTk
+        photo = ImageTk.PhotoImage(pil_img)
+        self._overlay_photo_ref = photo  # prevent GC
+
+        canvas.delete("all")
+        # Centre image if smaller than canvas, otherwise top-left for scrolling
+        cx = max(0, (panel_w - disp_w) // 2)
+        cy = max(0, (panel_h - disp_h) // 2)
+        canvas.create_image(cx, cy, anchor="nw", image=photo)
+        canvas.configure(scrollregion=(0, 0,
+                                       max(panel_w, disp_w + cx),
+                                       max(panel_h, disp_h + cy)))
 
     # -------------- WINDOW MANAGEMENT --------------
 
@@ -317,6 +352,8 @@ class HSVMaskProcessingMixin:
             return
     
         self.image_path = file_path
+        self._current_input_path = file_path
+        self._current_input_folder = os.path.dirname(file_path)
         self.filename_label.configure(text=os.path.basename(file_path))
         self.full_image = original_image.copy()
         self.compute_full_masks(original_image)
@@ -336,6 +373,7 @@ class HSVMaskProcessingMixin:
             return
         files.sort()
         self.image_files = files
+        self._current_input_folder = folder
         self.current_index = 0
         if self.mode == "batch":
             self.filename_label.configure(
@@ -559,6 +597,9 @@ class HSVMaskProcessingMixin:
         mask_clean = cv2.morphologyEx(mask_full, cv2.MORPH_CLOSE, kernel)
         mask_clean = cv2.morphologyEx(mask_clean, cv2.MORPH_OPEN, kernel)
 
+        # Re-apply alpha/bbox mask to ensure transparent regions are excluded
+        mask_clean = cv2.bitwise_and(mask_clean, bbox_mask)
+
         # ── Apply AOI constraint from AOI / Profile Filter (if active) ──
         if getattr(self, 'use_aoi_filter', None) and self.use_aoi_filter.get() \
                 and getattr(self, 'aoi_mask', None) is not None:
@@ -580,10 +621,18 @@ class HSVMaskProcessingMixin:
         if self.current_mask is None or self.mode == "batch":
             return
         to_show = self.current_mask
-        mask_rgb = cv2.cvtColor(to_show, cv2.COLOR_GRAY2RGB)
+        h0, w0 = to_show.shape[:2]
+        panel_w = self.top_center_frame.winfo_width()
+        panel_h = self.top_center_frame.winfo_height()
+        if panel_w < 1 or panel_h < 1:
+            fit_w, fit_h = w0, h0
+        else:
+            fit_w, fit_h = self._fit_size(w0, h0, panel_w, panel_h)
+        resized = cv2.resize(to_show, (fit_w, fit_h), interpolation=cv2.INTER_AREA)
+        mask_rgb = cv2.cvtColor(resized, cv2.COLOR_GRAY2RGB)
         pil_img = Image.fromarray(mask_rgb)
         ctk_img = ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=(
-            pil_img.width, pil_img.height))
+            fit_w, fit_h))
         self.mask_label.configure(image=ctk_img)
         self.mask_label.image = ctk_img
 
@@ -597,6 +646,25 @@ class HSVMaskProcessingMixin:
         clean_mask = cv2.morphologyEx(clean_mask, cv2.MORPH_CLOSE, kernel)
         clean_mask = cv2.morphologyEx(clean_mask, cv2.MORPH_OPEN, kernel)
         return clean_mask
+
+    def _get_contour_size_limits(self):
+        """Read min/max contour size from advanced settings. Returns (min, max) as floats."""
+        min_size = 0
+        max_size = 0
+        if getattr(self, 'advanced_check_var', None) and self.advanced_check_var.get():
+            try:
+                val = self.min_contour_entry.get().strip()
+                if val:
+                    min_size = float(val)
+            except Exception:
+                pass
+            try:
+                val = self.max_contour_entry.get().strip()
+                if val:
+                    max_size = float(val)
+            except Exception:
+                pass
+        return min_size, max_size
 
     def _get_exclusion_border_mask(self, shape_hw, thickness=3):
         h, w = shape_hw
@@ -626,7 +694,8 @@ class HSVMaskProcessingMixin:
         ys = np.clip(pts[:, 1], 0, h - 1)
         return float(np.mean(border_mask[ys, xs] > 0))
 
-    def _select_primary_contour(self, contours, border_mask, metric="length", prefer_interior=True):
+    def _select_primary_contour(self, contours, border_mask, metric="length",
+                                prefer_interior=True, min_size=0, max_size=0):
         candidates = []
         for cnt in contours:
             if cnt is None or len(cnt) < 3:
@@ -637,21 +706,36 @@ class HSVMaskProcessingMixin:
                 score = float(cv2.arcLength(cnt, True))
             if score <= 0:
                 continue
+
+            # Apply min/max contour size filter (advanced settings)
+            if min_size > 0 and score < min_size:
+                continue
+            if max_size > 0 and score > max_size:
+                continue
+
             touch_ratio = self._contour_touch_ratio(cnt, border_mask)
             candidates.append((cnt, score, touch_ratio))
 
         if not candidates:
             return None
 
-        candidates.sort(key=lambda item: (item[1], -item[2]), reverse=True)
+        # Sort by score descending (largest first)
+        candidates.sort(key=lambda item: item[1], reverse=True)
+        overall_best = candidates[0]
 
         if prefer_interior:
             interior = [item for item in candidates if item[2] <= 0.05]
             if interior:
                 interior.sort(key=lambda item: item[1], reverse=True)
-                return interior[0][0]
+                best_interior = interior[0]
+                # Only prefer interior if it's at least 20% the size of the
+                # overall largest — otherwise the interior contour is just
+                # a small noise blob and the real feature touches the border.
+                if best_interior[1] >= overall_best[1] * 0.20:
+                    return best_interior[0]
 
-        candidates.sort(key=lambda item: (item[2], -item[1]))
+        # Fall back to overall largest (lowest border-touch ratio as tiebreak)
+        candidates.sort(key=lambda item: (-item[1], item[2]))
         return candidates[0][0]
 
     def _contour_to_full_coords(self, contour, approx_factor=0.0015):
@@ -707,8 +791,27 @@ class HSVMaskProcessingMixin:
         if not contours:
             return
 
+        # Read advanced contour size filters
+        min_size, max_size = self._get_contour_size_limits()
+
         border_mask = self._get_exclusion_border_mask(clean_mask.shape[:2], thickness=3)
-        largest = self._select_primary_contour(contours, border_mask, metric="length", prefer_interior=True)
+
+        # Diagnostic: show contour stats
+        scored = [(cv2.arcLength(c, True), self._contour_touch_ratio(c, border_mask))
+                  for c in contours if c is not None and len(c) >= 3]
+        scored.sort(key=lambda x: x[0], reverse=True)
+        n_total = len(scored)
+        n_interior = sum(1 for _, tr in scored if tr <= 0.05)
+        if scored:
+            print(f"[Boundary] {n_total} contours found "
+                  f"({n_interior} interior, {n_total - n_interior} border-touching). "
+                  f"Largest arc length: {scored[0][0]:.0f} px.")
+        if min_size > 0 or max_size > 0:
+            print(f"[Boundary] Advanced filter: min={min_size}, max={max_size}")
+
+        largest = self._select_primary_contour(
+            contours, border_mask, metric="length", prefer_interior=True,
+            min_size=min_size, max_size=max_size)
         if largest is None:
             return
 

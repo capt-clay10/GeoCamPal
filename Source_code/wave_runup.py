@@ -2,6 +2,10 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 from PIL import Image, ImageTk, ImageDraw
 import numpy as np
+
+# np.trapezoid was added in NumPy 1.25; fall back to the deprecated np.trapz
+if not hasattr(np, "trapezoid"):
+    np.trapezoid = np.trapz
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from scipy.signal import welch
@@ -14,7 +18,15 @@ import json
 from collections import defaultdict
 from pathlib import Path
 
-from utils import fit_geometry, resource_path, setup_console, restore_console
+from utils import (
+    fit_geometry,
+    resource_path,
+    setup_console,
+    restore_console,
+    save_settings_json,
+    load_settings_json,
+    format_eta,
+)
 
 # Set appearance
 ctk.set_appearance_mode("Dark")
@@ -212,7 +224,7 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         #self.geometry("1200x800")
         fit_geometry(self, 1400, 800, resizable=True)
         try:
-            self.iconbitmap(resource_path("launch_logo.ico"))
+            self.after(200, lambda: self.iconphoto(False, tk.PhotoImage(file=resource_path("launch_logo.png"))))
         except Exception:
             pass
 
@@ -232,6 +244,9 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         self.batch_raw_folder = ""
         self.batch_mask_folder = ""
         self.batch_progress_bar = None
+        self._cancel_requested = False
+        self._batch_running = False
+        self._batch_start_time = None
 
         # Top frame: three panels
         self.top_frame = ctk.CTkFrame(self, fg_color="black")
@@ -290,16 +305,7 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         self.chk_land_left.grid(row=0, column=2, padx=5, pady=5)
         self.btn_calculate = ctk.CTkButton(self.controls_panel, text="Calculate Runup", command=self.calculate_runup)
         self.btn_calculate.grid(row=0, column=3, padx=5, pady=5)
-        
-        self.btn_reset = ctk.CTkButton(
-            self.controls_panel, 
-            text="Reset", 
-            command=self.reset_all,
-            width=80,
-            fg_color="#8B0000",  # Dark red
-            hover_color="#A52A2A"  # Lighter red on hover
-        )
-        self.btn_reset.grid(row=0, column=4, padx=5, pady=5, sticky="w")
+      
 
         # Resolution
         self.resolution_panel = ctk.CTkFrame(self.bottom_panel)
@@ -327,12 +333,16 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         # Export
         self.export_panel = ctk.CTkFrame(self.bottom_panel)
         self.export_panel.pack(side="top", fill="x", padx=5, pady=2)
-        self.btn_select_out_folder = ctk.CTkButton(self.export_panel, text="Browse Output Folder", command=self.select_output_folder, fg_color="#8C7738")
+        self.btn_select_out_folder = ctk.CTkButton(self.export_panel, text="Browse Output Folder", command=self.select_output_folder, fg_color="#8C7738", hover_color="#A18A45")
         self.btn_select_out_folder.grid(row=0, column=0, padx=5, pady=5)
         self.out_folder_label = ctk.CTkLabel(self.export_panel, text="No folder selected")
         self.out_folder_label.grid(row=0, column=1, padx=5, pady=5, sticky="w")
-        self.btn_export_runup = ctk.CTkButton(self.export_panel, text="Export Runup", command=self.export_runup, fg_color="#0F52BA")
+        self.btn_export_runup = ctk.CTkButton(self.export_panel, text="Export Runup", command=self.export_runup, fg_color="#0F52BA", hover_color="#2A6BD1")
         self.btn_export_runup.grid(row=0, column=2, padx=5, pady=5)
+        self.btn_save_settings = ctk.CTkButton(self.export_panel, text="Save Settings",fg_color="#4F5D75",hover_color="#61708A", command=self.save_settings)
+        self.btn_save_settings.grid(row=0, column=3, padx=5, pady=5)
+        self.btn_load_settings = ctk.CTkButton(self.export_panel, text="Load Settings",fg_color="#4F5D75",hover_color="#61708A", command=self.load_settings)
+        self.btn_load_settings.grid(row=0, column=4, padx=5, pady=5)
 
         # Batch
         self.batch_panel = ctk.CTkFrame(self.bottom_panel)
@@ -345,21 +355,129 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         self.btn_select_batch_mask.grid(row=0, column=2, padx=5, pady=5)
         self.batch_mask_label = ctk.CTkLabel(self.batch_panel, text="No folder selected")
         self.batch_mask_label.grid(row=0, column=3, padx=5, pady=5, sticky="w")
-        self.btn_batch_process = ctk.CTkButton(self.batch_panel, text="Batch Process", command=self.run_batch_process, fg_color="#0F52BA")
+        self.btn_batch_process = ctk.CTkButton(self.batch_panel, text="Batch Process", command=self.run_batch_process, fg_color="#0F52BA", hover_color="#2A6BD1")
         self.btn_batch_process.grid(row=1, column=0, padx=5, pady=5)
         self.batch_progress_bar = ctk.CTkProgressBar(self.batch_panel, width=200)
         self.batch_progress_bar.grid(row=1, column=1, padx=5, pady=5)
         self.batch_progress_bar.set(0)
         self.batch_progress_label = ctk.CTkLabel(self.batch_panel, text="0 / 0 pairs processed")
         self.batch_progress_label.grid(row=1, column=2, padx=5, pady=5, sticky="w")
+        self.batch_eta_label = ctk.CTkLabel(self.batch_panel, text="ETA: --")
+        self.batch_eta_label.grid(row=1, column=3, padx=5, pady=5, sticky="w")
+        
+        self.btn_reset = ctk.CTkButton(
+            self.batch_panel, 
+            text="Reset", 
+            command=self.reset_all,
+            width=80,
+            fg_color="#8B0000",  # Dark red
+            hover_color="#A52A2A"  # Lighter red on hover
+        )
+        self.btn_reset.grid(row=1, column=4, padx=5, pady=5, sticky="w")
 
 
     def _on_close(self):
+        if self._batch_running:
+            self._request_cancel()
+            print("Close requested. The window can be closed after the current batch stops.")
+            return
         restore_console(getattr(self, "_console_redir", None))
         self.destroy()
 
+    def _request_cancel(self):
+        if self._batch_running:
+            self._cancel_requested = True
+            print("Cancellation requested. The current batch will stop after the current file pair.")
+
+    def _update_batch_progress(self, processed, total):
+        total = max(int(total), 1)
+        processed = max(0, int(processed))
+        self.batch_progress_bar.set(processed / total)
+        self.batch_progress_label.configure(text=f"{processed} / {total} pairs processed")
+        if self._batch_start_time and processed > 0:
+            elapsed = max(0.0, datetime.datetime.now().timestamp() - self._batch_start_time)
+            remaining = (elapsed / processed) * max(total - processed, 0)
+            self.batch_eta_label.configure(text=f"ETA: {format_eta(remaining)}")
+        elif processed >= total:
+            self.batch_eta_label.configure(text="ETA: 0s")
+        else:
+            self.batch_eta_label.configure(text="ETA: estimating...")
+
+    def _settings_payload(self):
+        return {
+            "module": "wave_runup",
+            "settings_version": 1,
+            "paths": {
+                "raw_image": self.raw_image_path or "",
+                "annotation": self.mask_image_path or "",
+                "output_folder": self.output_folder or "",
+                "batch_raw_folder": self.batch_raw_folder or "",
+                "batch_mask_folder": self.batch_mask_folder or "",
+            },
+            "ui_state": {
+                "land_left": bool(self.land_left.get()),
+                "manual_resolution": bool(self.manual_res_var.get()),
+                "manual_resolution_value": self.manual_res_entry.get().strip(),
+                "ig_threshold_hz": self.ig_threshold_entry.get().strip(),
+            },
+        }
+
+    def save_settings(self):
+        initialdir = self.output_folder or self.batch_raw_folder or os.getcwd()
+        try:
+            path = save_settings_json(self, "wave_runup", self._settings_payload(), initialdir=initialdir)
+            if path:
+                print(f"Settings saved: {path}")
+        except Exception as e:
+            messagebox.showerror("Save Settings", f"Failed to save settings:\n{e}", parent=self)
+
+    def load_settings(self):
+        initialdir = self.output_folder or self.batch_raw_folder or os.getcwd()
+        try:
+            data, path = load_settings_json(self, "wave_runup", initialdir=initialdir)
+            if not data:
+                return
+            paths = data.get("paths", {})
+            state = data.get("ui_state", {})
+
+            self.output_folder = paths.get("output_folder") or ""
+            self.batch_raw_folder = paths.get("batch_raw_folder") or ""
+            self.batch_mask_folder = paths.get("batch_mask_folder") or ""
+            self.out_folder_label.configure(text=self.output_folder or "No folder selected")
+            self.batch_raw_label.configure(text=self.batch_raw_folder or "No folder selected")
+            self.batch_mask_label.configure(text=self.batch_mask_folder or "No folder selected")
+
+            self.land_left.set(bool(state.get("land_left", False)))
+            self.manual_res_var.set(bool(state.get("manual_resolution", False)))
+            self.manual_res_entry.delete(0, tk.END)
+            if state.get("manual_resolution_value") not in (None, ""):
+                self.manual_res_entry.insert(0, str(state.get("manual_resolution_value")))
+            self.ig_threshold_entry.delete(0, tk.END)
+            self.ig_threshold_entry.insert(0, str(state.get("ig_threshold_hz", "0.05")))
+
+            raw_path = paths.get("raw_image") or ""
+            ann_path = paths.get("annotation") or ""
+            if raw_path and os.path.exists(raw_path):
+                self.load_raw_image(raw_path)
+            else:
+                self.raw_image_path = raw_path
+            if ann_path and os.path.exists(ann_path):
+                self.load_annotation(ann_path)
+            else:
+                self.mask_image_path = ann_path
+
+            print(f"Settings loaded: {path}")
+        except Exception as e:
+            messagebox.showerror("Load Settings", f"Failed to load settings:\n{e}", parent=self)
+
     def reset_all(self):
         """Reset all data and UI elements to initial state."""
+        if self._batch_running:
+            self._request_cancel()
+            print("Reset requested. The current batch will stop after the current file pair.")
+            return
+        self._batch_start_time = None
+        self._cancel_requested = False
         # Clear data holders
         self.raw_image = None
         self.raw_image_path = ""
@@ -383,6 +501,10 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         self.ax.grid(True)
         self.canvas_plot.draw()
         
+        try:
+            ig_threshold_hz = float(self.ig_threshold_entry.get())
+        except Exception:
+            ig_threshold_hz = 0.05
         self.ax_stats_psd.clear()
         self.ax_stats_psd.set_title(f'Power Spectral Density (IG cutoff = {ig_threshold_hz:.3g} Hz)')
         self.ax_stats_swash.clear()
@@ -403,8 +525,9 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         self.console_text.delete(1.0, tk.END)
         print("Session reset. Ready for new data.\n--------------------------------\n")
 
-    def load_raw_image(self):
-        file_path = filedialog.askopenfilename(title="Select Raw Time-Stack Image", filetypes=[("PNG Images", "*.png")])
+    def load_raw_image(self, file_path=None):
+        if not file_path:
+            file_path = filedialog.askopenfilename(parent=self, title="Select Raw Time-Stack Image", filetypes=[("PNG Images", "*.png")])
         if file_path:
             self.raw_image_path = file_path
             self.raw_image = Image.open(file_path)
@@ -414,13 +537,15 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
             self.raw_image_label = tk.Label(self.image_panel, image=self.photo_raw)
             self.raw_image_label.pack(fill="both", expand=True)
 
-    def load_annotation(self):
+    def load_annotation(self, file_path=None):
         """
         Load runup annotation from mask PNG, GeoJSON, or COCO JSON file.
         Automatically detects format based on file extension.
         """
-        file_path = filedialog.askopenfilename(
-            title="Select Runup Annotation", 
+        if not file_path:
+            file_path = filedialog.askopenfilename(
+                parent=self,
+                title="Select Runup Annotation", 
             filetypes=[
                 ("All Supported", "*.png *.geojson *.json"),
                 ("PNG Mask", "*.png"),
@@ -711,8 +836,8 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         pos = fxx > 0
         fxx, pxx = fxx[pos], pxx[pos]
         ig_mask = fxx < ig_threshold_hz
-        E_ig = np.trapz(pxx[ig_mask], fxx[ig_mask])
-        E_tot = np.trapz(pxx, fxx)
+        E_ig = np.trapezoid(pxx[ig_mask], fxx[ig_mask])
+        E_tot = np.trapezoid(pxx, fxx)
         ig_pct = 100 * E_ig / E_tot if E_tot > 0 else 0
 
         # PSD plot
@@ -739,7 +864,7 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         self.canvas_stats.draw()
 
     def select_output_folder(self):
-        folder = filedialog.askdirectory(title="Select Output Folder")
+        folder = filedialog.askdirectory(parent=self, title="Select Output Folder")
         if folder:
             self.output_folder = folder
             self.out_folder_label.configure(text=folder)
@@ -772,13 +897,13 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         messagebox.showinfo("Export Runup", f"Exported to:\n{out_path}")
 
     def select_batch_raw_folder(self):
-        folder = filedialog.askdirectory(title="Select Folder with Raw TS Images")
+        folder = filedialog.askdirectory(parent=self, title="Select Folder with Raw TS Images")
         if folder:
             self.batch_raw_folder = folder
             self.batch_raw_label.configure(text=folder)
 
     def select_batch_mask_folder(self):
-        folder = filedialog.askdirectory(title="Select Folder with Annotations (Masks/GeoJSON/JSON)")
+        folder = filedialog.askdirectory(parent=self, title="Select Folder with Annotations (Masks/GeoJSON/JSON)")
         if folder:
             self.batch_mask_folder = folder
             self.batch_mask_label.configure(text=folder)
@@ -845,8 +970,10 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
             self.output_folder = self.batch_raw_folder
 
         # Reset progress UI
-        self.batch_progress_bar.set(0)
-        self.batch_progress_label.configure(text=f"0 / {total_pairs} pairs processed")
+        self._cancel_requested = False
+        self._batch_running = True
+        self._batch_start_time = datetime.datetime.now().timestamp()
+        self._update_batch_progress(0, total_pairs)
         self.update()
 
         all_runup_data = []
@@ -854,6 +981,10 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
 
         # 5) Loop through each pair
         for raw_name, annotation_name in valid_pairs:
+            if self._cancel_requested:
+                print("Batch process cancelled by user.")
+                break
+
             raw_path = os.path.join(self.batch_raw_folder, raw_name)
             annotation_path = os.path.join(self.batch_mask_folder, annotation_name)
 
@@ -925,8 +1056,7 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
             all_runup_data.append((d_sorted, t_sorted))
             processed += 1
             print(f"Processed: {raw_name} + {annotation_name} ({ann_format})")
-            self.batch_progress_bar.set(processed / total_pairs)
-            self.batch_progress_label.configure(text=f"{processed} / {total_pairs} pairs processed")
+            self._update_batch_progress(processed, total_pairs)
             self.update()
 
         # 6) Plot aggregated runup contours
@@ -952,8 +1082,8 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
             pos = fxx > 0
             fxx, pxx = fxx[pos], pxx[pos]
             ig_mask = fxx < ig_threshold_hz
-            E_ig = np.trapz(pxx[ig_mask], fxx[ig_mask])
-            E_tot = np.trapz(pxx, fxx)
+            E_ig = np.trapezoid(pxx[ig_mask], fxx[ig_mask])
+            E_tot = np.trapezoid(pxx, fxx)
             ig_pct = 100 * E_ig / E_tot if E_tot > 0 else 0
             ig_list.append(ig_pct)
             inc_list.append(100 - ig_pct)
@@ -979,7 +1109,15 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         self.fig_stats.tight_layout()
         self.canvas_stats.draw()
 
-        messagebox.showinfo("Batch Process", "Batch processing completed.")
+        self._batch_running = False
+        self._batch_start_time = None
+        if self._cancel_requested:
+            self._cancel_requested = False
+            self.batch_eta_label.configure(text="ETA: cancelled")
+            messagebox.showinfo("Batch Process", "Batch processing cancelled.", parent=self)
+        else:
+            self._update_batch_progress(processed, total_pairs)
+            messagebox.showinfo("Batch Process", "Batch processing completed.", parent=self)
 
 
 def main():
