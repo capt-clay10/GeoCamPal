@@ -248,7 +248,7 @@ def launcher_window():
         "creator: Clayton Soares\n"
         "contact: clayton.soares@ifg.uni-kiel.de\n"
         "Institute: Institute of Geosciences, CAU, Kiel\n"
-        "source code: https://github.com/capt-clay10/GeoCamPal.git"
+        "source code (v1.0.0) : https://github.com/capt-clay10/GeoCamPal.git"
     )
     footer = ctk.CTkLabel(
         frame,
