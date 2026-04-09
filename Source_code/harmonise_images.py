@@ -508,7 +508,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
         #self.geometry("1400x1020")
         fit_geometry(self, 1400, 1020, resizable=True)
         try:
-            self.after(200, lambda: self.iconphoto(False, tk.PhotoImage(file=resource_path("launch_logo.png"))))
+            self.iconbitmap(resource_path("launch_logo.ico"))
         except Exception:
             pass
 
@@ -705,7 +705,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
 
         ctk.CTkButton(row3, text="Preview",
                       command=self._preview_brightness_threaded,
-                      fg_color="#2E8B57", width=80).grid(
+                      fg_color="#2E8B57", hover_color="#3AA86A", width=80).grid(
             row=0, column=6, padx=3, pady=3)
 
         ctk.CTkButton(row3, text="Run Brightness",
@@ -751,7 +751,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
 
         ctk.CTkButton(row4, text="Preview",
                       command=self._preview_colour_threaded,
-                      fg_color="#2E8B57", width=80).grid(
+                      fg_color="#2E8B57", hover_color="#3AA86A", width=80).grid(
             row=0, column=6, padx=3, pady=3)
 
         ctk.CTkButton(row4, text="Run Colour",
@@ -803,11 +803,11 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
         self.eta_label.grid(row=0, column=3, padx=5, pady=5)
 
         self.btn_save_settings = ctk.CTkButton(
-            row5, text="Save Settings",fg_color="#4F5D75",hover_color="#61708A", command=self._save_settings, width=110)
+            row5, text="Save Settings",fg_color="#4F5D75", hover_color="#61708A", command=self._save_settings, width=110)
         self.btn_save_settings.grid(row=0, column=4, padx=5, pady=5)
 
         self.btn_load_settings = ctk.CTkButton(
-            row5, text="Load Settings",fg_color="#4F5D75",hover_color="#61708A", command=self._load_settings, width=110)
+            row5, text="Load Settings",fg_color="#4F5D75", hover_color="#61708A", command=self._load_settings, width=110)
         self.btn_load_settings.grid(row=0, column=5, padx=5, pady=5)
 
         self.btn_reset = ctk.CTkButton(
@@ -837,7 +837,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
         self.btn_accept = ctk.CTkButton(
             self.preview_nav_frame, text="Accept & Process All",
             command=self._accept_preview,
-            fg_color="#2E8B57", hover_color="#3CB371", width=180)
+            fg_color="#2E8B57", hover_color="#3AA86A", width=180)
         self.btn_accept.pack(side="left", padx=20, pady=5)
 
         self.btn_cancel_preview = ctk.CTkButton(
@@ -2026,11 +2026,15 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
                     continue
 
                 avg = np.clip(accum / valid_count, 0, 255).astype(np.uint8)
+
+                # Preserve folder structure: output_folder / inputname_averaged / relative_path
+                out_root = self._build_output_root(cfg["output_folder"], input_root, "averaged")
                 if cfg["recursive"]:
                     rel = folder_path.relative_to(input_root)
-                    out_dir = Path(cfg["output_folder"]) / rel
+                    out_dir = out_root / rel
                 else:
-                    out_dir = Path(cfg["output_folder"]) / input_root.name
+                    out_dir = out_root
+
                 out_dir.mkdir(parents=True, exist_ok=True)
                 out_name = f"{folder_path.name}_average.png"
                 out_path = out_dir / out_name

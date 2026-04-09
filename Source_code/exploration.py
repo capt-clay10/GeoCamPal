@@ -722,7 +722,7 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
         self.title("Multi-Time-Series Image Explorer")
         fit_geometry(self, 1400, 900, resizable=True)
         try:
-            self.after(200, lambda: self.iconphoto(False, tk.PhotoImage(file=resource_path("launch_logo.png"))))
+            self.iconbitmap(resource_path("launch_logo.ico"))
         except Exception:
             pass
 
@@ -824,6 +824,13 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
             values=[str(i) for i in range(1, MAX_SERIES + 1)],
             command=lambda v: self._on_num_series_change(int(v)),
             width=60,
+            fg_color="white",
+            text_color="black",
+            button_color="white",
+            button_hover_color="#E0E0E0",
+            dropdown_fg_color="white",
+            dropdown_text_color="black",
+            dropdown_hover_color="#E0E0E0",
         )
         self.num_series_menu.grid(row=0, column=1, padx=5, pady=3)
 
@@ -872,7 +879,7 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
 
         ctk.CTkButton(actions_bar, text="Browse Output Folder",
                       command=self._browse_output,
-                      fg_color="#8C7738", hover_color="#B19749"
+                      fg_color="#8C7738", hover_color="#A18A45"
                       ).grid(row=0, column=4, padx=5, pady=5)
         self.output_label = ctk.CTkLabel(
             actions_bar, text="No output folder selected")
@@ -881,7 +888,7 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
 
         ctk.CTkButton(actions_bar, text="Run Analysis",
                       command=self._run_threaded,
-                      fg_color="#0F52BA", hover_color="#3A7AE0"
+                      fg_color="#0F52BA", hover_color="#2A6BD1"
                       ).grid(row=0, column=6, padx=10, pady=5)
 
         self.progress_bar = ctk.CTkProgressBar(actions_bar, width=160)
@@ -891,19 +898,20 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
         self.eta_label = ctk.CTkLabel(actions_bar, text="", width=120)
         self.eta_label.grid(row=0, column=8, padx=3, pady=5, sticky="w")
 
-
         # ── Row: settings ──
         settings_bar = ctk.CTkFrame(self.bottom_panel)
         settings_bar.pack(fill="x", padx=5, pady=2)
 
         ctk.CTkButton(settings_bar, text="Save Settings",
                       command=self._save_settings,
-                      width=100, fg_color="#4F5D75", hover_color="#6C7C97"
+                      width=100, fg_color="#4F5D75",
+                      hover_color="#61708A"
                       ).pack(side="left", padx=5, pady=5)
 
         ctk.CTkButton(settings_bar, text="Load Settings",
                       command=self._load_settings,
-                      width=100, fg_color="#4F5D75", hover_color="#6C7C97"
+                      width=100, fg_color="#4F5D75",
+                      hover_color="#61708A"
                       ).pack(side="left", padx=5, pady=5)
         
         ctk.CTkButton(settings_bar, text="Reset",
@@ -911,6 +919,7 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
                       width=80, fg_color="#8B0000",
                       hover_color="#A52A2A"
                       ).pack(side="left", padx=5, pady=5)
+
 
     def _create_series_panel(self, idx):
         """Build the widgets for one series input row."""
@@ -955,7 +964,15 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
         w["criterion_menu"] = ctk.CTkOptionMenu(
             frame, variable=w["criterion_var"],
             values=CRITERIA, width=160,
-            command=lambda v, i=idx: self._on_criterion_change(i, v))
+            command=lambda v, i=idx: self._on_criterion_change(i, v),
+            fg_color="white",
+            text_color="black",
+            button_color="white",
+            button_hover_color="#E0E0E0",
+            dropdown_fg_color="white",
+            dropdown_text_color="black",
+            dropdown_hover_color="#E0E0E0",
+        )
         w["criterion_menu"].grid(row=1, column=1, padx=3, pady=2,
                                   columnspan=2)
 
@@ -1090,6 +1107,7 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
 
     def _browse_series_csv(self, idx):
         p = filedialog.askopenfilename(
+            parent=self,
             title=f"Select CSV for Series {idx + 1}",
             filetypes=[("CSV / TXT", "*.csv *.txt *.dat")])
         if p:
@@ -1099,13 +1117,13 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
             self._load_series(idx)
 
     def _browse_images(self):
-        d = filedialog.askdirectory(title="Select Image Folder")
+        d = filedialog.askdirectory(parent=self, title="Select Image Folder")
         if d:
             self.image_folder = d
             self.img_label.configure(text=d)
 
     def _browse_output(self):
-        d = filedialog.askdirectory(title="Select Output Folder")
+        d = filedialog.askdirectory(parent=self, title="Select Output Folder")
         if d:
             self.output_folder = d
             self.output_label.configure(text=d)
@@ -1172,8 +1190,16 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
         self.fig.clear()
         if n_plots <= 0:
             n_plots = 1
-        height_per = max(2.5, 10.0 / n_plots)
-        self.fig.set_size_inches(12, height_per * n_plots)
+
+        # Use the actual panel size rather than a hardcoded figure size
+        try:
+            panel_w = self.plot_canvas_frame.winfo_width()
+            panel_h = self.plot_canvas_frame.winfo_height()
+            if panel_w > 100 and panel_h > 100:
+                dpi = self.fig.dpi
+                self.fig.set_size_inches(panel_w / dpi, panel_h / dpi)
+        except Exception:
+            pass
 
         # Dark-theme styling
         self.fig.patch.set_facecolor("#1a1a1a")
@@ -1183,7 +1209,8 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
         self.hover_annotations = []
         for ax in self.axes:
             ax.set_facecolor("#2b2b2b")
-            ax.tick_params(colors="white", labelsize=8)
+            ax.tick_params(axis="both", colors="white", labelsize=8,
+                           which="both")
             ax.xaxis.label.set_color("white")
             ax.yaxis.label.set_color("white")
             ax.title.set_color("white")
@@ -1265,7 +1292,7 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
                         })
 
                     if xs:
-                        sc = ax.scatter(xs, ys, c=cs, s=36,
+                        sc = ax.scatter(xs, ys, c=cs, s=12,
                                         zorder=5, picker=True)
                         self.plot_scatter_list.append(
                             (ax_idx, sc, meta_batch))
@@ -1292,18 +1319,36 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
                 "%Y-%m-%d %H:%M" if results else "%Y-%m-%d"))
 
         if title:
-            self.axes[0].set_title(title, fontsize=11, color="white")
+            # Wrap long titles at AND boundaries for readability
+            if len(title) > 100:
+                title = title.replace(" AND ", "\nAND ")
+            # Adapt font size to title length so it fits the panel
+            line_count = title.count("\n") + 1
+            base_len = max(len(line) for line in title.split("\n"))
+            if base_len > 120 or line_count > 3:
+                fs = 6
+            elif base_len > 80 or line_count > 2:
+                fs = 7
+            elif base_len > 60:
+                fs = 8
+            else:
+                fs = 9
+            self.axes[0].set_title(title, fontsize=fs, color="white")
 
         self.fig.autofmt_xdate(rotation=30, ha="right")
-        self.fig.tight_layout()
 
-        # Force the canvas widget to resize to the updated figure
+        # Re-apply white tick colors after autofmt_xdate (it can reset them)
+        for ax in self.axes:
+            if ax.get_visible():
+                ax.tick_params(axis="both", colors="white", labelsize=8,
+                               which="both")
+                for label in ax.get_xticklabels():
+                    label.set_color("white")
+                for label in ax.get_yticklabels():
+                    label.set_color("white")
+
+        self.fig.tight_layout()
         self.canvas_plot.draw()
-        self.canvas_plot.get_tk_widget().configure(
-            width=int(self.fig.get_figwidth() * self.fig.dpi),
-            height=int(self.fig.get_figheight() * self.fig.dpi),
-        )
-        self.canvas_plot.get_tk_widget().update_idletasks()
 
     def _on_plot_hover(self, event):
         if not self.scatter_meta:
@@ -1630,9 +1675,38 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
                 })
 
             # --- summarise ---
+            def _describe_criterion(sc):
+                label = sc['label']
+                crit = sc['criterion']
+                params = sc.get('params', {})
+                desc = f"[{label}: {crit}"
+                if crit in ("Above Threshold", "Below Threshold"):
+                    thresh = params.get("threshold")
+                    if thresh is not None:
+                        desc += f" = {thresh}"
+                elif crit == "Near Target Value":
+                    target = params.get("target")
+                    tol = params.get("tolerance")
+                    if target is not None:
+                        desc += f" = {target}"
+                    if tol is not None:
+                        desc += f" ± {tol}"
+                elif crit in ("Peaks (Maxima)", "Troughs (Minima)",
+                              "Spring Tide Peaks", "Neap Tide Peaks"):
+                    prom = params.get("min_prominence")
+                    sep = params.get("min_sep_hours")
+                    parts = []
+                    if prom is not None:
+                        parts.append(f"prom={prom}")
+                    if sep is not None:
+                        parts.append(f"sep={sep}h")
+                    if parts:
+                        desc += f" ({', '.join(parts)})"
+                desc += "]"
+                return desc
+
             crit_desc = " AND ".join(
-                f"[{sc['label']}: {sc['criterion']}]"
-                for sc in series_configs)
+                _describe_criterion(sc) for sc in series_configs)
             print(f"\n=== Multi-Series Analysis ===")
             print(f"Criteria (AND): {crit_desc}")
             print(f"Search buffer: ±{buffer_min} min")
@@ -1718,10 +1792,12 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
                 print(f"  Copied to: {copy_dir}")
 
             # --- update plot ---
+            plot_title = (f"Matched {len(results)} images | {crit_desc} | "
+                          f"buffer ±{buffer_min} min")
             self._ui_call(
                 self._refresh_plot,
                 results=results,
-                title=f"Matched: {crit_desc}")
+                title=plot_title)
 
             self._set_progress_safe(1.0)
             self._set_eta_safe("Done")
