@@ -98,6 +98,7 @@ class CreateDemWindow(ctk.CTkToplevel):
         console_frame.pack(side="bottom", fill="both", expand=False, padx=5, pady=5)
         self.console_text = tk.Text(console_frame, wrap="word", height=10)
         self.console_text.pack(fill="both", expand=True, padx=5, pady=5)
+        
         self._console_redir = setup_console(
             self.console_text,
             "Here you may see console outputs\n--------------------------------\n",
@@ -312,6 +313,7 @@ class CreateDemWindow(ctk.CTkToplevel):
 
         self.console_text.delete("1.0", tk.END)
         print("--- Session reset. All caches cleared. ---\n")
+        print("Here you may see console outputs\n--------------------------------\n")
 
     # ————————————————————————— data loading & plotting ————————————————
     def load_data_if_needed(self):

@@ -369,7 +369,7 @@ class HSVMaskProcessingMixin:
             folder) if f.lower().endswith(exts)]
         if not files:
             messagebox.showerror(
-                "Error", "No valid image files found in folder.")
+                "Error", "No valid image files found in folder.", parent=self)
             return
         files.sort()
         self.image_files = files
@@ -437,7 +437,7 @@ class HSVMaskProcessingMixin:
         file_path = self.image_files[self.current_index]
         original_image = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
         if original_image is None:
-            messagebox.showerror("Error", f"Failed to load image {file_path}")
+            messagebox.showerror("Error", f"Failed to load image {file_path}", parent=self)
             return
 
         # Update references
@@ -460,7 +460,7 @@ class HSVMaskProcessingMixin:
                 self.update_image_display()
                 self.update_mask_display()
             else:
-                messagebox.showinfo("Info", "Already at the last image.")
+                messagebox.showinfo("Info", "Already at the last image.", parent=self)
 
     def prev_image(self):
         self._restore_center_mask_panel()
@@ -474,7 +474,7 @@ class HSVMaskProcessingMixin:
                 self.update_image_display()
                 self.update_mask_display()
             else:
-                messagebox.showinfo("Info", "Already at the first image.")
+                messagebox.showinfo("Info", "Already at the first image.", parent=self)
 
     def compute_full_masks(self, original_image):
         if original_image.ndim == 3 and original_image.shape[2] == 4:
@@ -538,7 +538,7 @@ class HSVMaskProcessingMixin:
                     x, y, w, h = map(int, bbox_text.split(","))
                 except Exception as e:
                     messagebox.showerror(
-                        "Error", f"Invalid bounding box format: {e}")
+                        "Error", f"Invalid bounding box format: {e}", parent=self)
                     return
                 x = int(x * self.scale)
                 y = int(y * self.scale)
@@ -1101,7 +1101,7 @@ class HSVMaskProcessingMixin:
           4) Extract shoreline from FULL-res mask (avoids thin-line loss)
         """
         if self.full_image is None:
-            messagebox.showwarning("Image", "Please load an image first.")
+            messagebox.showwarning("Image", "Please load an image first.", parent=self)
             return
 
         # Resolve mask path
@@ -1109,30 +1109,30 @@ class HSVMaskProcessingMixin:
         if self.mode == "individual":
             mask_path = self.ml_mask_file_path.get().strip()
             if not mask_path:
-                messagebox.showwarning("ML mask", "Please load an associated mask.")
+                messagebox.showwarning("ML mask", "Please load an associated mask.", parent=self)
                 return
         elif self.mode == "ml":
             if not self.image_files:
-                messagebox.showwarning("Folder", "Please load an image folder first.")
+                messagebox.showwarning("Folder", "Please load an image folder first.", parent=self)
                 return
             folder = self.ml_mask_folder_path.get().strip()
             if not folder:
-                messagebox.showwarning("Mask folder", "Please load the associated mask folder.")
+                messagebox.showwarning("Mask folder", "Please load the associated mask folder.", parent=self)
                 return
             cur_img = self.image_files[self.current_index]
             base = os.path.splitext(os.path.basename(cur_img))[0]
             mask_path = self._best_match_in_folder(base, folder, self.common_name_len_var.get())
             if mask_path is None:
-                messagebox.showerror("Mask match", f"No matching mask found for:\n{os.path.basename(cur_img)}")
+                messagebox.showerror("Mask match", f"No matching mask found for:\n{os.path.basename(cur_img)}", parent=self)
                 return
         else:
-            messagebox.showwarning("Mode", "Extract Boundary with Mask is not available in batch mode.")
+            messagebox.showwarning("Mode", "Extract Boundary with Mask is not available in batch mode.", parent=self)
             return
 
         # Read mask (your _read_mask_image already returns binary-ish)
         m = self._read_mask_image(mask_path)
         if m is None:
-            messagebox.showerror("Mask", f"Failed to read mask:\n{mask_path}")
+            messagebox.showerror("Mask", f"Failed to read mask:\n{mask_path}", parent=self)
             return
 
         # --- FULL resolution mask for extraction ---
@@ -1158,7 +1158,7 @@ class HSVMaskProcessingMixin:
             self.current_mask = np.zeros(self.cv_image.shape[:2], dtype=np.uint8) if self.cv_image is not None else None
             if self.current_mask is not None:
                 self.display_mask()
-            messagebox.showwarning("Edge", "Mask became empty after binarization/bbox clipping.")
+            messagebox.showwarning("Edge", "Mask became empty after binarization/bbox clipping.", parent=self)
             return
 
         # --- CV resolution mask only for display ---
@@ -1187,7 +1187,7 @@ class HSVMaskProcessingMixin:
 
         pts_full = self._centerline_polyline_from_skeleton(skel)
         if len(pts_full) < 2:
-            messagebox.showwarning("Edge", "No boundary could be extracted from the mask.")
+            messagebox.showwarning("Edge", "No boundary could be extracted from the mask.", parent=self)
             return
         
         if len(pts_full) >= 3:
@@ -1214,7 +1214,7 @@ class HSVMaskProcessingMixin:
             y_src = round(y_mask * (src_h / mask_h))
         """
         if self.full_image is None:
-            messagebox.showwarning("Image", "Please load an image first.")
+            messagebox.showwarning("Image", "Please load an image first.", parent=self)
             return
 
         # ── Resolve mask path (same logic as calculate_edge_with_ml_mask) ──
@@ -1222,30 +1222,30 @@ class HSVMaskProcessingMixin:
         if self.mode == "individual":
             mask_path = self.ml_mask_file_path.get().strip()
             if not mask_path:
-                messagebox.showwarning("ML mask", "Please load an associated mask.")
+                messagebox.showwarning("ML mask", "Please load an associated mask.", parent=self)
                 return
         elif self.mode == "ml":
             if not self.image_files:
-                messagebox.showwarning("Folder", "Please load an image folder first.")
+                messagebox.showwarning("Folder", "Please load an image folder first.", parent=self)
                 return
             folder = self.ml_mask_folder_path.get().strip()
             if not folder:
-                messagebox.showwarning("Mask folder", "Please load the associated mask folder.")
+                messagebox.showwarning("Mask folder", "Please load the associated mask folder.", parent=self)
                 return
             cur_img = self.image_files[self.current_index]
             base = os.path.splitext(os.path.basename(cur_img))[0]
             mask_path = self._best_match_in_folder(base, folder, self.common_name_len_var.get())
             if mask_path is None:
-                messagebox.showerror("Mask match", f"No matching mask found for:\n{os.path.basename(cur_img)}")
+                messagebox.showerror("Mask match", f"No matching mask found for:\n{os.path.basename(cur_img)}", parent=self)
                 return
         else:
-            messagebox.showwarning("Mode", "Extract Polygon with Mask is not available in batch mode.")
+            messagebox.showwarning("Mode", "Extract Polygon with Mask is not available in batch mode.", parent=self)
             return
 
         # ── Read mask ──
         m = self._read_mask_image(mask_path)
         if m is None:
-            messagebox.showerror("Mask", f"Failed to read mask:\n{mask_path}")
+            messagebox.showerror("Mask", f"Failed to read mask:\n{mask_path}", parent=self)
             return
 
         # ── Resize mask to full-image dimensions ──
@@ -1271,7 +1271,7 @@ class HSVMaskProcessingMixin:
             self.current_mask = np.zeros(self.cv_image.shape[:2], dtype=np.uint8) if self.cv_image is not None else None
             if self.current_mask is not None:
                 self.display_mask()
-            messagebox.showwarning("Polygon", "Mask became empty after binarization/bbox clipping.")
+            messagebox.showwarning("Polygon", "Mask became empty after binarization/bbox clipping.", parent=self)
             return
 
         # ── Update display mask ──
@@ -1290,7 +1290,7 @@ class HSVMaskProcessingMixin:
         # ── Fill interior holes ──
         ext_cnts, _ = cv2.findContours(m_full, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if not ext_cnts:
-            messagebox.showwarning("Polygon", "No contours found in mask after cleanup.")
+            messagebox.showwarning("Polygon", "No contours found in mask after cleanup.", parent=self)
             return
         filled = np.zeros_like(m_full)
         cv2.drawContours(filled, ext_cnts, -1, 255, thickness=cv2.FILLED)
@@ -1298,7 +1298,7 @@ class HSVMaskProcessingMixin:
         # ── Find contours on hole-free mask ──
         contours, _ = cv2.findContours(filled, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
         if not contours:
-            messagebox.showwarning("Polygon", "No contours on filled mask.")
+            messagebox.showwarning("Polygon", "No contours on filled mask.", parent=self)
             return
 
         # ── Filter by minimum area (0.1% of image) and sort largest-first ──
@@ -1306,7 +1306,7 @@ class HSVMaskProcessingMixin:
         scored = [(cnt, cv2.contourArea(cnt)) for cnt in contours
                   if cv2.contourArea(cnt) >= min_area]
         if not scored:
-            messagebox.showwarning("Polygon", "No contours above minimum area.")
+            messagebox.showwarning("Polygon", "No contours above minimum area.", parent=self)
             return
         scored.sort(key=lambda x: x[1], reverse=True)
 
@@ -1334,7 +1334,7 @@ class HSVMaskProcessingMixin:
                 self.edge_points = pts
 
         if not self.features:
-            messagebox.showwarning("Polygon", "Could not form valid polygon(s) from mask.")
+            messagebox.showwarning("Polygon", "Could not form valid polygon(s) from mask.", parent=self)
             return
 
         n_polys = len(self.features)
@@ -1492,7 +1492,7 @@ class HSVMaskProcessingMixin:
         """Run multi-sample colour selection using remove / keep sample points."""
         if self.full_image is None:
             if not quiet:
-                messagebox.showwarning("Color Picker", "No image loaded.")
+                messagebox.showwarning("Color Picker", "No image loaded.", parent=self)
             return False
 
         pts = self._normalise_color_pick_points()
@@ -1501,7 +1501,7 @@ class HSVMaskProcessingMixin:
 
         if not remove_pts:
             if not quiet:
-                messagebox.showwarning("Color Picker", "Add at least one remove-sample first.")
+                messagebox.showwarning("Color Picker", "Add at least one remove-sample first.", parent=self)
             return False
 
         method = self.color_pick_method.get()
@@ -1526,7 +1526,7 @@ class HSVMaskProcessingMixin:
         remove_vectors = self._collect_color_pick_vectors(lab, remove_pts, patch_r, working_mask)
         if remove_vectors.size == 0:
             if not quiet:
-                messagebox.showwarning("Color Picker", "Could not extract valid remove-samples.")
+                messagebox.showwarning("Color Picker", "Could not extract valid remove-samples.", parent=self)
             return False
 
         keep_vectors = self._collect_color_pick_vectors(lab, keep_pts, patch_r, working_mask)
@@ -1562,7 +1562,8 @@ class HSVMaskProcessingMixin:
                 messagebox.showwarning(
                     "Color Picker",
                     "GrabCut needs at least one keep-sample as background.\n"
-                    "Add keep-samples or use Color Distance."
+                    "Add keep-samples or use Color Distance.",
+                    parent=self
                 )
             return False
 
@@ -1598,7 +1599,7 @@ class HSVMaskProcessingMixin:
                         5, cv2.GC_INIT_WITH_MASK)
         except cv2.error as e:
             if not quiet:
-                messagebox.showerror("GrabCut Error", f"GrabCut failed: {e}")
+                messagebox.showerror("GrabCut Error", f"GrabCut failed: {e}", parent=self)
             return False
 
         selected = np.where(
@@ -1624,18 +1625,19 @@ class HSVMaskProcessingMixin:
                             )
 
         if not self.image_files:
-            messagebox.showwarning("Warning", "No images loaded for batch.")
+            messagebox.showwarning("Warning", "No images loaded for batch.", parent=self)
             return
         if not getattr(self, '_batch_settings_loaded', False) and self.mode == "batch":
             messagebox.showwarning(
                 "Settings Required",
                 "Batch mode requires a settings file.\n\n"
                 "Use Single Image or Folder Processing to configure your\n"
-                "detection pipeline, then Save Settings and load it here.")
+                "detection pipeline, then Save Settings and load it here.",
+                parent=self)
             return
         export_path = self.export_path_entry.get().strip()
         if not export_path:
-            messagebox.showerror("Error", "Please select an export folder.")
+            messagebox.showerror("Error", "Please select an export folder.", parent=self)
             return
 
         # Log active pipeline steps
@@ -1729,7 +1731,8 @@ class HSVMaskProcessingMixin:
             overlay = self.full_image.copy()
             if self.edge_points:
                 pts = np.array(self.edge_points, dtype=np.int32).reshape((-1, 1, 2))
-                cv2.polylines(overlay, [pts], False, (0, 255, 0), int(self.edge_thickness_slider.get()))
+                thickness = int(self.edge_thickness_slider.get()) if hasattr(self, 'edge_thickness_slider') else 2
+                cv2.polylines(overlay, [pts], False, (0, 255, 0), thickness)
             cv2.imwrite(out_ovl, overlay)
 
             processed_count += 1
@@ -1739,7 +1742,8 @@ class HSVMaskProcessingMixin:
             "Batch Process",
             f"Processed {processed_count} images.\n"
             f"GeoJSON => {geojson_folder}\n"
-            f"Overlay => {overlay_folder}"
+            f"Overlay => {overlay_folder}",
+            parent=self
         )
 
     def prepare_cv_image_for_batch(self, original_image):
@@ -1779,7 +1783,7 @@ class HSVMaskProcessingMixin:
         if self.mode == "batch":
             return
         if not isinstance(self.full_image, np.ndarray):
-            messagebox.showwarning("Warning", "No image loaded!")
+            messagebox.showwarning("Warning", "No image loaded!", parent=self)
             return
         self.do_invert_mask.set(False)     # ← ensure checkbox is unchecked
 
@@ -1801,7 +1805,7 @@ class HSVMaskProcessingMixin:
         if self.mode == "batch":
             return
         if not isinstance(self.full_image, np.ndarray):
-            messagebox.showwarning("Warning", "No image loaded!")
+            messagebox.showwarning("Warning", "No image loaded!", parent=self)
             return
         self.do_invert_mask.set(True)      # ← ensure checkbox is checked
 
@@ -1834,7 +1838,7 @@ class HSVMaskProcessingMixin:
                     self.cv_image = None
                     self.full_image = None
                     self.filename_label.configure(text="No file loaded")
-                    messagebox.showinfo("Info", "All images processed.")
+                    messagebox.showinfo("Info", "All images processed.", parent=self)
                 else:
                     if self.current_index >= len(self.image_files):
                         self.current_index = len(self.image_files) - 1

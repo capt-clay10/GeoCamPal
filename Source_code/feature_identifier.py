@@ -100,7 +100,7 @@ class FeatureIdentifier(HSVMaskEditingMixin, HSVMaskProcessingMixin, HSVMaskUIMi
         self.mode = mode
         ctk.set_widget_scaling(1)
         try:
-            self.after(200, lambda: self.iconphoto(False, tk.PhotoImage(file=_resource_path("launch_logo.png"))))
+            self.iconbitmap(self.resource_path("launch_logo.ico"))
         except Exception:
             pass
 
@@ -171,15 +171,26 @@ class FeatureIdentifier(HSVMaskEditingMixin, HSVMaskProcessingMixin, HSVMaskUIMi
 
 
             # Keybindings for configuration window.
-            self.bind("<Left>", lambda e: self.prev_image())
-            self.bind("<Right>", lambda e: self.next_image())
-            self.bind("<e>", lambda e: self.extract_boundary_universal())
-            self.bind("<E>", lambda e: self.extract_boundary_universal())
-            self.bind("<p>", lambda e: self.extract_polygon_universal())
-            self.bind("<P>", lambda e: self.extract_polygon_universal())
-            self.bind("<r>", lambda e: self.cut_detected_feature())
-            self.bind("<R>", lambda e: self.cut_detected_feature())
-            self.bind("<Return>", lambda e: self.export_training_data())
+            # Guard: skip shortcut if user is typing in an entry/text widget
+            def _shortcut(func):
+                """Wrap a shortcut so it only fires when focus is not on a text input."""
+                def _handler(event):
+                    w = event.widget
+                    if isinstance(w, (tk.Entry, tk.Text)) or \
+                       w.winfo_class() in ("Entry", "Text", "TEntry", "CTkEntry"):
+                        return  # let the keypress go to the entry
+                    func()
+                return _handler
+
+            self.bind("<Left>", _shortcut(self.prev_image))
+            self.bind("<Right>", _shortcut(self.next_image))
+            self.bind("<e>", _shortcut(self.extract_boundary_universal))
+            self.bind("<E>", _shortcut(self.extract_boundary_universal))
+            self.bind("<p>", _shortcut(self.extract_polygon_universal))
+            self.bind("<P>", _shortcut(self.extract_polygon_universal))
+            self.bind("<r>", _shortcut(self.cut_detected_feature))
+            self.bind("<R>", _shortcut(self.cut_detected_feature))
+            self.bind("<Return>", _shortcut(self.export_training_data))
 
             # --------------------------
             # Console output area
@@ -374,10 +385,70 @@ class FeatureIdentifier(HSVMaskEditingMixin, HSVMaskProcessingMixin, HSVMaskUIMi
                 "Here you may see console outputs",
             )
 
-            self.bottom_frame = ctk.CTkFrame(main_frame)
-            self.bottom_frame.pack(side="bottom", fill="x", expand=False)
+            # ── Prominent batch action bar (always visible) ──
+            batch_action_bar = ctk.CTkFrame(main_frame)
+            batch_action_bar.pack(side="bottom", fill="x", padx=5, pady=2)
 
-            # Setup controls for batch
+            ctk.CTkButton(
+                batch_action_bar, text="⚙ Load Settings File",
+                command=self.load_settings,
+                fg_color="#1a6b3c", hover_color="#258c50",
+                font=("Arial", 13, "bold"), height=35, width=200
+            ).pack(side="left", padx=10, pady=5)
+
+            ctk.CTkButton(
+                batch_action_bar, text="Load Image Folder",
+                command=self._batch_load_folder,
+                font=("Arial", 12), height=35
+            ).pack(side="left", padx=5, pady=5)
+
+            ctk.CTkButton(
+                batch_action_bar, text="Browse Output Folder",
+                command=self._batch_browse_output,
+                fg_color="#8C7738", hover_color="#A18A45",
+                font=("Arial", 12), height=35
+            ).pack(side="left", padx=5, pady=5)
+
+            ctk.CTkButton(
+                batch_action_bar, text="Run Batch Process",
+                command=self.batch_process,
+                fg_color="#0F52BA", hover_color="#2A6BD1",
+                font=("Arial", 13, "bold"), height=35, width=180
+            ).pack(side="left", padx=10, pady=5)
+
+            ctk.CTkButton(
+                batch_action_bar, text="Reset",
+                command=self.reset_session,
+                fg_color="#8B0000", hover_color="#A52A2A",
+                height=35, width=80
+            ).pack(side="right", padx=10, pady=5)
+
+            # ── Folder path labels (always visible below buttons) ──
+            batch_path_bar = ctk.CTkFrame(main_frame)
+            batch_path_bar.pack(side="bottom", fill="x", padx=5, pady=2)
+
+            ctk.CTkLabel(batch_path_bar, text="Input:",
+                         font=("Arial", 10, "bold")).pack(side="left", padx=(10, 3))
+            self._batch_input_label = ctk.CTkLabel(
+                batch_path_bar, text="No folder selected",
+                text_color="gray", font=("Arial", 10), anchor="w")
+            self._batch_input_label.pack(side="left", padx=(0, 20))
+
+            ctk.CTkLabel(batch_path_bar, text="Output:",
+                         font=("Arial", 10, "bold")).pack(side="left", padx=(10, 3))
+            self._batch_output_label = ctk.CTkLabel(
+                batch_path_bar, text="No folder selected",
+                text_color="gray", font=("Arial", 10), anchor="w")
+            self._batch_output_label.pack(side="left", padx=(0, 10))
+
+            # Hidden controls frame — setup_controls builds the internal
+            # state (sliders, entries) that batch_process reads, but the
+            # user interacts via the action bar above + loaded settings.
+            self.bottom_frame = ctk.CTkFrame(main_frame, height=0)
+            self.bottom_frame.pack(side="bottom", fill="x", expand=False)
+            self.bottom_frame.pack_forget()  # hide entirely
+
+            # Setup controls for batch (builds internal state)
             self.setup_controls(self.bottom_frame)
 
             self.protocol("WM_DELETE_WINDOW", self.on_all_close)
@@ -498,6 +569,28 @@ class FeatureIdentifier(HSVMaskEditingMixin, HSVMaskProcessingMixin, HSVMaskUIMi
             return
         canvas.xview_scroll(int(-1 * (event.delta / 120)), "units")
 
+    # ═══════════════════════════════════════════════════════════════════
+    # BATCH MODE HELPERS
+    # ═══════════════════════════════════════════════════════════════════
+
+    def _batch_load_folder(self):
+        """Load image folder and update the batch path label."""
+        self.load_folder()
+        if hasattr(self, '_batch_input_label') and self.image_files:
+            folder = getattr(self, '_current_input_folder', None)
+            if folder:
+                self._batch_input_label.configure(text=folder, text_color="white")
+                print(f"Input folder: {folder}  ({len(self.image_files)} images)")
+
+    def _batch_browse_output(self):
+        """Browse output folder and update the batch path label."""
+        self.browse_export_folder()
+        if hasattr(self, '_batch_output_label'):
+            path = self.export_path_entry.get().strip()
+            if path:
+                self._batch_output_label.configure(text=path, text_color="white")
+                print(f"Output folder: {path}")
+
     def reset_session(self):
         """Reset all state to initial — clears image, masks, features, AOI, color picker."""
         # Clear overlay zoom
@@ -585,6 +678,12 @@ class FeatureIdentifier(HSVMaskEditingMixin, HSVMaskProcessingMixin, HSVMaskUIMi
         # Clear console
         if hasattr(self, 'console_text') and self.console_text.winfo_exists():
             self.console_text.delete("1.0", "end")
+
+        # Clear batch mode labels
+        if hasattr(self, '_batch_input_label'):
+            self._batch_input_label.configure(text="No folder selected", text_color="gray")
+        if hasattr(self, '_batch_output_label'):
+            self._batch_output_label.configure(text="No folder selected", text_color="gray")
 
         print("Session reset.\n================================")
 

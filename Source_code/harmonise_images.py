@@ -90,14 +90,14 @@ def is_blurry(img_bgr, lap_threshold, uniform_fraction=0.85):
     return False
 
 
-def is_clipped_overexposed(img_bgr, clip_fraction=0.15):
+def is_clipped_overexposed(img_bgr, clip_fraction=0.15, clip_value=254):
     """
-    Saturation‑based overexposure: checks for pixels clipped at 254–255
-    across ALL three channels (no recoverable information), rather than
-    just "bright" single‑channel pixels.  This avoids false positives
-    on naturally bright scenes like white sand.
+    Saturation‑based overexposure: checks for pixels clipped at or above
+    clip_value across ALL three channels (no recoverable information),
+    rather than just "bright" single‑channel pixels.  This avoids false
+    positives on naturally bright scenes like white sand.
     """
-    saturated = np.all(img_bgr >= 254, axis=2)
+    saturated = np.all(img_bgr >= clip_value, axis=2)
     return (saturated.sum() / saturated.size) > clip_fraction
 
 
@@ -170,14 +170,15 @@ def filter_image(img_bgr,
                  dark_thresh,
                  entropy_thresh,
                  droplet_frac,
-                 obstruction_frac):
+                 obstruction_frac,
+                 overexp_px=254):
     """
     Run all filters.  Returns a list of reason strings; empty = passes.
     """
     reasons = []
     if is_blurry(img_bgr, blur_thresh):
         reasons.append("blurry")
-    if is_clipped_overexposed(img_bgr, clip_frac):
+    if is_clipped_overexposed(img_bgr, clip_frac, overexp_px):
         reasons.append("clipped_overexposed")
     if is_underexposed(img_bgr, underexp_val, underexp_frac):
         reasons.append("underexposed")
@@ -612,7 +613,8 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
 
         filters_a = [
             ("Blur", "Blur threshold", "20"),
-            ("Overexposure", "Clip overexp fraction", "0.15"),
+            ("Overexposure", "Clip overexp fraction", "0.15",
+                             "Overexp pixel value", "254"),
             ("Underexposure", "Dark pixel value", "20",
                               "Under-exp fraction", "0.25"),
             ("Darkness", "Dark max threshold", "25"),
@@ -856,6 +858,10 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
                                      height=10)
         self.console_text.pack(fill="both", expand=True, padx=5, pady=5)
         self._console_redir = setup_console(self.console_text, "")
+        self._print_guide()
+
+    def _print_guide(self):
+        """Print the tool guide and reference table to the console."""
         print("Harmonise Images - Tool Guide\n"
               "================================\n"
               "\n"
@@ -869,10 +875,11 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
               "threshold are blurry.\n"
               "                    Guards against false positives on "
               "calm water / clear sky.\n"
-              "  Overexposure    - Fraction of pixels saturated at "
-              "254-255 in ALL channels.\n"
-              "                    Detects blown highlights (not just "
-              "bright sand).\n"
+              "  Overexposure    - Two parameters:\n"
+              "                    Pixel value: pixels >= this value "
+              "in ALL 3 channels = saturated.\n"
+              "                    Fraction: if more than this fraction "
+              "is saturated -> bad.\n"
               "  Underexposure   - Two parameters: dark pixel value + "
               "fraction.\n"
               "                    If more than 'fraction' of pixels "
@@ -925,6 +932,27 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
               "  Originals are NEVER modified - all output goes to\n"
               "  *_filtered_good/, *_brightness_harmonised/, or\n"
               "  *_colour_harmonised/ folders under the chosen output path.\n"
+              "\n"
+              "REFERENCE TABLE — Suggested parameter values\n"
+              "┌──────────────────────┬──────────────┬──────────────┬──────────────┐\n"
+              "│ Parameter            │ Conservative │   Moderate   │   Extreme    │\n"
+              "├──────────────────────┼──────────────┼──────────────┼──────────────┤\n"
+              "│ Blur threshold       │      10      │      20      │      >40     │\n"
+              "│ Overexp pixel value  │     254      │     245      │     <235     │\n"
+              "│ Overexp fraction     │     0.20     │     0.15     │     <0.08    │\n"
+              "│ Dark pixel value     │      10      │      20      │      >35     │\n"
+              "│ Under-exp fraction   │     0.35     │     0.25     │     <0.15    │\n"
+              "│ Dark max threshold   │      15      │      25      │      >40     │\n"
+              "│ Entropy threshold    │     4.5      │     5.0      │     >5.5     │\n"
+              "│ Droplet fraction     │     0.12     │     0.08     │     <0.04    │\n"
+              "│ Obstruction fraction │     0.45     │     0.35     │     <0.20    │\n"
+              "├──────────────────────┼──────────────┼──────────────┼──────────────┤\n"
+              "│ L-tolerance (bright) │      8       │      5       │      <3      │\n"
+              "│ Sky mask (%)         │      0       │     15       │     >30      │\n"
+              "└──────────────────────┴──────────────┴──────────────┴──────────────┘\n"
+              "  Conservative = fewer images rejected / less correction applied\n"
+              "  Moderate     = balanced (default values)\n"
+              "  Extreme      = aggressive filtering / correction\n"
               "================================\n")
 
     # ——— UI/thread helpers ———
@@ -979,6 +1007,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
             "recursive": bool(self.recursive_var.get()),
             "blur_t": float(self.filter_entries["Blur threshold"].get()),
             "clip_f": float(self.filter_entries["Clip overexp fraction"].get()),
+            "overexp_px": int(self.filter_entries["Overexp pixel value"].get()),
             "dark_v": int(self.filter_entries["Dark pixel value"].get()),
             "under_f": float(self.filter_entries["Under-exp fraction"].get()),
             "dark_max": int(self.filter_entries["Dark max threshold"].get()),
@@ -1239,7 +1268,8 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
         self._restore_normal_plots()
         self._toggle_task_sections()
         self.console_text.delete("1.0", tk.END)
-        print("Session reset.\n--------------------------------")
+        print("Session reset.\n--------------------------------\n")
+        self._print_guide()
 
     # ——— reset ———
 
@@ -1541,7 +1571,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
                 reasons = []
                 if en.get("Blur") and is_blurry(img, cfg["blur_t"]):
                     reasons.append("blurry")
-                if en.get("Overexposure") and is_clipped_overexposed(img, cfg["clip_f"]):
+                if en.get("Overexposure") and is_clipped_overexposed(img, cfg["clip_f"], cfg.get("overexp_px", 254)):
                     reasons.append("clipped_overexposed")
                 if en.get("Underexposure") and is_underexposed(img, cfg["dark_v"], cfg["under_f"]):
                     reasons.append("underexposed")

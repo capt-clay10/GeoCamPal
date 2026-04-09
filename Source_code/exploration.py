@@ -768,9 +768,9 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
         self._on_num_series_change(1)
         self._print_welcome()
 
-    # ═══════════════════════════════════════════════════════════════════
+#
     # BUILD UI SECTIONS
-    # ═══════════════════════════════════════════════════════════════════
+#
 
     def _build_plot_area(self):
         self.top_panel = ctk.CTkFrame(self, fg_color="black")
@@ -824,13 +824,6 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
             values=[str(i) for i in range(1, MAX_SERIES + 1)],
             command=lambda v: self._on_num_series_change(int(v)),
             width=60,
-            fg_color="white",
-            text_color="black",
-            button_color="white",
-            button_hover_color="#E0E0E0",
-            dropdown_fg_color="white",
-            dropdown_text_color="black",
-            dropdown_hover_color="#E0E0E0",
         )
         self.num_series_menu.grid(row=0, column=1, padx=5, pady=3)
 
@@ -920,7 +913,6 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
                       hover_color="#A52A2A"
                       ).pack(side="left", padx=5, pady=5)
 
-
     def _create_series_panel(self, idx):
         """Build the widgets for one series input row."""
         frame = ctk.CTkFrame(self.series_container)
@@ -964,15 +956,7 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
         w["criterion_menu"] = ctk.CTkOptionMenu(
             frame, variable=w["criterion_var"],
             values=CRITERIA, width=160,
-            command=lambda v, i=idx: self._on_criterion_change(i, v),
-            fg_color="white",
-            text_color="black",
-            button_color="white",
-            button_hover_color="#E0E0E0",
-            dropdown_fg_color="white",
-            dropdown_text_color="black",
-            dropdown_hover_color="#E0E0E0",
-        )
+            command=lambda v, i=idx: self._on_criterion_change(i, v))
         w["criterion_menu"].grid(row=1, column=1, padx=3, pady=2,
                                   columnspan=2)
 
@@ -1051,9 +1035,9 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
             "--------------------------------"
         )
 
-    # ═══════════════════════════════════════════════════════════════════
+#
     # VISIBILITY MANAGEMENT
-    # ═══════════════════════════════════════════════════════════════════
+#
 
     def _on_num_series_change(self, n):
         """Show/hide series panels based on selected count."""
@@ -1101,9 +1085,9 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
             w["tol_label"].grid_remove()
             w["tol_entry"].grid_remove()
 
-    # ═══════════════════════════════════════════════════════════════════
+#
     # BROWSE CALLBACKS
-    # ═══════════════════════════════════════════════════════════════════
+#
 
     def _browse_series_csv(self, idx):
         p = filedialog.askopenfilename(
@@ -1128,9 +1112,9 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
             self.output_folder = d
             self.output_label.configure(text=d)
 
-    # ═══════════════════════════════════════════════════════════════════
+#
     # LOAD & PLOT
-    # ═══════════════════════════════════════════════════════════════════
+#
 
     def _load_series(self, idx):
         """Load a time series CSV and plot it."""
@@ -1181,9 +1165,9 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
                                 self.series_widgets[idx]))
         return active
 
-    # ═══════════════════════════════════════════════════════════════════
+#
     # PLOT
-    # ═══════════════════════════════════════════════════════════════════
+#
 
     def _rebuild_subplots(self, n_plots):
         """Recreate figure with n_plots stacked subplots."""
@@ -1310,13 +1294,15 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
                 ax.set_visible(False)
 
         # format x axis on the bottom-most visible axis
+        last_visible = None
         for ax in self.axes:
             if ax.get_visible():
                 last_visible = ax
-        last_visible.set_xlabel("Date", color="white")
-        last_visible.xaxis.set_major_formatter(
-            mdates.DateFormatter(
-                "%Y-%m-%d %H:%M" if results else "%Y-%m-%d"))
+        if last_visible is not None:
+            last_visible.set_xlabel("Date", color="white")
+            last_visible.xaxis.set_major_formatter(
+                mdates.DateFormatter(
+                    "%Y-%m-%d %H:%M" if results else "%Y-%m-%d"))
 
         if title:
             # Wrap long titles at AND boundaries for readability
@@ -1397,9 +1383,8 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
                 self.canvas_plot.draw_idle()
                 break
 
-    # ═══════════════════════════════════════════════════════════════════
+    
     # RESET
-    # ═══════════════════════════════════════════════════════════════════
 
     def _reset(self):
         self._cancel_flag = True
@@ -1437,11 +1422,11 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
 
         self._refresh_plot(results=[])
         self.console_text.delete("1.0", tk.END)
-        print("Session reset.\n--------------------------------")
+        self._print_welcome()
 
-    # ═══════════════════════════════════════════════════════════════════
+
     # SAVE / LOAD SETTINGS
-    # ═══════════════════════════════════════════════════════════════════
+#
 
     def _save_settings(self):
         n = self._get_active_count()
@@ -1556,9 +1541,9 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
             messagebox.showerror("Load Settings",
                                  f"Could not load settings:\n{e}", parent=self)
 
-    # ═══════════════════════════════════════════════════════════════════
+#
     # RUN ANALYSIS
-    # ═══════════════════════════════════════════════════════════════════
+#
 
     def _ui_call(self, func, *args, **kwargs):
         self.after(0, lambda: func(*args, **kwargs))

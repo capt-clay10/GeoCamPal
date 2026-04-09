@@ -523,7 +523,8 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         
         # Clear console
         self.console_text.delete(1.0, tk.END)
-        print("Session reset. Ready for new data.\n--------------------------------\n")
+        print("Session reset \n--------------------------------\n")
+        print("Here you may see console outputs\n--------------------------------\n")
 
     def load_raw_image(self, file_path=None):
         if not file_path:
