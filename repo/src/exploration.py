@@ -824,6 +824,9 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
             values=[str(i) for i in range(1, MAX_SERIES + 1)],
             command=lambda v: self._on_num_series_change(int(v)),
             width=60,
+            fg_color="white", text_color="black", button_color="#d0d0d0",
+            button_hover_color="#a0a0a0", dropdown_fg_color="white",
+            dropdown_text_color="black", dropdown_hover_color="#d0d0d0",
         )
         self.num_series_menu.grid(row=0, column=1, padx=5, pady=3)
 
@@ -879,21 +882,21 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
         self.output_label.grid(
             row=0, column=5, padx=5, pady=5, sticky="w")
 
-        ctk.CTkButton(actions_bar, text="Run Analysis",
-                      command=self._run_threaded,
-                      fg_color="#0F52BA", hover_color="#2A6BD1"
-                      ).grid(row=0, column=6, padx=10, pady=5)
-
-        self.progress_bar = ctk.CTkProgressBar(actions_bar, width=160)
-        self.progress_bar.grid(row=0, column=7, padx=5, pady=5)
-        self.progress_bar.set(0)
-
-        self.eta_label = ctk.CTkLabel(actions_bar, text="", width=120)
-        self.eta_label.grid(row=0, column=8, padx=3, pady=5, sticky="w")
-
-        # ── Row: settings ──
+        # ── Row: run + settings ──
         settings_bar = ctk.CTkFrame(self.bottom_panel)
         settings_bar.pack(fill="x", padx=5, pady=2)
+
+        ctk.CTkButton(settings_bar, text="Run Analysis",
+                      command=self._run_threaded,
+                      fg_color="#0F52BA", hover_color="#2A6BD1"
+                      ).pack(side="left", padx=5, pady=5)
+
+        self.progress_bar = ctk.CTkProgressBar(settings_bar, width=160)
+        self.progress_bar.pack(side="left", padx=5, pady=5)
+        self.progress_bar.set(0)
+
+        self.eta_label = ctk.CTkLabel(settings_bar, text="", width=120)
+        self.eta_label.pack(side="left", padx=3, pady=5)
 
         ctk.CTkButton(settings_bar, text="Save Settings",
                       command=self._save_settings,
@@ -956,7 +959,10 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
         w["criterion_menu"] = ctk.CTkOptionMenu(
             frame, variable=w["criterion_var"],
             values=CRITERIA, width=160,
-            command=lambda v, i=idx: self._on_criterion_change(i, v))
+            command=lambda v, i=idx: self._on_criterion_change(i, v),
+            fg_color="white", text_color="black", button_color="#d0d0d0",
+            button_hover_color="#a0a0a0", dropdown_fg_color="white",
+            dropdown_text_color="black", dropdown_hover_color="#d0d0d0")
         w["criterion_menu"].grid(row=1, column=1, padx=3, pady=2,
                                   columnspan=2)
 

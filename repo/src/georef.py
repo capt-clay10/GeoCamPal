@@ -23,6 +23,7 @@ import customtkinter as ctk
 import tkinter as tk
 from tkinter import filedialog, messagebox
 from osgeo import gdal, osr
+gdal.UseExceptions()
 
 from utils import fit_geometry, resource_path, setup_console, restore_console, save_settings_json, load_settings_json
 
@@ -75,6 +76,28 @@ def _estimate_gsd(df):
               for i in range(len(df)) for j in range(i+1, len(df))
               if np.hypot(*(px[i]-px[j])) > 10]
     return float(np.median(ratios)) if ratios else 0.25
+
+
+def _guess_epsg(df):
+    """Try to guess EPSG from GCP coordinate ranges (Real_X, Real_Y).
+    Returns (epsg_int, description_str) or (None, reason_str)."""
+    x_vals = df["Real_X"].values
+    y_vals = df["Real_Y"].values
+    x_med, y_med = float(np.median(x_vals)), float(np.median(y_vals))
+
+    # Geographic coordinates (lon/lat)
+    if -180 <= x_med <= 180 and -90 <= y_med <= 90:
+        return 4326, "WGS 84 geographic (lon/lat)"
+
+    # UTM-like coordinates: Easting 100k–900k, Northing 0–10M
+    if 100_000 < x_med < 900_000 and 0 < y_med < 10_000_000:
+        # Estimate UTM zone from easting is impossible without more info,
+        # but if a Real_Z or other context is available we can't determine zone.
+        # We can only flag it as likely UTM.
+        hemisphere = "north" if y_med < 5_500_000 else "could be north or south"
+        return None, f"Coordinates look like UTM (easting~{x_med:.0f}, northing~{y_med:.0f}, {hemisphere}) but zone cannot be determined automatically. Please enter the EPSG code manually."
+
+    return None, f"Could not determine CRS from coordinate ranges (X~{x_med:.0f}, Y~{y_med:.0f}). Please enter the EPSG code manually."
 
 # ── Homography backends ──
 def _homo_compute(pixel_pts, utm_pts):
@@ -478,13 +501,13 @@ class GeoReferenceModule(ctk.CTkToplevel):
         except: pass
         self._img_path = ""
         self._method_key = "homo"
-        self._H = None; self._homo_epsg = None
-        self._K = None; self._dist = None; self._cal_img_size = None
-        self._gcp_df = None; self._gcp_epsg = None; self._elev = 0.0
+        self._H = None; self._homo_epsg = None; self._homo_path = ""
+        self._K = None; self._dist = None; self._cal_img_size = None; self._cal_path = ""
+        self._gcp_df = None; self._gcp_epsg = None; self._elev = 0.0; self._gcp_path = ""
         self._rvec = None; self._tvec = None; self._centroid = None
         self._grid_x = self._grid_y = self._grid_z = None
         self._preview_bgr = None; self._preview_gt = None; self._preview_Hf = None
-        self._aoi = None; self._excluded_gcps = []; self._scale = 4.0
+        self._aoi = None; self._aoi_preview_shape = None; self._excluded_gcps = []; self._scale = 4.0
         self._corner_var = tk.StringVar(value="Full Image")
         self.image_list = []; self.output_folder = ""; self.input_folder = ""
         self.user_epsg = None; self._lock = threading.Lock(); self.executor = None
@@ -524,7 +547,10 @@ class GeoReferenceModule(ctk.CTkToplevel):
         ctk.CTkLabel(r1, text="Method:", font=("Arial", 12, "bold")).pack(side="left", padx=(8,2))
         self._method_var = ctk.StringVar(value=METHODS[0])
         ctk.CTkOptionMenu(r1, values=METHODS, variable=self._method_var,
-            command=self._on_method_change, width=180).pack(side="left", padx=4)
+            command=self._on_method_change, width=180,
+            fg_color="white", text_color="black", button_color="#d0d0d0",
+            button_hover_color="#a0a0a0", dropdown_fg_color="white",
+            dropdown_text_color="black", dropdown_hover_color="#d0d0d0").pack(side="left", padx=4)
         ctk.CTkButton(r1, text="Browse Image", command=self._browse_img).pack(side="left", padx=6)
         self._img_lbl = ctk.CTkLabel(r1, text="No image", text_color="gray"); self._img_lbl.pack(side="left", padx=4)
 
@@ -547,7 +573,10 @@ class GeoReferenceModule(ctk.CTkToplevel):
         self._corner_tools = ctk.CTkFrame(r2, fg_color="transparent"); self._corner_tools.pack(side="left", padx=4)
         ctk.CTkLabel(self._corner_tools, text="Corner:").pack(side="left", padx=(4,2))
         ctk.CTkOptionMenu(self._corner_tools, values=["Full Image","Bottom Left","Bottom Right","Top Left","Top Right","Manual"],
-            variable=self._corner_var, command=self._on_corner_change, width=115).pack(side="left", padx=2)
+            variable=self._corner_var, command=self._on_corner_change, width=115,
+            fg_color="white", text_color="black", button_color="#d0d0d0",
+            button_hover_color="#a0a0a0", dropdown_fg_color="white",
+            dropdown_text_color="black", dropdown_hover_color="#d0d0d0").pack(side="left", padx=2)
         self._manual_corner_ent = ctk.CTkEntry(self._corner_tools, width=190, placeholder_text="x1,y1,x2,y2,x3,y3,x4,y4")
         self._crop_entries = {}
         for tag in ["S","N","E","W"]:
@@ -688,9 +717,11 @@ class GeoReferenceModule(ctk.CTkToplevel):
             self._img_path = p; self._img_lbl.configure(text=os.path.basename(p), text_color="#81C784")
             self._show(p, self._orig_lbl)
 
-    def _load_homo(self):
-        p = filedialog.askopenfilename(parent=self,filetypes=[("Text","*.txt")])
+    def _load_homo(self, filepath=None):
+        p = filepath or filedialog.askopenfilename(parent=self,filetypes=[("Text","*.txt")])
         if not p: return
+        if not os.path.exists(p):
+            print(f"[Warning] Homography file not found: {p}"); return
         try:
             self._homo_epsg = None
             with open(p) as f:
@@ -699,39 +730,56 @@ class GeoReferenceModule(ctk.CTkToplevel):
                     m = re.search(r"EPSG:(\d+)", line)
                     if m: self._homo_epsg = int(m.group(1))
             self._H = np.loadtxt(p).reshape(3, 3)
+            self._homo_path = p
             self._homo_lbl.configure(text=os.path.basename(p), text_color="#81C784")
             if self._homo_epsg:
                 if not self._epsg_ent.get().strip(): self._epsg_ent.insert(0, str(self._homo_epsg))
                 print(f"[CRS] EPSG:{self._homo_epsg} from homography")
-        except Exception as e: messagebox.showerror("Error", f"Bad homography: {e}")
+        except Exception as e: messagebox.showerror("Error", f"Bad homography: {e}", parent=self)
 
-    def _load_gcp(self):
-        p = filedialog.askopenfilename(parent=self,filetypes=[("CSV","*.csv"),("All","*.*")])
+    def _load_gcp(self, filepath=None):
+        p = filepath or filedialog.askopenfilename(parent=self,filetypes=[("CSV","*.csv"),("All","*.*")])
         if not p: return
+        if not os.path.exists(p):
+            print(f"[Warning] GCP file not found: {p}"); return
         try:
             df = read_gcp_csv(p)
             for c in ("Pixel_X","Pixel_Y","Real_X","Real_Y"):
-                if c not in df.columns: messagebox.showerror("Error", f"Missing \u2018{c}\u2019"); return
-            self._gcp_df = df
+                if c not in df.columns: messagebox.showerror("Error", f"Missing \u2018{c}\u2019", parent=self); return
+            self._gcp_df = df; self._gcp_path = p
             self._gcp_epsg = int(df["EPSG"].iloc[0]) if "EPSG" in df.columns and df["EPSG"].iloc[0] > 0 else None
             gsd = _estimate_gsd(df)
-            if self._gcp_epsg and not self._epsg_ent.get().strip(): self._epsg_ent.insert(0, str(self._gcp_epsg))
+            if self._gcp_epsg:
+                if not self._epsg_ent.get().strip(): self._epsg_ent.insert(0, str(self._gcp_epsg))
+                print(f"[CRS] EPSG:{self._gcp_epsg} detected from GCP CSV")
+            elif not self._epsg_ent.get().strip():
+                # Try auto-detection from coordinate ranges
+                guessed, msg = _guess_epsg(df)
+                if guessed:
+                    self._gcp_epsg = guessed
+                    self._epsg_ent.insert(0, str(guessed))
+                    print(f"[CRS] Auto-detected EPSG:{guessed} — {msg}")
+                else:
+                    print(f"[CRS] {msg}")
             mz = df["Real_Z"].mean()
             if not self._elev_ent.get().strip(): self._elev_ent.insert(0, f"{mz:.1f}")
             self._gcp_lbl.configure(text=f"{len(df)} GCPs (GSD~{gsd:.3f})", text_color="#81C784")
             print(f"[GCP] {len(df)} GCPs, EPSG:{self._gcp_epsg}, GSD~{gsd:.4f}")
-        except Exception as e: messagebox.showerror("GCP Error", str(e))
+        except Exception as e: messagebox.showerror("GCP Error", str(e), parent=self)
 
-    def _load_cal(self):
-        p = filedialog.askopenfilename(parent=self,filetypes=[("Pickle","*.pkl"),("All","*.*")])
+    def _load_cal(self, filepath=None):
+        p = filepath or filedialog.askopenfilename(parent=self,filetypes=[("Pickle","*.pkl"),("All","*.*")])
         if not p: return
+        if not os.path.exists(p):
+            print(f"[Warning] Calibration file not found: {p}"); return
         try:
             with open(p, "rb") as f: d = pickle.load(f)
             self._K = d["camera_matrix"].astype(np.float64)
             self._dist = d["dist_coeff"].ravel().astype(np.float64)
             self._cal_img_size = d.get("image_size")
+            self._cal_path = p
             self._cal_lbl.configure(text=f"{os.path.basename(p)} (fx={self._K[0,0]:.0f})", text_color="#81C784")
-        except Exception as e: messagebox.showerror("Calibration Error", str(e))
+        except Exception as e: messagebox.showerror("Calibration Error", str(e), parent=self)
 
     def _get_K_for(self, wh):
         K = self._K.copy()
@@ -769,13 +817,19 @@ class GeoReferenceModule(ctk.CTkToplevel):
         except: pass
         if self._gcp_epsg: self.user_epsg = self._gcp_epsg; return True
         if self._homo_epsg: self.user_epsg = self._homo_epsg; return True
-        messagebox.showerror("Error", "No EPSG."); return False
+        messagebox.showerror("Error",
+            "No EPSG code found.\n\n"
+            "The EPSG could not be auto-detected from the GCP CSV or homography file. "
+            "Please enter the EPSG code manually in the EPSG field.\n\n"
+            "Tip: include an 'EPSG' column in your GCP CSV, or add '# EPSG:XXXXX' "
+            "as the first line of your homography .txt file.", parent=self); return False
 
     # ── Initial Georeferencing ──
     def _initial_georef(self):
-        if not self._img_path: messagebox.showerror("Error", "Browse an image first."); return
+        if not self._img_path: messagebox.showerror("Error", "Browse an image first.", parent=self); return
         img = cv2.imread(self._img_path)
-        if img is None: messagebox.showerror("Error", "Cannot read image."); return
+        if img is None: messagebox.showerror("Error", "Cannot read image.", parent=self); return
+        self._show(self._img_path, self._orig_lbl)
         mk = self._method_key; scale = self._get_scale()
         try:
             hi, wi = img.shape[:2]
@@ -783,8 +837,8 @@ class GeoReferenceModule(ctk.CTkToplevel):
             crop_fracs = self._get_crop_fracs()
 
             if mk == "homo":
-                if self._H is None: messagebox.showerror("Error", "Load homography."); return
-                self._aoi = None; self._aoi_ent.delete(0, "end")
+                if self._H is None: messagebox.showerror("Error", "Load homography.", parent=self); return
+                self._aoi = None; self._aoi_preview_shape = None; self._aoi_ent.delete(0, "end")
                 self._aoi_status.configure(text="AOI: not set", text_color="gray")
                 warped, Hf, gt = _homo_warp_windowed(img, self._H, scale, source_corners, crop_fracs)
                 self._preview_bgr = warped; self._preview_gt = gt; self._preview_Hf = Hf
@@ -794,9 +848,9 @@ class GeoReferenceModule(ctk.CTkToplevel):
                 self._rec_scale_lbl.configure(text=f"(recommended ~{ns:.1f})")
 
             elif mk == "proj":
-                if self._K is None: messagebox.showerror("Error", "Load calibration."); return
+                if self._K is None: messagebox.showerror("Error", "Load calibration.", parent=self); return
                 df = self._get_working_df()
-                if df is None or len(df) < 4: messagebox.showerror("Error", "Need >= 4 GCPs."); return
+                if df is None or len(df) < 4: messagebox.showerror("Error", "Need >= 4 GCPs.", parent=self); return
                 K = self._get_K_for((wi, hi)); elev = self._get_elev()
                 px = df[["Pixel_X","Pixel_Y"]].values; wp = df[["Real_X","Real_Y","Real_Z"]].values
                 rv, tv, cen, errs = _solve_extrinsics(px, wp, K, self._dist)
@@ -819,8 +873,8 @@ class GeoReferenceModule(ctk.CTkToplevel):
 
             else:  # tps, poly1, poly2
                 df = self._get_working_df()
-                if df is None or len(df) < 4: messagebox.showerror("Error", "Need >= 4 GCPs."); return
-                if mk == "poly2" and len(df) < 6: messagebox.showerror("Error", "Poly-2 needs >= 6 GCPs."); return
+                if df is None or len(df) < 4: messagebox.showerror("Error", "Need >= 4 GCPs.", parent=self); return
+                if mk == "poly2" and len(df) < 6: messagebox.showerror("Error", "Poly-2 needs >= 6 GCPs.", parent=self); return
                 if not self._resolve_epsg(): return
                 extent = self._corners_to_world_extent(source_corners, hi, wi)
                 if extent:
@@ -851,15 +905,17 @@ class GeoReferenceModule(ctk.CTkToplevel):
             print(f"[Initial] Preview: {ow}x{oh}")
             print(f"[Next] Select AOI or click Secondary Georeferencing")
         except Exception as e:
-            messagebox.showerror("Error", str(e))
+            messagebox.showerror("Error", str(e), parent=self)
             import traceback; traceback.print_exc()
 
     # ── AOI ──
     def _select_aoi(self):
-        if self._preview_bgr is None: messagebox.showerror("Error", "Run Initial Georeferencing first."); return
+        if self._preview_bgr is None: messagebox.showerror("Error", "Run Initial Georeferencing first.", parent=self); return
         rgb = cv2.cvtColor(self._preview_bgr, cv2.COLOR_BGR2RGB)
         def _on_aoi(x1, y1, x2, y2):
-            self._aoi = (x1, y1, x2, y2); self._aoi_ent.delete(0, "end")
+            self._aoi = (x1, y1, x2, y2)
+            self._aoi_preview_shape = self._preview_bgr.shape[:2]
+            self._aoi_ent.delete(0, "end")
             self._aoi_ent.insert(0, f"{x1:.0f},{y1:.0f},{x2:.0f},{y2:.0f}")
             self._aoi_status.configure(text=f"AOI: {x2-x1:.0f}x{y2-y1:.0f} px", text_color="#81C784")
             self._show_aoi_crop()
@@ -870,9 +926,10 @@ class GeoReferenceModule(ctk.CTkToplevel):
             vals = [float(v.strip()) for v in self._aoi_ent.get().split(",")]
             if len(vals) != 4: raise ValueError("Need 4 values")
             self._aoi = tuple(vals)
+            self._aoi_preview_shape = self._preview_bgr.shape[:2] if self._preview_bgr is not None else None
             self._aoi_status.configure(text=f"AOI: {vals[2]-vals[0]:.0f}x{vals[3]-vals[1]:.0f} px", text_color="#81C784")
             self._show_aoi_crop()
-        except Exception as e: messagebox.showerror("Error", f"Bad AOI: {e}")
+        except Exception as e: messagebox.showerror("Error", f"Bad AOI: {e}", parent=self)
 
     def _show_aoi_crop(self):
         if self._preview_bgr is None or self._aoi is None: return
@@ -884,10 +941,10 @@ class GeoReferenceModule(ctk.CTkToplevel):
     # ── Accuracy ──
     def _compute_accuracy(self):
         mk = self._method_key
-        if mk == "homo" and self._H is None: messagebox.showerror("Error", "Load homography."); return
+        if mk == "homo" and self._H is None: messagebox.showerror("Error", "Load homography.", parent=self); return
         df = self._get_working_df()
-        if df is None or (mk != "homo" and len(df) < 4): messagebox.showerror("Error", "Need GCPs."); return
-        if mk == "proj" and self._K is None: messagebox.showerror("Error", "Load calibration."); return
+        if df is None or (mk != "homo" and len(df) < 4): messagebox.showerror("Error", "Need GCPs, if testing for Homography use the dedicated Homography module", parent=self); return
+        if mk == "proj" and self._K is None: messagebox.showerror("Error", "Load calibration.", parent=self); return
         def _run():
             K = self._K if mk == "proj" else None; d = self._dist if mk == "proj" else None
             if mk == "proj":
@@ -916,7 +973,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
     # ── SA ──
     def _run_sa(self):
         df = self._get_working_df()
-        if df is None or len(df) < 5: messagebox.showerror("Error", "Need >= 5 GCPs."); return
+        if df is None or len(df) < 5: messagebox.showerror("Error", "Need >= 5 GCPs.", parent=self); return
         mk = self._method_key; K = self._K if mk == "proj" else None; d = self._dist if mk == "proj" else None
         if mk == "proj" and self._img_path:
             img = cv2.imread(self._img_path)
@@ -932,10 +989,10 @@ class GeoReferenceModule(ctk.CTkToplevel):
 
     # ── Secondary Georeferencing ──
     def _secondary_georef(self):
-        if self._preview_bgr is None: messagebox.showerror("Error", "Run Initial Georeferencing first."); return
-        if not self._img_path: messagebox.showerror("Error", "No image."); return
+        if self._preview_bgr is None: messagebox.showerror("Error", "Run Initial Georeferencing first.", parent=self); return
+        if not self._img_path: messagebox.showerror("Error", "No image.", parent=self); return
         img = cv2.imread(self._img_path)
-        if img is None: messagebox.showerror("Error", "Cannot read image."); return
+        if img is None: messagebox.showerror("Error", "Cannot read image.", parent=self); return
         mk = self._method_key; scale = self._get_scale(); aoi = self._aoi
         try:
             hi, wi = img.shape[:2]
@@ -943,21 +1000,23 @@ class GeoReferenceModule(ctk.CTkToplevel):
             crop_fracs = self._get_crop_fracs()
 
             if mk == "homo":
-                if self._H is None: messagebox.showerror("Error", "Load homography."); return
+                if self._H is None: messagebox.showerror("Error", "Load homography.", parent=self); return
                 warped, Hf, gt = _homo_warp_windowed(img, self._H, scale, source_corners, crop_fracs)
-                if aoi:
+                if aoi and self._aoi_preview_shape is not None:
                     x1, y1, x2, y2 = [int(v) for v in aoi]
-                    oh, ow = self._preview_bgr.shape[:2]; nh, nw = warped.shape[:2]
+                    oh, ow = self._aoi_preview_shape; nh, nw = warped.shape[:2]
                     sx, sy = nw/ow, nh/oh
                     x1, y1 = max(0, int(x1*sx)), max(0, int(y1*sy))
                     x2, y2 = min(nw, int(x2*sx)), min(nh, int(y2*sy))
+                    if x2 <= x1 or y2 <= y1:
+                        raise ValueError(f"AOI out of bounds after scaling ({x1},{y1})->({x2},{y2}). Re-select AOI.")
                     warped = warped[y1:y2, x1:x2]
                     gt = (gt[0]+x1*gt[1], gt[1], 0, gt[3]+y1*gt[5], 0, gt[5])
                 self._preview_bgr = warped; self._preview_gt = gt; self._preview_Hf = Hf
 
             elif mk == "proj":
                 df = self._get_working_df()
-                if df is None or len(df) < 4: messagebox.showerror("Error", "Need >= 4 GCPs."); return
+                if df is None or len(df) < 4: messagebox.showerror("Error", "Need >= 4 GCPs.", parent=self); return
                 K = self._get_K_for((wi, hi)); elev = self._get_elev()
                 rv, tv, cen, errs = _solve_extrinsics(df[["Pixel_X","Pixel_Y"]].values, df[["Real_X","Real_Y","Real_Z"]].values, K, self._dist)
                 self._rvec, self._tvec, self._centroid = rv, tv, cen
@@ -980,7 +1039,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
 
             else:
                 df = self._get_working_df()
-                if df is None or len(df) < 4: messagebox.showerror("Error", "Need >= 4 GCPs."); return
+                if df is None or len(df) < 4: messagebox.showerror("Error", "Need >= 4 GCPs.", parent=self); return
                 if not self._resolve_epsg(): return
                 gcps, epsg = _make_gdal_gcps(df); srs = osr.SpatialReference(); srs.ImportFromEPSG(epsg)
                 gsd = _estimate_gsd(df)
@@ -1006,7 +1065,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
             self._show(cv2.cvtColor(self._preview_bgr, cv2.COLOR_BGR2RGB), self._sec_lbl)
             print(f"[Secondary] Preview: {self._preview_bgr.shape[1]}x{self._preview_bgr.shape[0]}")
         except Exception as e:
-            messagebox.showerror("Error", str(e)); import traceback; traceback.print_exc()
+            messagebox.showerror("Error", str(e), parent=self); import traceback; traceback.print_exc()
 
     # ── Batch save single ──
     def _save_single(self, img_path, out_path):
@@ -1017,10 +1076,12 @@ class GeoReferenceModule(ctk.CTkToplevel):
         crop_fracs = self._get_crop_fracs()
         if mk == "homo":
             warped, Hf, gt = _homo_warp_windowed(img, self._H, self._get_scale(), source_corners, crop_fracs)
-            if self._aoi and self._preview_bgr is not None:
-                oh, ow = self._preview_bgr.shape[:2]; nh, nw = warped.shape[:2]
+            if self._aoi and self._aoi_preview_shape is not None:
+                oh, ow = self._aoi_preview_shape; nh, nw = warped.shape[:2]
                 sx, sy = nw/ow, nh/oh; x1, y1, x2, y2 = self._aoi
                 x1, y1 = max(0, int(x1*sx)), max(0, int(y1*sy)); x2, y2 = min(nw, int(x2*sx)), min(nh, int(y2*sy))
+                if x2 <= x1 or y2 <= y1:
+                    raise ValueError(f"AOI out of bounds after scaling ({x1},{y1})->({x2},{y2})")
                 warped = warped[y1:y2, x1:x2]; gt = (gt[0]+x1*gt[1], gt[1], 0, gt[3]+y1*gt[5], 0, gt[5])
             gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
             return _write_geotiff(out_path, warped, np.where(gray > 1, 255, 0).astype(np.uint8), gt, self.user_epsg, self._lock)
@@ -1058,13 +1119,13 @@ class GeoReferenceModule(ctk.CTkToplevel):
         return sorted(set(imgs))
 
     def _process_all(self):
-        if not self.input_folder: messagebox.showerror("Error", "Select input folder."); return
-        if not self.output_folder: messagebox.showerror("Error", "Select output folder."); return
+        if not self.input_folder: messagebox.showerror("Error", "Select input folder.", parent=self); return
+        if not self.output_folder: messagebox.showerror("Error", "Select output folder.", parent=self); return
         if not self._resolve_epsg(): return
         mk = self._method_key
-        if mk == "homo" and self._H is None: messagebox.showerror("Error", "Load homography."); return
-        if mk == "proj" and self._rvec is None: messagebox.showerror("Error", "Run georeferencing first."); return
-        if mk in ("tps","poly1","poly2") and self._gcp_df is None: messagebox.showerror("Error", "Load GCPs."); return
+        if mk == "homo" and self._H is None: messagebox.showerror("Error", "Load homography.", parent=self); return
+        if mk == "proj" and self._rvec is None: messagebox.showerror("Error", "Run georeferencing first.", parent=self); return
+        if mk in ("tps","poly1","poly2") and self._gcp_df is None: messagebox.showerror("Error", "Load GCPs.", parent=self); return
         use_sub = self._subfolder_var.get()
         def _worker():
             subs = sorted([f.path for f in os.scandir(self.input_folder) if f.is_dir()]) if use_sub else []
@@ -1076,7 +1137,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
                 out_sub = os.path.join(self.output_folder, os.path.basename(sub)) if use_sub and sub != self.input_folder else self.output_folder
                 if use_sub and sub != self.input_folder: os.makedirs(out_sub, exist_ok=True)
                 for ip in imgs: all_jobs.append((ip, os.path.join(out_sub, os.path.splitext(os.path.basename(ip))[0]+".tif")))
-            if not all_jobs: self.after(0, lambda: messagebox.showerror("Error", "No images.")); return
+            if not all_jobs: self.after(0, lambda: messagebox.showerror("Error", "No images.", parent=self)); return
             n = len(all_jobs); t0 = time.time(); m2i = {}
             print(f"\n[Batch] Processing {n} image(s)...")
             self.after(0, lambda: self._prog.set(0))
@@ -1086,14 +1147,18 @@ class GeoReferenceModule(ctk.CTkToplevel):
                 f = i/n; self.after(0, lambda f=f: self._prog.set(f))
                 self.after(0, lambda t=self._eta(t0, f): self._eta_lbl.configure(text=t))
             print("\n[Validation] Checking...")
+            val_t0 = time.time()
             self.after(0, lambda: self._eta_lbl.configure(text="Validating..."))
             rc = {}; pf = []; pfs = set()
             out_folders = set(os.path.dirname(op) for _, op in all_jobs)
-            for _ in range(20):
+            max_passes = 20
+            for vpass in range(max_passes):
                 bad = []
                 for folder in out_folders: bad.extend(sweep_and_validate(folder))
                 bad = [(p, r) for p, r in bad if p not in pfs]
                 if not bad: print("[Validation] All OK!"); break
+                vfrac = (vpass + 1) / max_passes
+                self.after(0, lambda t=self._eta(val_t0, vfrac): self._eta_lbl.configure(text=f"Validating… {t}"))
                 for cp, reason in bad:
                     if rc.get(cp, 0) >= MAX_RETRIES:
                         if cp not in pfs: pf.append((cp, reason)); pfs.add(cp)
@@ -1110,9 +1175,9 @@ class GeoReferenceModule(ctk.CTkToplevel):
             self.after(0, lambda: self._prog.set(1.0)); self.after(0, lambda: self._eta_lbl.configure(text="Done"))
             if pf:
                 ns = "\n".join(os.path.basename(p) for p, _ in pf[:10])
-                self.after(0, lambda: messagebox.showwarning("Some Failed", f"{len(pf)} file(s) failed:\n\n{ns}"))
+                self.after(0, lambda: messagebox.showwarning("Some Failed", f"{len(pf)} file(s) failed:\n\n{ns}", parent=self))
             else:
-                self.after(0, lambda: messagebox.showinfo("Complete", f"All {n} files processed!"))
+                self.after(0, lambda: messagebox.showinfo("Complete", f"All {n} files processed!", parent=self))
         threading.Thread(target=_worker, daemon=True).start()
 
     # ── Save / Load Settings ──
@@ -1122,6 +1187,9 @@ class GeoReferenceModule(ctk.CTkToplevel):
                 "image_path": self._img_path or "",
                 "input_folder": self.input_folder or "",
                 "output_folder": self.output_folder or "",
+                "homography_path": self._homo_path or "",
+                "gcp_path": self._gcp_path or "",
+                "calibration_path": self._cal_path or "",
             },
             "method": self._method_var.get(),
             "corner": self._corner_var.get(),
@@ -1153,6 +1221,8 @@ class GeoReferenceModule(ctk.CTkToplevel):
             if paths.get("image_path"):
                 self._img_path = paths["image_path"]
                 self._img_lbl.configure(text=os.path.basename(self._img_path), text_color="#81C784")
+                if os.path.exists(self._img_path):
+                    self._show(self._img_path, self._orig_lbl)
             if paths.get("input_folder"):
                 self.input_folder = paths["input_folder"]
                 self._in_lbl.configure(text=os.path.basename(self.input_folder), text_color="#81C784")
@@ -1164,6 +1234,14 @@ class GeoReferenceModule(ctk.CTkToplevel):
             if method and method in METHODS:
                 self._method_var.set(method)
                 self._on_method_change(method)
+
+            # Reload data files (homography, GCPs, calibration)
+            if paths.get("homography_path"):
+                self._load_homo(paths["homography_path"])
+            if paths.get("gcp_path"):
+                self._load_gcp(paths["gcp_path"])
+            if paths.get("calibration_path"):
+                self._load_cal(paths["calibration_path"])
 
             corner = data.get("corner")
             if corner:
@@ -1212,14 +1290,14 @@ class GeoReferenceModule(ctk.CTkToplevel):
 
     # ── Reset ──
     def _reset(self):
-        if not messagebox.askyesno("Reset", "Clear everything?"): return
-        self._img_path = ""; self._H = None; self._homo_epsg = None
-        self._K = None; self._dist = None; self._cal_img_size = None
-        self._gcp_df = None; self._gcp_epsg = None
+        if not messagebox.askyesno("Reset", "Clear everything?", parent=self): return
+        self._img_path = ""; self._H = None; self._homo_epsg = None; self._homo_path = ""
+        self._K = None; self._dist = None; self._cal_img_size = None; self._cal_path = ""
+        self._gcp_df = None; self._gcp_epsg = None; self._gcp_path = ""
         self._rvec = self._tvec = self._centroid = None
         self._grid_x = self._grid_y = self._grid_z = None
         self._preview_bgr = None; self._preview_gt = None; self._preview_Hf = None
-        self._aoi = None; self._excluded_gcps = []; self._scale = 4.0
+        self._aoi = None; self._aoi_preview_shape = None; self._excluded_gcps = []; self._scale = 4.0
         self.image_list = []; self.output_folder = ""; self.input_folder = ""; self.user_epsg = None
         for lbl, txt in [(self._orig_lbl,"Original"),(self._init_lbl,"Initial Georef"),(self._sec_lbl,"Secondary Georef")]:
             lbl.configure(image=None, text=txt); lbl.image = None
