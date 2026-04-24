@@ -10,9 +10,9 @@
 
 ---
 
-## What's New in V2.0.0
+## What's in here
 
-V2.0.0 adds a full **Pre‑prep** pipeline, a **Data Exploration** submodule, and a dedicated **Profile** tool, alongside improvements to the existing modules.
+A full **Pre‑prep** pipeline, a **Data Exploration** submodule, and a dedicated **Profile** tool, alongside improvements to the existing modules.
 
 | Addition | Description |
 |----------|-------------|
