@@ -1,7 +1,7 @@
 """
-GeoCamPal — Create DEMs from shoreline GeoJSON files and water‑level CSV.
+GeoCamPal — Create DEMs from shoreline GeoJSON files and water-level CSV.
 
-Uses PCA‑aligned cross‑shore transect interpolation (waterline method)
+Uses PCA-aligned cross-shore transect interpolation (waterline method)
 to avoid Delaunay triangulation artefacts.
 """
 
@@ -44,9 +44,9 @@ ctk.set_default_color_theme("green")
 class CreateDemWindow(ctk.CTkToplevel):
     """
     GUI window that creates Digital Elevation Models (DEMs)
-    from shoreline GeoJSON files and a water‑level CSV.
+    from shoreline GeoJSON files and a water-level CSV.
 
-    Interpolation uses PCA‑aligned cross‑shore transects to
+    Interpolation uses PCA-aligned cross-shore transects to
     avoid Delaunay triangulation artefacts at contour edges.
     """
     # —————————————————————————— init & UI ——————————————————————————
@@ -77,10 +77,13 @@ class CreateDemWindow(ctk.CTkToplevel):
         self._pca_cross: np.ndarray | None = None
         self._cancel_flag = False
         self._batch_thread = None
+        self._last_dem_extent = None  # (x_min, x_max, y_min, y_max)
 
         # UI state variables
         self.export_xyz_var = tk.BooleanVar(value=False)
         self.beach_shape_var = tk.StringVar(value="Straight")
+        self.dem_mode_var = tk.StringVar(value="Daily")
+        self.wl_bin_var = tk.StringVar(value="0.02")
 
         # default filename pattern
         DEFAULT_PATTERN = (
@@ -99,10 +102,8 @@ class CreateDemWindow(ctk.CTkToplevel):
         self.console_text = tk.Text(console_frame, wrap="word", height=10)
         self.console_text.pack(fill="both", expand=True, padx=5, pady=5)
         
-        self._console_redir = setup_console(
-            self.console_text,
-            "Here you may see console outputs\n--------------------------------\n",
-        )
+        self._console_redir = setup_console(self.console_text, "")
+        self._print_guide()
 
     # ————————————————————————— UI helpers ——————————————————————————————
     def _create_top_panel(self):
@@ -116,23 +117,20 @@ class CreateDemWindow(ctk.CTkToplevel):
         self.top_left_up_frame.pack(side="top", fill="both", expand=True)
         self.top_left_up_label = ctk.CTkLabel(
             self.top_left_up_frame,
-            text="Water‑level timeseries + shoreline availability")
+            text="Water-level timeseries + shoreline availability")
         self.top_left_up_label.pack(fill="both", expand=True)
 
         self.top_left_down_frame = ctk.CTkFrame(self.top_left_container)
         self.top_left_down_frame.pack(side="top", fill="both", expand=True)
         self.top_left_down_label = ctk.CTkLabel(
             self.top_left_down_frame,
-            text="Daily water‑level and shoreline availability")
+            text="Daily water-level and shoreline availability")
         self.top_left_down_label.pack(fill="both", expand=True)
 
         self.top_right_frame = ctk.CTkFrame(self.top_frame)
         self.top_right_frame.pack(side="left", fill="both", expand=True, padx=5, pady=5)
         self.top_right_label = ctk.CTkLabel(self.top_right_frame, text="Daily DEM")
         self.top_right_label.pack(fill="both", expand=True)
-
-        self.progress_bar = None
-        self.progress_label = None
 
     def _create_bottom_panel(self):
         self.bottom_frame = ctk.CTkFrame(self)
@@ -146,14 +144,14 @@ class CreateDemWindow(ctk.CTkToplevel):
             row.pack(side="left", anchor="w")
             return row
     
-        # ————————————— inputs row —————————————
+        # ————————————— row 1: inputs —————————————
         inputs = left_row(self.bottom_frame)
     
         self.wl_csv_var = tk.StringVar()
         ctk.CTkEntry(inputs, textvariable=self.wl_csv_var, width=240).pack(side="left", padx=5)
         ctk.CTkButton(
             inputs,
-            text="Browse Water‑Level CSV",
+            text="Browse Water-Level CSV",
             command=self.browse_wl_csv
         ).pack(side="left", padx=5)
     
@@ -168,7 +166,7 @@ class CreateDemWindow(ctk.CTkToplevel):
         ctk.CTkLabel(inputs, text="Filename pattern:").pack(side="left", padx=(15, 5))
         ctk.CTkEntry(inputs, textvariable=self.regex_var, width=320).pack(side="left", padx=5)
     
-        # ————————————— DEM settings row —————————————
+        # ————————————— row 2: DEM settings —————————————
         dem = left_row(self.bottom_frame)
     
         ctk.CTkLabel(dem, text="Resolution (m):").pack(side="left", padx=5)
@@ -191,69 +189,185 @@ class CreateDemWindow(ctk.CTkToplevel):
             width=110,
         ).pack(side="left", padx=5)
     
-        ctk.CTkButton(
+        ctk.CTkLabel(dem, text="DEM mode:").pack(side="left", padx=(10, 5))
+        ctk.CTkOptionMenu(
             dem,
-            text="Generate next DEM",
-            command=self.on_generate_next_dem,
-            fg_color="#0F52BA", hover_color="#3A7AE0",
-        ).pack(side="left", padx=(15, 5))
-    
-        # ————————————— output row —————————————
-        out = left_row(self.bottom_frame)
+            variable=self.dem_mode_var,
+            values=["Daily", "Composite"],
+            width=120,
+        ).pack(side="left", padx=5)
+
+        ctk.CTkLabel(dem, text="WL bin (m):").pack(side="left", padx=(10, 5))
+        ctk.CTkEntry(dem, textvariable=self.wl_bin_var, width=60).pack(side="left", padx=5)
+
+        # ————————————— row 3: output + generate —————————————
+        gen = left_row(self.bottom_frame)
     
         self.out_dir_var = tk.StringVar()
-        ctk.CTkEntry(out, textvariable=self.out_dir_var, width=240).pack(side="left", padx=5)
+        ctk.CTkEntry(gen, textvariable=self.out_dir_var, width=240).pack(side="left", padx=5)
         ctk.CTkButton(
-            out,
+            gen,
             text="Browse Output Folder",
             command=self.browse_out_dir,
             fg_color="#8C7738", hover_color="#B19749"
         ).pack(side="left", padx=5)
-    
-        self.out_dir_display_label = ctk.CTkLabel(out, text="", width=240, anchor="w")
-        self.out_dir_display_label.pack(side="left", padx=5)
-    
+
         ctk.CTkCheckBox(
-            out,
+            gen,
             text="Export XYZ?",
             variable=self.export_xyz_var
-        ).pack(side="left", padx=(20, 5))
+        ).pack(side="left", padx=(15, 5))
     
         ctk.CTkButton(
-            out,
+            gen,
+            text="Generate next DEM",
+            command=self.on_generate_next_dem,
+            fg_color="#0F52BA", hover_color="#3A7AE0",
+        ).pack(side="left", padx=(15, 5))
+
+        self.gen_progress = ctk.CTkProgressBar(gen, width=150)
+        self.gen_progress.pack(side="left", padx=(10, 5))
+        self.gen_progress.set(0.0)
+
+        self.gen_eta_label = ctk.CTkLabel(
+            gen, text="", font=("Arial", 10), text_color="gray",
+            anchor="w", width=180)
+        self.gen_eta_label.pack(side="left", padx=5)
+
+        # ————————————— row 4: batch —————————————
+        batch = left_row(self.bottom_frame)
+
+        ctk.CTkButton(
+            batch,
             text="Batch process",
             command=self.on_batch_process,
             fg_color="#0F52BA", hover_color="#3A7AE0"
-        ).pack(side="left", padx=(25, 5))
+        ).pack(side="left", padx=5)
+
+        self.batch_progress = ctk.CTkProgressBar(batch, width=200)
+        self.batch_progress.pack(side="left", padx=(10, 5))
+        self.batch_progress.set(0.0)
+
+        self.batch_eta_label = ctk.CTkLabel(
+            batch, text="", font=("Arial", 10), text_color="gray",
+            anchor="w", width=220)
+        self.batch_eta_label.pack(side="left", padx=5)
 
         ctk.CTkButton(
-            out,
+            batch,
             text="Cancel batch",
             command=self._cancel_batch,
-            fg_color="#8B0000",
-            hover_color="#A52A2A",
-        ).pack(side="left", padx=5)
-    
-        ctk.CTkButton(
-            out,
-            text="Reset",
-            command=self.reset_to_initial,
-            fg_color="red",
-            hover_color="#A52A2A",
-            text_color="white"
+            fg_color="#A52A2A",
+            hover_color="#C0392B",
         ).pack(side="left", padx=10)
 
+        # ————————————— row 5: reset + settings —————————————
+        meta = left_row(self.bottom_frame)
+
         ctk.CTkButton(
-            out, text="Save Settings", fg_color="#4F5D75",hover_color="#6C7C97",
+            meta,
+            text="Reset",
+            command=self.reset_to_initial,
+            fg_color="#8B0000",
+            hover_color="#6B0000",
+            text_color="white"
+        ).pack(side="left", padx=5)
+
+        ctk.CTkButton(
+            meta, text="Save Settings", fg_color="#4F5D75", hover_color="#6C7C97",
             command=self._save_settings,
         ).pack(side="left", padx=5)
 
         ctk.CTkButton(
-            out, text="Load Settings", fg_color="#4F5D75",hover_color="#6C7C97",
+            meta, text="Load Settings", fg_color="#4F5D75", hover_color="#6C7C97",
             command=self._load_settings,
         ).pack(side="left", padx=5)
 
-    # ————————————————————————— file‑dialog callbacks ——————————————————
+    # ————————————————————————— console guide ——————————————————————————
+    def _print_guide(self):
+        """Print the tool guide to the console."""
+        print(
+            "Create DEM — Tool Guide\n"
+            "================================\n"
+            "\n"
+            "HOW IT WORKS\n"
+            "  This tool builds Digital Elevation Models (DEMs) from\n"
+            "  georeferenced shoreline GeoJSON files and a water-level\n"
+            "  timeseries CSV.  Each shoreline is assigned the water\n"
+            "  level recorded at its timestamp, turning every contour\n"
+            "  into an elevation contour.  Cross-shore transects are\n"
+            "  cast perpendicular to the shore (via PCA), and the\n"
+            "  elevation is interpolated between contours to produce\n"
+            "  a gridded surface saved as a GeoTIFF.\n"
+            "\n"
+            "INPUT FILES\n"
+            "  Water-Level CSV   — Must contain columns 'time' and 'wl'.\n"
+            "                      Time is resampled to 1-min intervals.\n"
+            "  GeoJSON Folder    — Folder of shoreline .geojson files.\n"
+            "                      Filenames must match the regex pattern\n"
+            "                      so that date/time can be extracted.\n"
+            "  Filename pattern  — Regex with named groups: year, month,\n"
+            "                      day, hour1, min1, hour2, min2.\n"
+            "                      The midpoint of hour1:min1–hour2:min2\n"
+            "                      is used as the shoreline timestamp.\n"
+            "\n"
+            "DEM SETTINGS\n"
+            "  Resolution (m)    — Grid cell size of the output DEM.\n"
+            "  Vertex spacing (m)— Densification interval along each\n"
+            "                      shoreline.  Smaller = more points.\n"
+            "  Smoothing sigma   — Gaussian smoothing strength applied\n"
+            "                      after interpolation.  Higher values\n"
+            "                      produce a smoother surface; lower\n"
+            "                      values preserve more detail.\n"
+            "                      0 = no smoothing, 1-2 = mild,\n"
+            "                      3-5 = moderate, >5 = heavy.\n"
+            "  Beach shape       — Straight: one global PCA direction\n"
+            "                        for all transects (fast, good for\n"
+            "                        straight coastlines).\n"
+            "                      Curved: moving-window PCA that lets\n"
+            "                        transect direction bend with the\n"
+            "                        shoreline (slower, better for bays\n"
+            "                        and curved coasts).\n"
+            "\n"
+            "DEM MODE\n"
+            "  Daily             — One DEM per calendar day.  Only\n"
+            "                      shorelines from that day are used.\n"
+            "                      'Generate next DEM' steps through\n"
+            "                      days one at a time; 'Batch process'\n"
+            "                      runs all days automatically.\n"
+            "  Composite         — A single DEM built from ALL\n"
+            "                      shorelines across the entire dataset.\n"
+            "                      Maximises elevation coverage by\n"
+            "                      combining many tidal cycles.  Output\n"
+            "                      represents a time-averaged surface.\n"
+            "\n"
+            "WL BIN (m)\n"
+            "  During a tidal cycle the water passes through the same\n"
+            "  elevation twice (once rising, once falling).  The\n"
+            "  shoreline position may differ slightly each time, which\n"
+            "  can create zigzag artefacts in the cross-shore profile.\n"
+            "  The WL bin groups water levels within this tolerance and\n"
+            "  replaces them with a single median position, removing\n"
+            "  the zigzag.  Default 0.02 m.  Set to 0 to disable.\n"
+            "\n"
+            "OUTPUT\n"
+            "  Output Folder     — Where GeoTIFFs (and optional XYZ\n"
+            "                      CSVs) are saved.\n"
+            "  Export XYZ?       — Also save the raw (x, y, z) points\n"
+            "                      used for each DEM as a CSV file.\n"
+            "\n"
+            "BUTTONS\n"
+            "  Generate next DEM — Process one day (Daily) or the\n"
+            "                      full composite (Composite mode).\n"
+            "  Batch process     — Run all days at once (Daily mode)\n"
+            "                      or create the composite DEM.\n"
+            "  Cancel batch      — Stop a running batch.\n"
+            "  Reset             — Clear all data and restore defaults.\n"
+            "  Save/Load Settings— Persist parameters to a JSON file.\n"
+            "================================\n"
+        )
+
+    # ————————————————————————— file-dialog callbacks ——————————————————
     def browse_wl_csv(self):
         path = filedialog.askopenfilename(parent = self,filetypes=[("CSV files", "*.csv")])
         if path:
@@ -269,7 +383,6 @@ class CreateDemWindow(ctk.CTkToplevel):
         path = filedialog.askdirectory(parent = self)
         if path:
             self.out_dir_var.set(path)
-            self.out_dir_display_label.configure(text=path)
 
 
 
@@ -283,6 +396,7 @@ class CreateDemWindow(ctk.CTkToplevel):
         self._pca_center = None
         self._pca_along = None
         self._pca_cross = None
+        self._last_dem_extent = None
 
     def reset_to_initial(self):
         """Full reset: cancel batch, clear caches, restore plots to placeholders."""
@@ -292,10 +406,10 @@ class CreateDemWindow(ctk.CTkToplevel):
         # restore plot labels to defaults
         self.top_left_up_label.configure(
             image=None,
-            text="Water‑level timeseries + shoreline availability")
+            text="Water-level timeseries + shoreline availability")
         self.top_left_down_label.configure(
             image=None,
-            text="Daily water‑level and shoreline availability")
+            text="Daily water-level and shoreline availability")
         self.top_right_label.configure(
             image=None,
             text="Daily DEM")
@@ -304,26 +418,31 @@ class CreateDemWindow(ctk.CTkToplevel):
         self.wl_csv_var.set("")
         self.geojson_dir_var.set("")
         self.out_dir_var.set("")
-        self.out_dir_display_label.configure(text="")
         self.export_xyz_var.set(False)
         self.resolution_var.set("1")
         self.spacing_var.set("1")
         self.sigma_var.set("1.5")
         self.beach_shape_var.set("Straight")
+        self.dem_mode_var.set("Daily")
+        self.wl_bin_var.set("0.02")
+        self.gen_progress.set(0.0)
+        self.gen_eta_label.configure(text="")
+        self.batch_progress.set(0.0)
+        self.batch_eta_label.configure(text="")
 
         self.console_text.delete("1.0", tk.END)
         print("--- Session reset. All caches cleared. ---\n")
-        print("Here you may see console outputs\n--------------------------------\n")
+        self._print_guide()
 
     # ————————————————————————— data loading & plotting ————————————————
     def load_data_if_needed(self):
         if self.shorelines_gdf is not None:
             return  # already loaded
 
-        # water‑level CSV
+        # water-level CSV
         csv_path = self.wl_csv_var.get().strip()
         if not csv_path or not os.path.isfile(csv_path):
-            messagebox.showerror("Error", "Please specify a valid water‑level CSV.")
+            messagebox.showerror("Error", "Please specify a valid water-level CSV.")
             raise ValueError("No CSV")
 
         df = pd.read_csv(csv_path)
@@ -417,7 +536,7 @@ class CreateDemWindow(ctk.CTkToplevel):
 
     def _compute_pca_directions(self):
         """
-        Determine the along‑shore / cross‑shore principal directions
+        Determine the along-shore / cross-shore principal directions
         from all shoreline vertices using PCA.  Computed once per dataset.
         """
         all_xy = []
@@ -432,7 +551,7 @@ class CreateDemWindow(ctk.CTkToplevel):
                     all_xy.extend(part.coords)
         if len(all_xy) < 3:
             print("Warning: too few shoreline points for PCA, "
-                  "falling back to X = cross‑shore, Y = along‑shore.")
+                  "falling back to X = cross-shore, Y = along-shore.")
             self._pca_center = np.array([0.0, 0.0])
             self._pca_along = np.array([0.0, 1.0])
             self._pca_cross = np.array([1.0, 0.0])
@@ -441,8 +560,8 @@ class CreateDemWindow(ctk.CTkToplevel):
         self._pca_center, self._pca_along, self._pca_cross = self._pca_from_xy(
             np.array(all_xy)[:, :2]
         )
-        print(f"PCA along‑shore direction: {self._pca_along}")
-        print(f"PCA cross‑shore direction: {self._pca_cross}")
+        print(f"PCA along-shore direction: {self._pca_along}")
+        print(f"PCA cross-shore direction: {self._pca_cross}")
 
     # ————————————————— plotting helpers ———————————————————————————————
     def update_figure_in_label(self, label: ctk.CTkLabel, fig):
@@ -451,23 +570,36 @@ class CreateDemWindow(ctk.CTkToplevel):
         fig.savefig(buf, format="png", dpi=100, bbox_inches="tight")
         buf.seek(0)
         im = Image.open(buf)
-        label.configure(image=ctk.CTkImage(light_image=im, dark_image=im,
-                                           size=(im.width, im.height)))
-        label.image = label.cget("image")
+        ctk_img = ctk.CTkImage(light_image=im, dark_image=im,
+                               size=(im.width, im.height))
+        label.configure(image=ctk_img, text="")
+        label.image = ctk_img
 
     def plot_waterlevel_overlay(self):
         if self.df_wl_1min is None or self.shorelines_gdf is None:
             return
         wl = self.df_wl_1min
         times = sorted(self.shorelines_gdf["time"].unique())
+
+        # focus the x-axis on the shoreline time range with ~10 % padding
+        t_min, t_max = times[0], times[-1]
+        span = (t_max - t_min) or pd.Timedelta(hours=12)
+        pad = span * 0.10
+        xl = t_min - pad
+        xr = t_max + pad
+        wl_crop = wl[xl:xr]
+
         fig, ax = plt.subplots(figsize=(6, 3))
-        ax.plot(wl.index, wl["wl"], label="Water level")
+        ax.plot(wl_crop.index, wl_crop["wl"], label="Water level",
+                linewidth=0.6)
         ax.scatter(times, [wl["wl"].asof(t) for t in times],
-                   c="r", s=10, label="Shorelines")
+                   c="r", s=14, zorder=5, label="Shorelines")
+        ax.set_xlim(xl, xr)
         ax.set_title("WL timeseries + shoreline availability")
         ax.set_xlabel("Time"); ax.set_ylabel("WL (m)")
         ax.tick_params(axis="x", labelrotation=45)
-        ax.legend(); fig.tight_layout()
+        ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=True)
+        fig.tight_layout(rect=[0, 0, 0.82, 1])
         self.update_figure_in_label(self.top_left_up_label, fig)
         plt.close(fig)
 
@@ -485,19 +617,60 @@ class CreateDemWindow(ctk.CTkToplevel):
         idx = self.daily_dates.index(date_val)
         ax.set_title(f"Day {idx+1} of {len(self.daily_dates)} — {date_val}")
         ax.set_xlabel("Hour"); ax.set_ylabel("WL (m)")
-        ax.legend(); ax.xaxis.set_major_formatter(mdates.DateFormatter("%H"))
+        ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=True)
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%H"))
         ax.xaxis.set_major_locator(mdates.HourLocator(interval=1))
-        fig.tight_layout()
+        fig.tight_layout(rect=[0, 0, 0.82, 1])
         self.update_figure_in_label(self.top_left_down_label, fig)
         plt.close(fig)
 
     def plot_dem(self, grid_z):
         if grid_z is None or np.all(np.isnan(grid_z)):
             return
-        fig, ax = plt.subplots(figsize=(6, 8))
-        im = ax.imshow(grid_z, cmap="viridis", aspect="auto")
-        fig.colorbar(im, ax=ax, label="Elevation (m)")
-        ax.set_title("Created DEM"); fig.tight_layout()
+
+        ext = self._last_dem_extent  # (x_min, x_max, y_min, y_max)
+        if ext is not None:
+            x_min, x_max, y_min, y_max = ext
+            # relative coordinates so axis labels stay compact
+            extent = [0, x_max - x_min, 0, y_max - y_min]
+            xlabel = "Cross-shore (m)"
+            ylabel = "Along-shore (m)"
+        else:
+            nrows, ncols = grid_z.shape
+            extent = [0, ncols, 0, nrows]
+            xlabel = "Column"
+            ylabel = "Row"
+
+        fig, ax = plt.subplots(figsize=(5, 7))
+        im = ax.imshow(
+            grid_z, cmap="viridis", aspect="equal",
+            extent=extent, origin="upper",
+        )
+
+        # contour overlay for depth cues
+        try:
+            valid = ~np.isnan(grid_z)
+            if valid.sum() > 50:
+                z_range = np.nanmax(grid_z) - np.nanmin(grid_z)
+                n_levels = max(4, min(12, int(z_range / 0.2)))
+                ys = np.linspace(extent[2], extent[3], grid_z.shape[0])
+                xs = np.linspace(extent[0], extent[1], grid_z.shape[1])
+                ax.contour(
+                    xs, ys, grid_z[::-1],
+                    levels=n_levels, colors="k",
+                    linewidths=0.35, alpha=0.45,
+                )
+        except Exception:
+            pass
+
+        cbar = fig.colorbar(im, ax=ax, shrink=0.75, pad=0.03)
+        cbar.set_label("Elevation (m)", fontsize=9)
+        cbar.ax.tick_params(labelsize=8)
+        ax.set_xlabel(xlabel, fontsize=9)
+        ax.set_ylabel(ylabel, fontsize=9)
+        ax.tick_params(labelsize=8)
+        ax.set_title("DEM", fontsize=10, fontweight="bold")
+        fig.tight_layout()
         self.update_figure_in_label(self.top_right_label, fig)
         plt.close(fig)
 
@@ -523,6 +696,43 @@ class CreateDemWindow(ctk.CTkToplevel):
             coords.extend(_densify_line(LineString(geom.exterior.coords)))
         return coords
 
+    # ————————————————————— WL-binning helper ————————————————————————
+    def _bin_wl_duplicates(self, cs, zs):
+        """
+        Collapse cross-shore / water-level pairs that share a similar
+        water level into a single representative point per elevation bin.
+
+        When multiple shorelines correspond to the same (or nearly the
+        same) water level — e.g. from the rising and falling limb of
+        a tidal cycle — they may map to different cross-shore positions
+        at the same z, creating non-monotonic profiles.  Binning by z
+        and taking the median cross-shore position removes this artefact.
+        """
+        try:
+            tol = float(self.wl_bin_var.get())
+        except (ValueError, AttributeError):
+            tol = 0.0
+
+        if tol <= 0 or len(cs) < 2:
+            return cs, zs
+
+        # assign each point to a bin by rounding z to the nearest tol
+        bin_labels = np.round(zs / tol) * tol
+        unique_bins = np.unique(bin_labels)
+
+        cs_out, zs_out = [], []
+        for b in unique_bins:
+            mask = bin_labels == b
+            cs_out.append(np.median(cs[mask]))
+            zs_out.append(np.median(zs[mask]))
+
+        cs_out = np.array(cs_out)
+        zs_out = np.array(zs_out)
+
+        # sort by cross-shore position for interp1d
+        order = np.argsort(cs_out)
+        return cs_out[order], zs_out[order]
+
     # ————————————————————— transect interpolation —————————————————————
     def _interpolate_transects(self, dense_shorelines, grid_x, grid_y,
                                grid_x_vals, grid_y_vals, res):
@@ -539,7 +749,7 @@ class CreateDemWindow(ctk.CTkToplevel):
     def _interpolate_transects_straight(self, dense_shorelines, grid_x, grid_y,
                                         grid_x_vals, grid_y_vals, res):
         """
-        Cross‑shore transect interpolation aligned to one global PCA direction.
+        Cross-shore transect interpolation aligned to one global PCA direction.
         Best suited to beaches whose shoreline direction is approximately constant.
         """
         center = self._pca_center
@@ -554,10 +764,10 @@ class CreateDemWindow(ctk.CTkToplevel):
         all_along_flat = np.concatenate(all_along)
         a_min, a_max = all_along_flat.min(), all_along_flat.max()
 
-        # step along‑shore at the grid resolution
+        # step along-shore at the grid resolution
         along_vals = np.arange(a_min, a_max + res, res)
 
-        # pre‑project each shoreline into along/cross coords
+        # pre-project each shoreline into along/cross coords
         sl_projections = []
         for sl in dense_shorelines:
             diff = sl["coords"] - center
@@ -565,7 +775,7 @@ class CreateDemWindow(ctk.CTkToplevel):
             sl_cross = diff @ cross_dir
             sl_projections.append((sl_along, sl_cross, sl["wl"]))
 
-        # determine cross‑shore extent
+        # determine cross-shore extent
         all_cross = np.concatenate([p[1] for p in sl_projections])
         c_min, c_max = all_cross.min() - 2, all_cross.max() + 2
         cross_vals = np.arange(c_min, c_max + res, res)
@@ -573,7 +783,7 @@ class CreateDemWindow(ctk.CTkToplevel):
         dem_rotated = np.full((len(along_vals), len(cross_vals)), np.nan)
 
         for ia, a_target in enumerate(along_vals):
-            # find where each shoreline crosses this along‑shore position
+            # find where each shoreline crosses this along-shore position
             xz_pairs = []
             for sl_along, sl_cross, wl in sl_projections:
                 for k in range(len(sl_along) - 1):
@@ -594,9 +804,14 @@ class CreateDemWindow(ctk.CTkToplevel):
             cs = np.array([p[0] for p in xz_pairs])
             zs = np.array([p[1] for p in xz_pairs])
 
-            # remove exact duplicates at the same cross‑shore position
+            # remove exact duplicates at the same cross-shore position
             _, uidx = np.unique(cs, return_index=True)
             cs, zs = cs[uidx], zs[uidx]
+            if len(cs) < 2:
+                continue
+
+            # collapse near-duplicate water levels (rising/falling tide)
+            cs, zs = self._bin_wl_duplicates(cs, zs)
             if len(cs) < 2:
                 continue
 
@@ -680,6 +895,11 @@ class CreateDemWindow(ctk.CTkToplevel):
             if len(cs) < 2:
                 continue
 
+            # collapse near-duplicate water levels (rising/falling tide)
+            cs, zs = self._bin_wl_duplicates(cs, zs)
+            if len(cs) < 2:
+                continue
+
             c_min = min(local_cross_cloud.min(), cs.min()) - 2.0
             c_max = max(local_cross_cloud.max(), cs.max()) + 2.0
             cross_vals = np.arange(c_min, c_max + res, res)
@@ -712,7 +932,7 @@ class CreateDemWindow(ctk.CTkToplevel):
         """
         Gaussian smooth the DEM while respecting NaN gaps.
 
-        Uses a normalised‑convolution approach so that NaN cells
+        Uses a normalised-convolution approach so that NaN cells
         do not bleed into valid data.
         """
         if sigma <= 0:
@@ -729,6 +949,31 @@ class CreateDemWindow(ctk.CTkToplevel):
         return result
 
     # ————————————————————— DEM generation —————————————————————————————
+    @staticmethod
+    def _safe_output_path(path: Path) -> Path:
+        """
+        Return *path* if writable, otherwise append _1, _2, … until
+        a usable name is found.  Avoids the 'Permission denied' crash
+        when the previous output is still open in another program.
+        """
+        if not path.exists():
+            return path
+        try:
+            # test whether we can actually overwrite
+            path.unlink()
+            return path
+        except PermissionError:
+            pass
+        stem = path.stem
+        suffix = path.suffix
+        parent = path.parent
+        for n in range(1, 100):
+            candidate = parent / f"{stem}_{n}{suffix}"
+            if not candidate.exists():
+                print(f"Original file is locked, writing → {candidate.name}")
+                return candidate
+        return path  # give up, let rasterio raise its own error
+
     def create_dem_for_day(self, date_val):
         out_dir = self.out_dir_var.get().strip()
         if not out_dir:
@@ -766,7 +1011,7 @@ class CreateDemWindow(ctk.CTkToplevel):
             print(f"No valid shoreline points for {date_val}")
             return None
 
-        # DEM grid set‑up
+        # DEM grid set-up
         try:
             res = float(self.resolution_var.get())
         except Exception:
@@ -796,7 +1041,7 @@ class CreateDemWindow(ctk.CTkToplevel):
             print(f"Interpolation failed for {date_val}")
             return None
 
-        # --- along‑shore smoothing ---
+        # --- along-shore smoothing ---
         grid_z = self._smooth_dem(grid_z, sigma)
 
         # --- mask to convex hull of data points ---
@@ -815,7 +1060,8 @@ class CreateDemWindow(ctk.CTkToplevel):
         dem_masked = grid_z
 
         # save GeoTIFF
-        out_path = Path(out_dir) / f"DEM_{date_val}_transect.tif"
+        out_path = self._safe_output_path(
+            Path(out_dir) / f"DEM_{date_val}_transect.tif")
         with rasterio.open(
             out_path, "w", driver="GTiff",
             height=dem_masked.shape[0], width=dem_masked.shape[1],
@@ -830,7 +1076,118 @@ class CreateDemWindow(ctk.CTkToplevel):
             csv_path = Path(out_dir) / f"shoreline_xyz_{date_val}.csv"
             xyz_df.to_csv(csv_path, index=False)
             print(f"Exported XYZ → {csv_path}")
+        self._last_dem_extent = (x_min, x_max, y_min, y_max)
         return dem_masked
+
+    def create_composite_dem(self):
+        """
+        Build a single DEM from *all* shorelines in the dataset,
+        regardless of date.  Useful when the user wants to maximise
+        elevation coverage by combining many tidal cycles.
+        """
+        out_dir = self.out_dir_var.get().strip()
+        if not out_dir:
+            messagebox.showerror("Error", "Please specify an output directory.")
+            return None
+
+        gdf = self.shorelines_gdf.copy()
+        gdf["z"] = gdf["time"].apply(lambda t: self.df_wl_1min["wl"].asof(t))
+
+        try:
+            spacing = float(self.spacing_var.get())
+            if spacing <= 0:
+                raise ValueError
+        except Exception:
+            spacing = float(self.resolution_var.get() or 1)
+            print(f"Invalid spacing, using {spacing} m.")
+
+        dense_shorelines = []
+        xyz_all = []
+        for _, row in gdf.iterrows():
+            geom = row.geometry
+            zval = row.z
+            if pd.isna(zval) or geom is None:
+                continue
+            pts = self.densify_geometry(geom, spacing)
+            if not pts:
+                continue
+            coords = np.array(pts)[:, :2]
+            dense_shorelines.append({"wl": zval, "coords": coords})
+            for x, y in coords:
+                xyz_all.append((x, y, zval))
+
+        if not xyz_all:
+            print("No valid shoreline points for composite DEM.")
+            return None
+
+        n_shorelines = len(gdf)
+        n_days = len(self.daily_dates)
+        unique_wl = len({sl["wl"] for sl in dense_shorelines})
+        print(f"Composite DEM: {n_shorelines} shorelines across "
+              f"{n_days} days, {unique_wl} unique water levels.")
+
+        try:
+            res = float(self.resolution_var.get())
+        except Exception:
+            res = 1.0
+        try:
+            sigma = float(self.sigma_var.get())
+        except Exception:
+            sigma = 1.5
+
+        xyz_arr = np.array(xyz_all)
+        x_min, x_max = xyz_arr[:, 0].min(), xyz_arr[:, 0].max()
+        y_min, y_max = xyz_arr[:, 1].min(), xyz_arr[:, 1].max()
+        grid_x_vals = np.arange(x_min, x_max + res, res)
+        grid_y_vals = np.arange(y_max, y_min - res, -res)
+        if len(grid_x_vals) < 2 or len(grid_y_vals) < 2:
+            print("Composite DEM: bounding box too small.")
+            return None
+        grid_x, grid_y = np.meshgrid(grid_x_vals, grid_y_vals)
+
+        print(f"Beach shape mode: {self.beach_shape_var.get()}")
+        grid_z = self._interpolate_transects(
+            dense_shorelines, grid_x, grid_y, grid_x_vals, grid_y_vals, res)
+
+        if grid_z is None or np.all(np.isnan(grid_z)):
+            print("Interpolation failed for composite DEM.")
+            return None
+
+        grid_z = self._smooth_dem(grid_z, sigma)
+
+        if len(xyz_all) >= 3:
+            try:
+                hull = ConvexHull(xyz_arr[:, :2])
+                hull_path = MPath(xyz_arr[hull.vertices, :2])
+                grid_pts = np.column_stack([grid_x.ravel(), grid_y.ravel()])
+                inside = hull_path.contains_points(grid_pts).reshape(grid_x.shape)
+                grid_z = np.where(inside, grid_z, np.nan)
+            except Exception:
+                pass
+
+        transform = from_origin(x_min, y_max, res, res)
+
+        date_min = min(self.daily_dates)
+        date_max = max(self.daily_dates)
+        tag = f"{date_min}_to_{date_max}"
+        out_path = self._safe_output_path(
+            Path(out_dir) / f"DEM_composite_{tag}_transect.tif")
+        with rasterio.open(
+            out_path, "w", driver="GTiff",
+            height=grid_z.shape[0], width=grid_z.shape[1],
+            count=1, dtype="float64",
+            crs=self.shorelines_gdf.crs,
+            transform=transform) as dst:
+            dst.write(grid_z, 1)
+        print(f"Saved composite DEM → {out_path}")
+
+        if self.export_xyz_var.get():
+            xyz_df = pd.DataFrame(xyz_all, columns=["x", "y", "z"])
+            csv_path = Path(out_dir) / f"shoreline_xyz_composite_{tag}.csv"
+            xyz_df.to_csv(csv_path, index=False)
+            print(f"Exported XYZ → {csv_path}")
+        self._last_dem_extent = (x_min, x_max, y_min, y_max)
+        return grid_z
 
     # ————————————————————— UI actions —————————————————————————————————
     def on_generate_next_dem(self):
@@ -838,10 +1195,27 @@ class CreateDemWindow(ctk.CTkToplevel):
             self.load_data_if_needed()
         except Exception:
             return
-        if self.current_day_index >= len(self.daily_dates):
+
+        if self.dem_mode_var.get() == "Composite":
+            self.gen_eta_label.configure(text="Processing composite…")
+            self.gen_progress.set(0.0)
+            self.update_idletasks()
+            dem = self.create_composite_dem()
+            self.plot_dem(dem)
+            self.gen_progress.set(1.0)
+            self.gen_eta_label.configure(
+                text="Composite done" if dem is not None else "Failed")
+            return
+
+        total = len(self.daily_dates)
+        if self.current_day_index >= total:
             messagebox.showinfo("Done", "No more days left to process.")
             return
         date_val = self.daily_dates[self.current_day_index]
+        self.gen_eta_label.configure(
+            text=f"Day {self.current_day_index + 1}/{total}")
+        self.gen_progress.set((self.current_day_index + 1) / total)
+        self.update_idletasks()
         self.plot_daily_view(date_val)
         dem = self.create_dem_for_day(date_val)
         self.plot_dem(dem)
@@ -856,10 +1230,18 @@ class CreateDemWindow(ctk.CTkToplevel):
         if not out_dir:
             messagebox.showerror("Error", "Please specify output folder.")
             return
+
+        if self.dem_mode_var.get() == "Composite":
+            # Composite mode produces a single DEM — no batch needed
+            dem = self.create_composite_dem()
+            self.plot_dem(dem)
+            if dem is not None:
+                messagebox.showinfo("Done", "Composite DEM created.")
+            return
+
         self._cancel_flag = False
-        self.top_left_container.pack_forget()
-        self.top_right_frame.pack_forget()
-        self.show_progress_bar()
+        self.batch_progress.set(0.0)
+        self.batch_eta_label.configure(text="Starting batch…")
         self._batch_thread = threading.Thread(
             target=self._batch_worker, daemon=True)
         self._batch_thread.start()
@@ -871,39 +1253,25 @@ class CreateDemWindow(ctk.CTkToplevel):
         for i, date_val in enumerate(self.daily_dates, 1):
             if self._cancel_flag:
                 print("Batch cancelled by user.")
-                self.after(0, self.hide_progress_bar)
+                self.after(0, self.batch_eta_label.configure,
+                           {"text": "Cancelled"})
                 return
-            self.after(0, self.progress_bar.set, i / total)
+            self.after(0, self.batch_progress.set, i / total)
             eta = compute_eta(t0, i, total)
             eta_str = format_eta(eta)
-            self.after(0, self.progress_label.configure,
+            self.after(0, self.batch_eta_label.configure,
                        {"text": f"Batch {i}/{total} — ETA {eta_str}"})
             self.create_dem_for_day(date_val)
-        self.after(0, self.hide_progress_bar)
+        self.after(0, self.batch_progress.set, 1.0)
         elapsed = format_eta(time.time() - t0)
+        self.after(0, self.batch_eta_label.configure,
+                   {"text": f"Done ({total} days, {elapsed})"})
         self.after(0, lambda: messagebox.showinfo(
             "Done", f"Batch DEM creation finished ({total} days, {elapsed})."))
 
     def _cancel_batch(self):
         self._cancel_flag = True
         print("Cancelling batch…")
-
-    # progress helpers
-    def show_progress_bar(self):
-        if self.progress_bar is None:
-            self.progress_label = ctk.CTkLabel(self.top_left_container, text="Starting batch…")
-            self.progress_label.pack(pady=10)
-            self.progress_bar = ctk.CTkProgressBar(self.top_left_container, width=400)
-            self.progress_bar.pack()
-            self.progress_bar.set(0.0)
-
-    def hide_progress_bar(self):
-        if self.progress_bar:
-            self.progress_bar.destroy()
-            self.progress_label.destroy()
-            self.progress_bar = self.progress_label = None
-        self.top_left_container.pack(side="left", fill="both", expand=True, padx=5, pady=5)
-        self.top_right_frame.pack(side="left", fill="both", expand=True, padx=5, pady=5)
 
     # ————————————————————— save / load settings ——————————————————————————
     def _settings_payload(self):
@@ -918,6 +1286,8 @@ class CreateDemWindow(ctk.CTkToplevel):
                 "vertex_spacing": self.spacing_var.get(),
                 "smoothing_sigma": self.sigma_var.get(),
                 "beach_shape": self.beach_shape_var.get(),
+                "dem_mode": self.dem_mode_var.get(),
+                "wl_bin": self.wl_bin_var.get(),
                 "filename_pattern": self.regex_var.get(),
                 "export_xyz": bool(self.export_xyz_var.get()),
             },
@@ -952,7 +1322,6 @@ class CreateDemWindow(ctk.CTkToplevel):
                 self.geojson_dir_var.set(paths["geojson_dir"])
             if paths.get("output_dir"):
                 self.out_dir_var.set(paths["output_dir"])
-                self.out_dir_display_label.configure(text=paths["output_dir"])
 
             if params.get("resolution"):
                 self.resolution_var.set(params["resolution"])
@@ -962,6 +1331,10 @@ class CreateDemWindow(ctk.CTkToplevel):
                 self.sigma_var.set(params["smoothing_sigma"])
             if params.get("beach_shape"):
                 self.beach_shape_var.set(params["beach_shape"])
+            if params.get("dem_mode"):
+                self.dem_mode_var.set(params["dem_mode"])
+            if params.get("wl_bin"):
+                self.wl_bin_var.set(params["wl_bin"])
             if params.get("filename_pattern"):
                 self.regex_var.set(params["filename_pattern"])
             self.export_xyz_var.set(bool(params.get("export_xyz", False)))

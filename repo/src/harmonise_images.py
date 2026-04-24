@@ -72,20 +72,17 @@ IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
 # %% ————————————————————————————— image quality filters ———————————————
 
 def is_blurry(img_bgr, lap_threshold, uniform_fraction=0.85):
-    """
-    Robust blur detector.
-    Uses Laplacian variance, but guards against false positives on
-    genuinely textureless scenes (calm water, overcast sky) by checking
-    whether the image is mostly uniform *before* flagging it as blurry.
-    """
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
     lap_var = cv2.Laplacian(gray, cv2.CV_64F).var()
     if lap_var < lap_threshold:
+        # Extremely low variance → blurry/obstructed regardless of uniformity
+        if lap_var < lap_threshold * 0.33:
+            return True
         # check if the scene is genuinely textureless (not blurry)
         sobel = cv2.Sobel(gray, cv2.CV_64F, 1, 1, ksize=3)
         low_gradient_frac = np.sum(np.abs(sobel) < 5) / sobel.size
         if low_gradient_frac > uniform_fraction:
-            return False  # uniform scene, not actually blurry
+            return False
         return True
     return False
 
@@ -1630,16 +1627,29 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
                 out_root = self._build_output_root(cfg["output_folder"], input_root, "filtered_good")
                 copied = 0
                 bad_set = set(bad_list)
-                for p in images:
+                good_images = [p for p in images if str(p) not in bad_set]
+                n_to_copy = len(good_images)
+                copy_start = time.time()
+                self._ui_set_eta(f"Copying good images… 0/{n_to_copy}")
+                self._ui_set_progress_fraction(0)
+                for ci, p in enumerate(good_images):
                     if self._cancel_requested:
                         self._ui_set_eta("Cancelled")
                         print("Filtered-good export cancelled.")
                         return
-                    if str(p) in bad_set:
-                        continue
                     out_path = self._build_preserved_output_path(p, input_root, cfg["output_folder"], "filtered_good")
                     shutil.copy2(str(p), str(out_path))
                     copied += 1
+                    # Update progress bar and ETA during copy
+                    frac = (ci + 1) / n_to_copy if n_to_copy else 1
+                    elapsed = time.time() - copy_start
+                    if frac > 0 and frac < 1:
+                        remaining = elapsed / frac * (1 - frac)
+                        eta_text = f"Copying… ETA: ~{format_eta(remaining)}  ({ci + 1}/{n_to_copy})"
+                    else:
+                        eta_text = f"Copying… ({ci + 1}/{n_to_copy})"
+                    self._ui_set_progress_fraction(frac)
+                    self._ui_set_eta(eta_text)
                 print(f"Good filtered images exported: {copied} -> {out_root}")
 
             self._ui_call(self._render_filter_plot, reason_counts, n_bad, n_good)

@@ -1128,14 +1128,25 @@ class GeoReferenceModule(ctk.CTkToplevel):
         if mk in ("tps","poly1","poly2") and self._gcp_df is None: messagebox.showerror("Error", "Load GCPs.", parent=self); return
         use_sub = self._subfolder_var.get()
         def _worker():
-            subs = sorted([f.path for f in os.scandir(self.input_folder) if f.is_dir()]) if use_sub else []
-            if not subs: subs = [self.input_folder]
+            # Collect all directories to process (recursive with os.walk)
+            if use_sub:
+                subs = sorted(
+                    dirpath
+                    for dirpath, _, _ in os.walk(self.input_folder)
+                )
+            else:
+                subs = [self.input_folder]
             all_jobs = []
             for sub in subs:
                 imgs = self._collect_images(sub)
                 if not imgs: continue
-                out_sub = os.path.join(self.output_folder, os.path.basename(sub)) if use_sub and sub != self.input_folder else self.output_folder
-                if use_sub and sub != self.input_folder: os.makedirs(out_sub, exist_ok=True)
+                # Preserve full relative directory structure in output
+                if use_sub and sub != self.input_folder:
+                    rel = os.path.relpath(sub, self.input_folder)
+                    out_sub = os.path.join(self.output_folder, rel)
+                    os.makedirs(out_sub, exist_ok=True)
+                else:
+                    out_sub = self.output_folder
                 for ip in imgs: all_jobs.append((ip, os.path.join(out_sub, os.path.splitext(os.path.basename(ip))[0]+".tif")))
             if not all_jobs: self.after(0, lambda: messagebox.showerror("Error", "No images.", parent=self)); return
             n = len(all_jobs); t0 = time.time(); m2i = {}
