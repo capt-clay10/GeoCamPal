@@ -71,18 +71,60 @@ IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
 
 # %% ————————————————————————————— image quality filters ———————————————
 
-def is_blurry(img_bgr, lap_threshold, uniform_fraction=0.85):
+def is_blurry(img_bgr, lap_threshold, uniform_fraction=0.85,
+              local_blur_frac=0.0):
+    """
+    Robust blur detector.
+    Uses Laplacian variance, but guards against false positives on
+    genuinely textureless scenes (calm water, overcast sky) by checking
+    whether the image is mostly uniform *before* flagging it as blurry.
+
+    Three detection stages (any one triggers a positive):
+      1. **Hard floor** — if global Laplacian variance is below one-third
+         of ``lap_threshold``, the image is flagged unconditionally.
+         Even the most featureless real-world scenes (calm water,
+         overcast sky) produce variance > ~15; values below 10 indicate
+         a physically obstructed or completely defocused lens.
+      2. **Standard check** — global Laplacian variance below threshold
+         AND the scene is *not* mostly uniform (Sobel gradient check).
+      3. **Local blur fraction** — when the uniform guard *would*
+         override the standard check, a secondary block-wise test
+         divides the image into an 8×8 grid and measures what fraction
+         of blocks are individually blurry.  Partial obstructions
+         (frost, ice, condensation covering part of the lens) produce
+         60–100 % blurry blocks, while genuine uniform scenes (water,
+         sky) typically stay below 25 %.  Set ``local_blur_frac`` to
+         0.0 to disable (default, backward-compatible).
+    """
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
     lap_var = cv2.Laplacian(gray, cv2.CV_64F).var()
     if lap_var < lap_threshold:
-        # Extremely low variance → blurry/obstructed regardless of uniformity
+        # Stage 1: hard floor — extremely low variance is always blur
         if lap_var < lap_threshold * 0.33:
             return True
-        # check if the scene is genuinely textureless (not blurry)
+        # Stage 2: check if the scene is genuinely textureless (not blurry)
         sobel = cv2.Sobel(gray, cv2.CV_64F, 1, 1, ksize=3)
         low_gradient_frac = np.sum(np.abs(sobel) < 5) / sobel.size
         if low_gradient_frac > uniform_fraction:
-            return False
+            # Stage 3: local blur fraction — catch partial obstructions
+            # that look "uniform" globally but have many individually
+            # blurry blocks (frost, ice, condensation on lens)
+            if local_blur_frac > 0:
+                grid_size = 8
+                h, w = gray.shape
+                bh, bw = h // grid_size, w // grid_size
+                blurry_blocks = 0
+                total_blocks = grid_size * grid_size
+                for i in range(grid_size):
+                    for j in range(grid_size):
+                        block = gray[i * bh:(i + 1) * bh,
+                                     j * bw:(j + 1) * bw]
+                        block_lap = cv2.Laplacian(block, cv2.CV_64F).var()
+                        if block_lap < lap_threshold:
+                            blurry_blocks += 1
+                if (blurry_blocks / total_blocks) > local_blur_frac:
+                    return True
+            return False  # uniform scene, not actually blurry
         return True
     return False
 
@@ -168,12 +210,13 @@ def filter_image(img_bgr,
                  entropy_thresh,
                  droplet_frac,
                  obstruction_frac,
-                 overexp_px=254):
+                 overexp_px=254,
+                 local_blur_frac=0.0):
     """
     Run all filters.  Returns a list of reason strings; empty = passes.
     """
     reasons = []
-    if is_blurry(img_bgr, blur_thresh):
+    if is_blurry(img_bgr, blur_thresh, local_blur_frac=local_blur_frac):
         reasons.append("blurry")
     if is_clipped_overexposed(img_bgr, clip_frac, overexp_px):
         reasons.append("clipped_overexposed")
@@ -522,6 +565,9 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
         self.export_filtered_good_var = tk.BooleanVar(value=False)
         self._cancel_requested = False
 
+        # averaging state
+        self.exclude_bad_avg_var = tk.BooleanVar(value=False)
+
         # colour harmonisation state
         self.ref_colour_path = None
         self.ref_colour_bgr = None
@@ -604,78 +650,99 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
                      font=("Arial", 12, "bold")).grid(
             row=0, column=0, padx=5, pady=3, sticky="w", columnspan=2)
 
-        # Each filter gets one checkbox + its parameter entries
+        # Each filter gets one checkbox + labelled parameter entries
         self.filter_entries = {}
         self.filter_enabled = {}
 
-        filters_a = [
-            ("Blur", "Blur threshold", "20"),
-            ("Overexposure", "Clip overexp fraction", "0.15",
-                             "Overexp pixel value", "254"),
-            ("Underexposure", "Dark pixel value", "20",
-                              "Under-exp fraction", "0.25"),
-            ("Darkness", "Dark max threshold", "25"),
-        ]
-        col = 0
-        for fdef in filters_a:
-            name = fdef[0]
-            var = tk.BooleanVar(value=True)
-            ctk.CTkCheckBox(row2, text=name, variable=var,
-                            width=20).grid(row=1, column=col, padx=2, pady=2, sticky="w")
-            self.filter_enabled[name] = var
-            col += 1
-            params = fdef[1:]
-            for i in range(0, len(params), 2):
-                plbl, pdef = params[i], params[i + 1]
-                e = ctk.CTkEntry(row2, width=50, placeholder_text=plbl)
-                e.insert(0, pdef)
-                e.grid(row=1, column=col, padx=1, pady=2, sticky="w")
-                self.filter_entries[plbl] = e
-                col += 1
-        max_col = col
+        # --- helper: build a compact filter card (sub-frame) ---
+        def _make_filter_card(parent, name, params, grid_row, grid_col):
+            """Create a small framed card for one filter.
 
-        filters_b = [
-            ("Low information", "Entropy threshold", "5.0"),
-            ("Lens droplets", "Droplet fraction", "0.08"),
-            ("Obstruction", "Obstruction fraction", "0.35"),
-        ]
-        col = 0
-        for fdef in filters_b:
-            name = fdef[0]
-            var = tk.BooleanVar(value=True)
-            ctk.CTkCheckBox(row2, text=name, variable=var,
-                            width=20).grid(row=2, column=col, padx=2, pady=2, sticky="w")
-            self.filter_enabled[name] = var
-            col += 1
-            params = fdef[1:]
-            for i in range(0, len(params), 2):
-                plbl, pdef = params[i], params[i + 1]
-                e = ctk.CTkEntry(row2, width=50, placeholder_text=plbl)
-                e.insert(0, pdef)
-                e.grid(row=2, column=col, padx=1, pady=2, sticky="w")
-                self.filter_entries[plbl] = e
-                col += 1
-        max_col = max(max_col, col)
+            *params* is a list of (label, entry_key, default) tuples.
+            The checkbox and labelled entries are packed inside.
+            """
+            card = ctk.CTkFrame(parent, fg_color="transparent")
+            card.grid(row=grid_row, column=grid_col, padx=(4,18), pady=4,
+                      sticky="nsew")
 
-        for c in range(max_col + 2):
+            var = tk.BooleanVar(value=True)
+            ctk.CTkCheckBox(card, text=name, variable=var,
+                            font=("Arial", 12, "bold"),
+                            width=20).grid(
+                row=0, column=0, columnspan=2 * len(params),
+                padx=2, pady=(2, 0), sticky="w")
+            self.filter_enabled[name] = var
+
+            for idx, (lbl, key, default) in enumerate(params):
+                col_base = idx * 2
+                ctk.CTkLabel(card, text=lbl,
+                             font=("Arial", 10), text_color="gray").grid(
+                    row=1, column=col_base, padx=(4, 1), pady=1,
+                    sticky="w")
+                e = ctk.CTkEntry(card, width=55)
+                e.insert(0, default)
+                e.grid(row=1, column=col_base + 1, padx=(1, 4), pady=1,
+                       sticky="w")
+                self.filter_entries[key] = e
+
+        # ---- Row 1 of filter cards ----
+        _make_filter_card(row2, "Blur", [
+            ("Threshold", "Blur threshold", "20"),
+            ("Local blur %", "Local blur fraction", "0.40"),
+        ], grid_row=1, grid_col=0)
+
+        _make_filter_card(row2, "Overexposure", [
+            ("Fraction", "Clip overexp fraction", "0.15"),
+            ("Pixel value", "Overexp pixel value", "254"),
+        ], grid_row=1, grid_col=1)
+
+        _make_filter_card(row2, "Underexposure", [
+            ("Dark px val", "Dark pixel value", "20"),
+            ("Fraction", "Under-exp fraction", "0.25"),
+        ], grid_row=1, grid_col=2)
+
+        _make_filter_card(row2, "Darkness", [
+            ("Max threshold", "Dark max threshold", "25"),
+        ], grid_row=1, grid_col=3)
+
+        # ---- Row 2 of filter cards ----
+        _make_filter_card(row2, "Low information", [
+            ("Entropy", "Entropy threshold", "5.0"),
+        ], grid_row=2, grid_col=0)
+
+        _make_filter_card(row2, "Lens droplets", [
+            ("Fraction", "Droplet fraction", "0.08"),
+        ], grid_row=2, grid_col=1)
+
+        _make_filter_card(row2, "Obstruction", [
+            ("Fraction", "Obstruction fraction", "0.35"),
+        ], grid_row=2, grid_col=2)
+
+        # Even column weights so cards share space
+        for c in range(4):
             row2.grid_columnconfigure(c, weight=0)
-        row2.grid_columnconfigure(max_col + 2, weight=1)
 
-        ctk.CTkButton(row2, text="Run Filter",
-                      command=self._filter_threaded, fg_color="#0F52BA", hover_color="#2A6BD1").grid(
-            row=3, column=0, padx=5, pady=(6, 3), sticky="w")
+        # ---- Action row ----
+        action_row = ctk.CTkFrame(row2, fg_color="transparent")
+        action_row.grid(row=3, column=0, columnspan=4,
+                        padx=5, pady=(6, 3), sticky="w")
+
+        ctk.CTkButton(action_row, text="Run Filter",
+                      command=self._filter_threaded,
+                      fg_color="#0F52BA", hover_color="#2A6BD1").pack(
+            side="left", padx=(0, 10))
 
         ctk.CTkCheckBox(
-            row2, text="Export good filtered images",
+            action_row, text="Export good filtered images",
             variable=self.export_filtered_good_var
-        ).grid(row=3, column=1, padx=5, pady=(6, 3), sticky="w")
+        ).pack(side="left", padx=(0, 10))
 
         ctk.CTkLabel(
-            row2, text="-> Flags blurry, overexposed, dark,\n"
-                       "   foggy, rain-on-lens & blocked images",
+            action_row,
+            text="-> Flags blurry, overexposed, dark, foggy, "
+                 "rain-on-lens & blocked images",
             font=("Arial", 10), text_color="gray", justify="left",
-        ).grid(row=3, column=2, columnspan=max_col + 1, padx=5, pady=(6, 3),
-               sticky="w")
+        ).pack(side="left", padx=5)
 
         # Row 3 — harmonise BRIGHTNESS (collapsible)
         self.brightness_section_frame = ctk.CTkFrame(self.bottom_panel)
@@ -771,16 +838,21 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
         ctk.CTkLabel(row4b, text="Average Images Per Folder",
                      font=("Arial", 12, "bold")).grid(
             row=0, column=0, padx=5, pady=3, sticky="w")
+
+        ctk.CTkCheckBox(row4b, text="Use good filtered images only",
+                        variable=self.exclude_bad_avg_var).grid(
+            row=0, column=1, padx=5, pady=3)
+
         ctk.CTkLabel(
             row4b,
             text="-> Averages all readable images in each folder.\n"
                  "   With sub-folders enabled, each image-containing folder is averaged separately.",
             font=("Arial", 10), text_color="gray", justify="left",
-        ).grid(row=0, column=1, padx=5, pady=3, sticky="w")
+        ).grid(row=0, column=2, padx=5, pady=3, sticky="w")
         ctk.CTkButton(row4b, text="Run Averaging",
                       command=self._average_images_threaded,
                       fg_color="#0F52BA", hover_color="#2A6BD1").grid(
-            row=0, column=2, padx=10, pady=3)
+            row=0, column=3, padx=10, pady=3)
 
         # Row 5 — output, progress, ETA, reset
         row5 = ctk.CTkFrame(self.bottom_panel)
@@ -897,6 +969,15 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
               "                    by checking for large dark regions "
               "in a 4x4 grid.\n"
               "\n"
+              "NOTE: The 'Blur' filter includes a 'Local blur fraction'\n"
+              "parameter.  When set > 0, an 8x8 grid of blocks is\n"
+              "checked for individual blurriness. This catches partial\n"
+              "obstructions (frost, ice, condensation) where the scene\n"
+              "is visible behind the obstruction.  Obstructed images\n"
+              "typically score 60-100%, clean images 10-25%.\n"
+              "Set to 0.40 (40%) for a good balance.  Set to 0.0\n"
+              "to disable and revert to legacy behaviour.\n"
+              "\n"
               "HARMONISE BRIGHTNESS\n"
               "  L-tolerance (+/-)  - Images within this luminance "
               "range of the median are\n"
@@ -930,11 +1011,29 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
               "  *_filtered_good/, *_brightness_harmonised/, or\n"
               "  *_colour_harmonised/ folders under the chosen output path.\n"
               "\n"
+              "AVERAGE IMAGES PER FOLDER\n"
+              "  Averages all readable images in each folder into a single\n"
+              "  composite image.  With sub-folders enabled, each folder is\n"
+              "  averaged separately.\n"
+              "  'Use good filtered images only' — excludes images flagged\n"
+              "  as bad during filtering.  Folders with no good images are\n"
+              "  skipped entirely (no empty output folders).\n"
+              "\n"
+              "BAD-IMAGE LIST RESOLUTION\n"
+              "  All 'exclude bad' options (brightness, colour, averaging)\n"
+              "  resolve the bad-image list in this order:\n"
+              "    1. In-memory list from a filter run in this session.\n"
+              "    2. bad_images.json in the output folder (cross-session).\n"
+              "  If neither source is available, a warning is shown and the\n"
+              "  task is aborted.  This lets you filter once, then run\n"
+              "  brightness / colour / averaging in separate sessions.\n"
+              "\n"
               "REFERENCE TABLE — Suggested parameter values\n"
               "┌──────────────────────┬──────────────┬──────────────┬──────────────┐\n"
               "│ Parameter            │ Conservative │   Moderate   │   Extreme    │\n"
               "├──────────────────────┼──────────────┼──────────────┼──────────────┤\n"
               "│ Blur threshold       │      10      │      20      │      >40     │\n"
+              "│ Local blur fraction  │     0.60     │     0.40     │     <0.30    │\n"
               "│ Overexp pixel value  │     254      │     245      │     <235     │\n"
               "│ Overexp fraction     │     0.20     │     0.15     │     <0.08    │\n"
               "│ Dark pixel value     │      10      │      20      │      >35     │\n"
@@ -1003,6 +1102,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
             "output_folder": self.output_folder,
             "recursive": bool(self.recursive_var.get()),
             "blur_t": float(self.filter_entries["Blur threshold"].get()),
+            "local_blur_f": float(self.filter_entries["Local blur fraction"].get()),
             "clip_f": float(self.filter_entries["Clip overexp fraction"].get()),
             "overexp_px": int(self.filter_entries["Overexp pixel value"].get()),
             "dark_v": int(self.filter_entries["Dark pixel value"].get()),
@@ -1018,6 +1118,12 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
     def _collect_brightness_config(self):
         if not self._check_folders_ui():
             return None
+        exclude_bad = bool(self.exclude_bad_var.get())
+        bad_list = []
+        if exclude_bad:
+            bad_list = self._resolve_bad_list("brightness")
+            if bad_list is None:
+                return None  # user was warned, abort
         sky_pct = float(self.sky_entry.get())
         return {
             "input_folder": self.input_folder,
@@ -1026,8 +1132,8 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
             "tol": float(self.tol_entry.get()),
             "sky_pct": sky_pct,
             "sky_frac": max(0.0, min(0.9, sky_pct / 100.0)),
-            "exclude_bad": bool(self.exclude_bad_var.get()),
-            "bad_list": list(self.bad_list),
+            "exclude_bad": exclude_bad,
+            "bad_list": bad_list,
         }
 
     def _collect_colour_config(self):
@@ -1036,12 +1142,18 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
         if self.ref_colour_bgr is None:
             messagebox.showwarning("Warning", "Select a reference image for colour first.")
             return None
+        exclude_bad = bool(self.exclude_bad_colour_var.get())
+        bad_list = []
+        if exclude_bad:
+            bad_list = self._resolve_bad_list("colour")
+            if bad_list is None:
+                return None  # user was warned, abort
         return {
             "input_folder": self.input_folder,
             "output_folder": self.output_folder,
             "recursive": bool(self.recursive_var.get()),
-            "exclude_bad": bool(self.exclude_bad_colour_var.get()),
-            "bad_list": list(self.bad_list),
+            "exclude_bad": exclude_bad,
+            "bad_list": bad_list,
             "ref_colour_path": self.ref_colour_path,
             "ref_colour_bgr": self.ref_colour_bgr.copy(),
             "algo_name": self.colour_algo_var.get(),
@@ -1050,11 +1162,87 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
     def _collect_average_config(self):
         if not self._check_folders_ui():
             return None
+        exclude_bad = bool(self.exclude_bad_avg_var.get())
+        bad_list = []
+        if exclude_bad:
+            bad_list = self._resolve_bad_list("averaging")
+            if bad_list is None:
+                return None  # user was warned, abort
         return {
             "input_folder": self.input_folder,
             "output_folder": self.output_folder,
             "recursive": bool(self.recursive_var.get()),
+            "exclude_bad": exclude_bad,
+            "bad_list": bad_list,
         }
+
+    def _resolve_bad_list(self, task_label=""):
+        """
+        Return a bad-image list suitable for exclusion.
+
+        Priority:
+          1. In-memory ``self.bad_list`` (from a filter run in this session).
+          2. ``bad_images.json`` found in the output folder.
+
+        Returns a list of absolute path strings, or **None** if exclusion
+        was requested but no list could be found (a warning is shown).
+        """
+        # 1. in-memory list from current session
+        if self.bad_list:
+            print(f"  [{task_label}] Using in-memory bad list ({len(self.bad_list)} images)")
+            return list(self.bad_list)
+
+        # 2. try loading from JSON in the output folder
+        json_path = os.path.join(self.output_folder, "bad_images.json")
+        if os.path.isfile(json_path):
+            try:
+                with open(json_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                loaded = []
+                json_input_folder = data.get("input_folder", "")
+                for item in data.get("bad_images", []):
+                    abs_p = item.get("absolute_path", "")
+                    if abs_p and os.path.isfile(abs_p):
+                        loaded.append(abs_p)
+                    else:
+                        # fallback: reconstruct from relative path + current input folder
+                        rel_p = item.get("relative_path", "")
+                        if rel_p:
+                            reconstructed = os.path.join(self.input_folder, rel_p)
+                            if os.path.isfile(reconstructed):
+                                loaded.append(reconstructed)
+                if loaded:
+                    print(f"  [{task_label}] Loaded bad list from JSON: {json_path} ({len(loaded)} images)")
+                    self.bad_list = loaded  # cache for subsequent tasks
+                    return loaded
+                else:
+                    messagebox.showwarning(
+                        "Warning",
+                        f"bad_images.json was found but none of the listed files "
+                        f"could be resolved.\n\nJSON: {json_path}\n"
+                        f"Input folder: {self.input_folder}\n\n"
+                        f"Please re-run filtering or check your paths.",
+                        parent=self,
+                    )
+                    return None
+            except Exception as e:
+                messagebox.showwarning(
+                    "Warning",
+                    f"Could not parse bad_images.json:\n{json_path}\n\nError: {e}",
+                    parent=self,
+                )
+                return None
+
+        # 3. nothing found
+        messagebox.showwarning(
+            "Warning",
+            f"'Use good filtered images' is enabled but no bad-image list "
+            f"was found.\n\n"
+            f"Either run the Filter step first, or ensure bad_images.json "
+            f"exists in the output folder:\n{self.output_folder}",
+            parent=self,
+        )
+        return None
 
     # ——— browse callbacks ———
 
@@ -1140,6 +1328,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
                 "run_average": bool(self.run_average_var.get()),
                 "exclude_bad_brightness": bool(self.exclude_bad_var.get()),
                 "exclude_bad_colour": bool(self.exclude_bad_colour_var.get()),
+                "exclude_bad_avg": bool(self.exclude_bad_avg_var.get()),
                 "export_filtered_good": bool(self.export_filtered_good_var.get()),
                 "tol": self.tol_entry.get().strip(),
                 "sky_pct": self.sky_entry.get().strip(),
@@ -1185,6 +1374,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
             self.run_average_var.set(bool(ui.get("run_average", False)))
             self.exclude_bad_var.set(bool(ui.get("exclude_bad_brightness", True)))
             self.exclude_bad_colour_var.set(bool(ui.get("exclude_bad_colour", True)))
+            self.exclude_bad_avg_var.set(bool(ui.get("exclude_bad_avg", False)))
             self.export_filtered_good_var.set(bool(ui.get("export_filtered_good", False)))
 
             self.tol_entry.delete(0, tk.END)
@@ -1258,6 +1448,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
         self.run_average_var.set(False)
         self.exclude_bad_var.set(True)
         self.exclude_bad_colour_var.set(True)
+        self.exclude_bad_avg_var.set(False)
         self.export_filtered_good_var.set(False)
         for var in self.filter_enabled.values():
             var.set(True)
@@ -1546,6 +1737,23 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
             en = cfg["enabled"]
             active = [k for k, v in en.items() if v]
             print(f"\nFiltering {len(images)} images with {len(active)} active filter(s): {', '.join(active)} ...")
+            print("  Settings:")
+            if en.get("Blur"):
+                local_b = cfg.get('local_blur_f', 0.0)
+                local_str = f", local blur fraction={local_b}" if local_b > 0 else ""
+                print(f"    Blur:           threshold={cfg['blur_t']}{local_str}")
+            if en.get("Overexposure"):
+                print(f"    Overexposure:   fraction={cfg['clip_f']}, pixel value={cfg.get('overexp_px', 254)}")
+            if en.get("Underexposure"):
+                print(f"    Underexposure:  dark pixel={cfg['dark_v']}, fraction={cfg['under_f']}")
+            if en.get("Darkness"):
+                print(f"    Darkness:       max threshold={cfg['dark_max']}")
+            if en.get("Low information"):
+                print(f"    Low info:       entropy={cfg['entropy_t']}")
+            if en.get("Lens droplets"):
+                print(f"    Lens droplets:  fraction={cfg['droplet_f']}")
+            if en.get("Obstruction"):
+                print(f"    Obstruction:    fraction={cfg['obstruct_f']}")
             bad_list = []
             bad_reasons = {}
             reason_counts = {
@@ -1566,7 +1774,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
                     print(f"[WARN] Cannot read: {p.name}")
                     continue
                 reasons = []
-                if en.get("Blur") and is_blurry(img, cfg["blur_t"]):
+                if en.get("Blur") and is_blurry(img, cfg["blur_t"], local_blur_frac=cfg["local_blur_f"]):
                     reasons.append("blurry")
                 if en.get("Overexposure") and is_clipped_overexposed(img, cfg["clip_f"], cfg.get("overexp_px", 254)):
                     reasons.append("clipped_overexposed")
@@ -1627,29 +1835,16 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
                 out_root = self._build_output_root(cfg["output_folder"], input_root, "filtered_good")
                 copied = 0
                 bad_set = set(bad_list)
-                good_images = [p for p in images if str(p) not in bad_set]
-                n_to_copy = len(good_images)
-                copy_start = time.time()
-                self._ui_set_eta(f"Copying good images… 0/{n_to_copy}")
-                self._ui_set_progress_fraction(0)
-                for ci, p in enumerate(good_images):
+                for p in images:
                     if self._cancel_requested:
                         self._ui_set_eta("Cancelled")
                         print("Filtered-good export cancelled.")
                         return
+                    if str(p) in bad_set:
+                        continue
                     out_path = self._build_preserved_output_path(p, input_root, cfg["output_folder"], "filtered_good")
                     shutil.copy2(str(p), str(out_path))
                     copied += 1
-                    # Update progress bar and ETA during copy
-                    frac = (ci + 1) / n_to_copy if n_to_copy else 1
-                    elapsed = time.time() - copy_start
-                    if frac > 0 and frac < 1:
-                        remaining = elapsed / frac * (1 - frac)
-                        eta_text = f"Copying… ETA: ~{format_eta(remaining)}  ({ci + 1}/{n_to_copy})"
-                    else:
-                        eta_text = f"Copying… ({ci + 1}/{n_to_copy})"
-                    self._ui_set_progress_fraction(frac)
-                    self._ui_set_eta(eta_text)
                 print(f"Good filtered images exported: {copied} -> {out_root}")
 
             self._ui_call(self._render_filter_plot, reason_counts, n_bad, n_good)
@@ -2009,26 +2204,44 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
             self._ui_set_progress_fraction(0)
             self._ui_set_eta("ETA: --")
 
+            exclude_bad = cfg.get("exclude_bad", False)
+            bad_set = set(map(str, cfg.get("bad_list", []))) if exclude_bad else set()
+
             input_root = Path(cfg["input_folder"])
             jobs = []
+            excluded_total = 0
             if cfg["recursive"]:
                 for root, _, files in os.walk(cfg["input_folder"]):
                     imgs = [Path(root) / f for f in sorted(files) if Path(f).suffix.lower() in IMAGE_EXTS]
+                    if exclude_bad and bad_set:
+                        before = len(imgs)
+                        imgs = [p for p in imgs if str(p) not in bad_set]
+                        excluded_total += before - len(imgs)
                     if imgs:
                         jobs.append((Path(root), imgs))
             else:
                 imgs = collect_images(cfg["input_folder"])
+                if exclude_bad and bad_set:
+                    before = len(imgs)
+                    imgs = [p for p in imgs if str(p) not in bad_set]
+                    excluded_total += before - len(imgs)
                 if imgs:
                     jobs.append((input_root, imgs))
 
             if not jobs:
-                self._ui_message("warning", "Warning", "No images found.")
+                msg = "No images found."
+                if exclude_bad:
+                    msg = ("No good images remaining after excluding bad ones.\n"
+                           "All images may have been flagged, or the bad list "
+                           "does not match the input folder.")
+                self._ui_message("warning", "Warning", msg)
                 return
 
             written_count = 0
             skipped_count = 0
             start_time = time.time()
-            print(f"\nAveraging images for {len(jobs)} folder(s)...")
+            filter_msg = f" (excluded {excluded_total} bad images)" if excluded_total > 0 else ""
+            print(f"\nAveraging images for {len(jobs)} folder(s){filter_msg}...")
 
             for idx, (folder_path, imgs) in enumerate(jobs):
                 if self._cancel_requested:
