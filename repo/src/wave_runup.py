@@ -204,15 +204,23 @@ def compute_stockdon_r2(beta, H0, T0):
     """
     Stockdon et al. (2006) empirical 2 % exceedance run-up.
 
+    For intermediate / reflective beaches (β > 0) the general formula is used:
+        R₂% = 1.1 (η̄ + S/2)
+    where η̄ = 0.35 β √(H₀L₀) and S = √(H₀L₀ (0.563 β² + 0.004)).
+
+    For highly dissipative beaches (β → 0) the simplified form is used:
+        R₂% = 0.043 √(H₀L₀)
+
     Parameters
     ----------
-    beta : float   — foreshore beach slope (dimensionless, e.g. 0.10)
+    beta : float   — foreshore beach slope (dimensionless, e.g. 0.10).
+                     Use 0 for dissipative beaches.
     H0   : float   — deep-water significant wave height (m)
     T0   : float   — peak wave period (s)
 
     Returns
     -------
-    dict with keys:  R2, eta_bar, S, L0, beta, H0, T0
+    dict with keys:  R2, eta_bar, S, L0, beta, H0, T0, regime
     or None if any input is invalid.
     """
     try:
@@ -221,18 +229,27 @@ def compute_stockdon_r2(beta, H0, T0):
         T0   = float(T0)
     except (TypeError, ValueError):
         return None
-    if beta <= 0 or H0 <= 0 or T0 <= 0:
+    if beta < 0 or H0 <= 0 or T0 <= 0:
         return None
 
     g  = 9.81
     L0 = g * T0 ** 2 / (2.0 * np.pi)
 
-    eta_bar = 0.35 * beta * np.sqrt(H0 * L0)
-    S       = np.sqrt(H0 * L0 * (0.563 * beta ** 2 + 0.004))
-    R2      = 1.1 * (eta_bar + S / 2.0)
+    if beta == 0:
+        # Dissipative simplification: R₂% = 0.043 √(H₀ L₀)
+        R2      = 0.043 * np.sqrt(H0 * L0)
+        eta_bar = 0.0
+        S       = 0.0
+        regime  = "dissipative"
+    else:
+        # General / intermediate formula
+        eta_bar = 0.35 * beta * np.sqrt(H0 * L0)
+        S       = np.sqrt(H0 * L0 * (0.563 * beta ** 2 + 0.004))
+        R2      = 1.1 * (eta_bar + S / 2.0)
+        regime  = "intermediate"
 
     return {"R2": R2, "eta_bar": eta_bar, "S": S, "L0": L0,
-            "beta": beta, "H0": H0, "T0": T0}
+            "beta": beta, "H0": H0, "T0": T0, "regime": regime}
 
 
 def create_mask_from_coordinates(pixel_coords, image_width, image_height):
@@ -337,6 +354,8 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
             "     Slope — foreshore beach slope in degrees.\n"
             "             The tool converts to β = tan(slope°)\n"
             "             internally.  e.g. 6° → β ≈ 0.105\n"
+            "             Use 0° for highly dissipative beaches\n"
+            "             (applies R₂% = 0.043·√(H₀·L₀)).\n"
             "     H₀   — deep-water significant wave height (m).\n"
             "     T₀   — peak wave period (s).\n"
             "  The tool also computes L₀ = g·T₀²/2π internally.\n"
@@ -890,7 +909,8 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
     def _try_stockdon(self):
         """Compute Stockdon R2% from the GUI fields (returns None if disabled
         or if any field is empty / invalid — the caller simply skips).
-        The slope entry is in degrees; converted to β = tan(θ) internally."""
+        The slope entry is in degrees; converted to β = tan(θ) internally.
+        A slope of 0° triggers the dissipative simplification."""
         self._stockdon_result = None
         if not self.stockdon_enabled.get():
             return None
@@ -903,13 +923,17 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
             slope_deg = float(slope_str)
         except (TypeError, ValueError):
             return None
-        if slope_deg <= 0 or slope_deg >= 90:
+        if slope_deg < 0 or slope_deg >= 90:
             print(f"[Stockdon] Invalid slope: {slope_deg}° "
                   f"(must be between 0° and 90°)")
             return None
         beta = np.tan(np.radians(slope_deg))
-        print(f"[Stockdon] Slope {slope_deg:.2f}° → β = tan({slope_deg:.2f}°)"
-              f" = {beta:.4f}")
+        if slope_deg == 0:
+            print(f"[Stockdon] Slope 0° → β = 0  (dissipative simplification: "
+                  f"R₂% = 0.043·√(H₀·L₀))")
+        else:
+            print(f"[Stockdon] Slope {slope_deg:.2f}° → β = tan({slope_deg:.2f}°)"
+                  f" = {beta:.4f}")
         result = compute_stockdon_r2(beta, H0, T0)
         if result is not None:
             result["slope_deg"] = slope_deg
@@ -1084,6 +1108,7 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
                 obs_r2 = np.percentile(detr, 98)
                 csvfile.write(f"# Stockdon_R2%,{sk['R2']:.4f}\n")
                 csvfile.write(f"# observed_R2%,{obs_r2:.4f}\n")
+                csvfile.write(f"# regime,{sk.get('regime', 'intermediate')}\n")
                 csvfile.write(f"# slope_deg,{sk.get('slope_deg', '')}\n")
                 csvfile.write(f"# beta,{sk['beta']:.4f}\n")
                 csvfile.write(f"# H0_m,{sk['H0']}\n")
@@ -1103,6 +1128,11 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
             with open(txt_path, "w") as f:
                 f.write("Stockdon et al. (2006) R₂% Comparison\n")
                 f.write("=" * 50 + "\n\n")
+                regime_str = sk.get("regime", "intermediate")
+                f.write(f"Regime: {regime_str}")
+                if regime_str == "dissipative":
+                    f.write("  (R₂% = 0.043·√(H₀·L₀))")
+                f.write("\n\n")
                 f.write("Input parameters\n")
                 f.write(f"  Foreshore slope : {sk.get('slope_deg', 'N/A')}°\n")
                 f.write(f"  β = tan(slope)  : {sk['beta']:.4f}\n")
@@ -1287,6 +1317,7 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
                     obs_r2 = np.percentile(detr, 98)
                     csvfile.write(f"# Stockdon_R2%,{batch_stockdon['R2']:.4f}\n")
                     csvfile.write(f"# observed_R2%,{obs_r2:.4f}\n")
+                    csvfile.write(f"# regime,{batch_stockdon.get('regime', 'intermediate')}\n")
                     csvfile.write(f"# slope_deg,{batch_stockdon.get('slope_deg', '')}\n")
                     csvfile.write(f"# beta,{batch_stockdon['beta']:.4f}\n")
                     csvfile.write(f"# H0_m,{batch_stockdon['H0']}\n")
@@ -1355,6 +1386,8 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
                 label=f'Stockdon R₂% = {batch_stockdon["R2"]:.2f} m')
             self.ax_stats_swash.legend(fontsize="small")
             print(f"\n── Stockdon et al. (2006) ──")
+            regime_str = batch_stockdon.get("regime", "intermediate")
+            print(f"   Regime: {regime_str}")
             print(f"   β={batch_stockdon['beta']:.4f}  "
                   f"H₀={batch_stockdon['H0']:.2f} m  "
                   f"T₀={batch_stockdon['T0']:.1f} s  →  "
@@ -1368,6 +1401,11 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
             with open(txt_path, "w") as f:
                 f.write("Stockdon et al. (2006) R₂% Comparison — Batch\n")
                 f.write("=" * 60 + "\n\n")
+                regime_str = batch_stockdon.get("regime", "intermediate")
+                f.write(f"Regime: {regime_str}")
+                if regime_str == "dissipative":
+                    f.write("  (R₂% = 0.043·√(H₀·L₀))")
+                f.write("\n\n")
                 f.write("Input parameters (constant across batch)\n")
                 f.write(f"  Foreshore slope : "
                         f"{batch_stockdon.get('slope_deg', 'N/A')}°\n")

@@ -675,6 +675,14 @@ class FeatureIdentifier(HSVMaskEditingMixin, HSVMaskProcessingMixin, HSVMaskUIMi
         if hasattr(self, 'edge_label') and self.edge_label.winfo_exists():
             self._clear_ctk_label(self.edge_label)
 
+        # Clear the overlay canvas (right panel) — edge_label is unpacked,
+        # so the actual display lives on _overlay_canvas
+        canvas = getattr(self, '_overlay_canvas', None)
+        if canvas is not None and canvas.winfo_exists():
+            canvas.delete("all")
+            canvas.configure(scrollregion=(0, 0, 0, 0))
+        self._overlay_photo_ref = None
+
         # Clear console
         if hasattr(self, 'console_text') and self.console_text.winfo_exists():
             self.console_text.delete("1.0", "end")
