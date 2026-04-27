@@ -302,25 +302,38 @@ class HSVMaskUIMixin:
 
 
         elif self.mode == "ml":
-            self.ml_opts_row.grid_columnconfigure(1, weight=1)
+            # Layout: [Button] [Prefix-length label] [entry] [hint] [path label →]
+            # Only the path-label column expands, so the controls stay grouped
+            # on the left and the path grows toward the right margin.
+            self.ml_opts_row.grid_columnconfigure(4, weight=1)
 
             self.btn_browse_ml_mask_folder = ctk.CTkButton(
                 self.ml_opts_row, text="Load associated mask folder", command=self.browse_ml_mask_folder
             )
             self.btn_browse_ml_mask_folder.grid(row=0, column=0, padx=5, pady=3, sticky="w")
 
-            self.lbl_ml_mask_folder = ctk.CTkLabel(
-                self.ml_opts_row, textvariable=self.ml_mask_folder_disp, width=320, anchor="w"
-            )
-            self.lbl_ml_mask_folder.grid(row=0, column=1, padx=5, pady=3, sticky="we")
+            ctk.CTkLabel(
+                self.ml_opts_row,
+                text="Match by first N characters of image name:"
+            ).grid(row=0, column=1, padx=(10, 2), pady=3, sticky="w")
 
-            ctk.CTkLabel(self.ml_opts_row, text="Common file name length").grid(
-                row=0, column=2, padx=(10, 2), pady=3, sticky="e"
-            )
             self.entry_common_len = ctk.CTkEntry(
-                self.ml_opts_row, width=80, textvariable=self.common_name_len_var, placeholder_text=""
+                self.ml_opts_row, width=60,
+                textvariable=self.common_name_len_var,
+                placeholder_text="N"
             )
-            self.entry_common_len.grid(row=0, column=3, padx=2, pady=3, sticky="w")
+            self.entry_common_len.grid(row=0, column=2, padx=2, pady=3, sticky="w")
+
+            ctk.CTkLabel(
+                self.ml_opts_row,
+                text="(leave blank for auto-match)",
+                font=("Arial", 9), text_color="gray"
+            ).grid(row=0, column=3, padx=(2, 10), pady=3, sticky="w")
+
+            self.lbl_ml_mask_folder = ctk.CTkLabel(
+                self.ml_opts_row, textvariable=self.ml_mask_folder_disp, anchor="w"
+            )
+            self.lbl_ml_mask_folder.grid(row=0, column=4, padx=5, pady=3, sticky="we")
 
 
         # ── DROPDOWN 2: HSV Masking (checkbox + collapsible) ─────────────────────

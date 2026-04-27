@@ -1266,8 +1266,22 @@ class HSVMaskEditingMixin:
         z = float(getattr(self, "zoom_scale", 1.0))
         return x * z, y * z
 
+    # Colours used to distinguish polylines from polygons on the edit canvas.
+    # Two visual axes:
+    #   • Hue encodes feature type   — cyan family = polyline, orange family = polygon
+    #   • Brightness encodes stage   — active (bright) → reference (mid).
+    # Confirmed (committed) colours live in hsv_mask_processing.update_edge_display.
+    _COLOR_ACTIVE_LINE    = "#00e5ff"    # active polyline (bright cyan)
+    _COLOR_ACTIVE_POLYGON = "#ffaa00"    # active polygon  (gold)
+    _COLOR_REF_LINE       = "#00cc00"    # reference polyline (green)
+    _COLOR_REF_POLYGON    = "#ff7700"    # reference polygon  (orange)
+
     def _draw_reference_features(self):
-        """Draw all session features (non-active) on the edit canvas as green lines."""
+        """
+        Draw all session features (non-active) on the edit canvas.
+        Polylines are drawn in green, polygons in dark orange so the
+        user can tell at a glance which is which.
+        """
         if not hasattr(self, "edit_canvas"):
             return
         # Delete any previous reference lines
@@ -1293,8 +1307,9 @@ class HSVMaskEditingMixin:
                 px, py = pts[0][0] * proxy_s, pts[0][1] * proxy_s
                 sx, sy = self._scaled(px, py)
                 flat.extend([sx, sy])
+            colour = self._COLOR_REF_POLYGON if is_closed else self._COLOR_REF_LINE
             self.edit_canvas.create_line(
-                *flat, fill="#00cc00", width=2, tags="__ref_feature__"
+                *flat, fill=colour, width=2, tags="__ref_feature__"
             )
 
     def _draw_poly_in_place(self):
@@ -1310,12 +1325,23 @@ class HSVMaskEditingMixin:
             sx, sy = self._scaled(x, y)
             flat.extend([sx, sy])
 
+        # Choose colour by type so polygons (orange) are visually distinct
+        # from polylines (cyan).  Refresh fill on each redraw so toggling
+        # mode (e/p/c shortcuts) updates the colour live.
+        colour = (self._COLOR_ACTIVE_POLYGON
+                  if getattr(self, "is_polygon_mode", False)
+                  else self._COLOR_ACTIVE_LINE)
+
         if getattr(self, "_poly_id", None) is None:
             self._poly_id = self.edit_canvas.create_line(
-                *flat, fill="cyan", width=2, tags="__poly__"
+                *flat, fill=colour, width=2, tags="__poly__"
             )
         else:
             self.edit_canvas.coords(self._poly_id, *flat)
+            try:
+                self.edit_canvas.itemconfigure(self._poly_id, fill=colour)
+            except Exception:
+                pass
 
     def _draw_vertices_in_place(self):
         if not hasattr(self, "edit_canvas"): return
@@ -1419,7 +1445,23 @@ class HSVMaskEditingMixin:
                 self.redraw_canvas()
                 return
 
-        self.edited_edge_points.append([x_img, y_img])
+        # For polylines, extend at whichever endpoint (first or last) is
+        # nearer to the click, so the user can grow the line in either
+        # direction (e.g. extending a shoreline both north and south).
+        # Polygon-mode behaviour is unchanged — the close-on-first check
+        # above already handled the polygon-closing case.
+        if (not self.is_polygon_mode) and len(self.edited_edge_points) >= 2:
+            first_pt = self.edited_edge_points[0]
+            last_pt  = self.edited_edge_points[-1]
+            d_first = self.distance(x_img, y_img, first_pt[0], first_pt[1])
+            d_last  = self.distance(x_img, y_img, last_pt[0],  last_pt[1])
+            if d_first < d_last:
+                self.edited_edge_points.insert(0, [x_img, y_img])
+            else:
+                self.edited_edge_points.append([x_img, y_img])
+        else:
+            self.edited_edge_points.append([x_img, y_img])
+
         self._record_history()
         self.redraw_canvas()
 
@@ -1803,13 +1845,14 @@ class HSVMaskEditingMixin:
 
             pts_np = np.array(pts, dtype=np.int32).reshape((-1, 1, 2))
             is_poly = (feature_type == "polygon")
+            # Confirmed BGR colours: polygon → dark orange #cc5500, polyline → teal #0088aa
             if is_poly:
                 closed = pts[:] + ([pts[0]] if pts[0] != pts[-1] else [])
                 cv2.fillPoly(mask, [np.array(closed, np.int32).reshape((-1, 1, 2))], 255)
-                cv2.polylines(overlay, [pts_np], True, (0, 255, 0), 2)
+                cv2.polylines(overlay, [pts_np], True, (0, 85, 204), 2)
             else:
                 cv2.polylines(mask, [pts_np], False, 255, thickness)
-                cv2.polylines(overlay, [pts_np], False, (0, 255, 0), thickness)
+                cv2.polylines(overlay, [pts_np], False, (170, 136, 0), thickness)
 
             seg_pts = pts[:] + ([pts[0]] if is_poly else [])
             seg = [coord for p in seg_pts for coord in p]
@@ -1960,8 +2003,9 @@ class HSVMaskEditingMixin:
         overlay = self.full_image.copy()
         thickness = int(self.edge_thickness_slider.get())
         pts = np.array(self.edge_points, dtype=np.int32).reshape((-1, 1, 2))
+        # Confirmed-polyline teal #0088aa (BGR 170, 136, 0)
         cv2.polylines(overlay, [pts], isClosed=False,
-                      color=(0, 255, 0), thickness=thickness)
+                      color=(170, 136, 0), thickness=thickness)
         out_overlay = os.path.join(
             export_path, os.path.splitext(base_name)[0] + "_overlay.png")
         cv2.imwrite(out_overlay, overlay)

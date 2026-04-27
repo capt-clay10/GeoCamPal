@@ -259,18 +259,26 @@ class HSVMaskProcessingMixin:
             return
 
         overlay = self.full_image.copy()
+        # Confirmed-feature colours (BGR, since OpenCV is BGR-native):
+        #   polygon  → dark orange #cc5500  (BGR 0, 85, 204)
+        #   polyline → teal       #0088aa  (BGR 170, 136, 0)
+        # These match the active/reference palette in hsv_mask_editing
+        # (orange family for polygons, cyan family for polylines), at the
+        # dimmest stage to indicate "committed".
+        _CONFIRMED_POLYGON_BGR  = (0, 85, 204)
+        _CONFIRMED_POLYLINE_BGR = (170, 136, 0)
         for (feature_type, points) in self.features:
             if len(points) < 2:
                 continue
             pts_np = np.array(points, dtype=np.int32).reshape((-1, 1, 2))
             if feature_type == "polygon":
-                cv2.polylines(overlay, [pts_np], isClosed=True, color=(
-                    0, 255, 0), thickness=2)
+                cv2.polylines(overlay, [pts_np], isClosed=True,
+                              color=_CONFIRMED_POLYGON_BGR, thickness=2)
             else:
                 thickness = int(self.edge_thickness_slider.get()) if hasattr(
                     self, 'edge_thickness_slider') else 2
-                cv2.polylines(overlay, [pts_np], isClosed=False, color=(
-                    0, 255, 0), thickness=thickness)
+                cv2.polylines(overlay, [pts_np], isClosed=False,
+                              color=_CONFIRMED_POLYLINE_BGR, thickness=thickness)
 
         h0, w0 = overlay.shape[:2]
 
@@ -1727,12 +1735,13 @@ class HSVMaskProcessingMixin:
             gdf = gpd.GeoDataFrame(geometry=[geom], crs=crs)
             gdf.to_file(out_geo, driver="GeoJSON")
 
-            # Write overlay PNG
+            # Write overlay PNG (use confirmed-polyline teal to match the
+            # on-screen overlay colour scheme).
             overlay = self.full_image.copy()
             if self.edge_points:
                 pts = np.array(self.edge_points, dtype=np.int32).reshape((-1, 1, 2))
                 thickness = int(self.edge_thickness_slider.get()) if hasattr(self, 'edge_thickness_slider') else 2
-                cv2.polylines(overlay, [pts], False, (0, 255, 0), thickness)
+                cv2.polylines(overlay, [pts], False, (170, 136, 0), thickness)
             cv2.imwrite(out_ovl, overlay)
 
             processed_count += 1
