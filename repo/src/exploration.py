@@ -1767,20 +1767,54 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
                 print("Copying images …")
                 copy_dir = os.path.join(cfg["output_folder"], f"images_{mode_tag}")
                 os.makedirs(copy_dir, exist_ok=True)
+
+                # Check whether any series produced a tidal classification
+                # so we can route images into spring / neap sub-folders.
+                has_tidal_class = any(
+                    r.get(f"{lb}_classification") in ("spring", "neap")
+                    for r in results for lb in labels
+                )
+                if has_tidal_class:
+                    spring_dir = os.path.join(copy_dir, "spring")
+                    neap_dir   = os.path.join(copy_dir, "neap")
+                    os.makedirs(spring_dir, exist_ok=True)
+                    os.makedirs(neap_dir, exist_ok=True)
+
                 t0_copy = time.time()
                 for i, r in enumerate(results):
                     if self._cancel_flag:
                         print("Cancelled during copy.")
                         self._set_eta_safe("Cancelled")
                         return
+
+                    # Determine destination: spring / neap sub-folder
+                    # when tidal classification is present, else main dir.
+                    dest_dir = copy_dir
+                    if has_tidal_class:
+                        for lb in labels:
+                            cls = r.get(f"{lb}_classification")
+                            if cls == "spring":
+                                dest_dir = spring_dir
+                                break
+                            elif cls == "neap":
+                                dest_dir = neap_dir
+                                break
+
                     shutil.copy2(
                         str(r["image_path"]),
-                        os.path.join(copy_dir, r["image_path"].name))
+                        os.path.join(dest_dir, r["image_path"].name))
                     frac = 0.6 + 0.35 * (i + 1) / len(results)
                     self._set_progress_safe(frac)
                     eta = compute_eta(t0_copy, i + 1, len(results))
                     self._set_eta_safe(f"Copying {i+1}/{len(results)} — ETA {format_eta(eta)}")
                 print(f"  Copied to: {copy_dir}")
+                if has_tidal_class:
+                    n_spring = len([f for f in os.listdir(spring_dir)
+                                    if os.path.isfile(os.path.join(spring_dir, f))])
+                    n_neap   = len([f for f in os.listdir(neap_dir)
+                                    if os.path.isfile(os.path.join(neap_dir, f))])
+                    print(f"    spring/ : {n_spring} images")
+                    print(f"    neap/   : {n_neap} images")
 
             # --- update plot ---
             plot_title = (f"Matched {len(results)} images | {crit_desc} | "

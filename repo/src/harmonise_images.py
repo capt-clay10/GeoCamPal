@@ -4,7 +4,8 @@ Harmonise Images
 Three sub‑tasks in one window:
   1. **Filter bad images** — robust blur, clipping‑based over‑exposure,
      under‑exposure, darkness, low‑information (entropy), rain/droplets
-     on lens, and partial obstruction detection.
+     on lens, partial obstruction detection, and failed/corrupt image
+     detection (0‑byte, truncated, or unreadable files).
   2. **Harmonise brightness** — luminance‑based gain (with soft‑knee) or
      L‑channel histogram matching, optional sky masking for reference
      computation, and post‑correction sanity check.
@@ -718,6 +719,10 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
             ("Fraction", "Obstruction fraction", "0.35"),
         ], grid_row=2, grid_col=2)
 
+        _make_filter_card(row2, "Failed images", [
+            ("% of median size", "Failed min size pct", "10"),
+        ], grid_row=2, grid_col=3)
+
         # Even column weights so cards share space
         for c in range(4):
             row2.grid_columnconfigure(c, weight=0)
@@ -740,7 +745,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
         ctk.CTkLabel(
             action_row,
             text="-> Flags blurry, overexposed, dark, foggy, "
-                 "rain-on-lens & blocked images",
+                 "rain-on-lens, blocked & failed/corrupt images",
             font=("Arial", 10), text_color="gray", justify="left",
         ).pack(side="left", padx=5)
 
@@ -968,6 +973,13 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
               "lens cap, foreign object)\n"
               "                    by checking for large dark regions "
               "in a 4x4 grid.\n"
+              "  Failed images   - Flags corrupt, truncated, or empty files.\n"
+              "                    Pre-checks file size: 0-byte files are always\n"
+              "                    flagged; files below '% of median size' of\n"
+              "                    the dataset median (computed from non-zero\n"
+              "                    files only) are also flagged. Files that\n"
+              "                    cannot be decoded by OpenCV are caught\n"
+              "                    unconditionally regardless of this checkbox.\n"
               "\n"
               "NOTE: The 'Blur' filter includes a 'Local blur fraction'\n"
               "parameter.  When set > 0, an 8x8 grid of blocks is\n"
@@ -1042,6 +1054,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
               "│ Entropy threshold    │     4.5      │     5.0      │     >5.5     │\n"
               "│ Droplet fraction     │     0.12     │     0.08     │     <0.04    │\n"
               "│ Obstruction fraction │     0.45     │     0.35     │     <0.20    │\n"
+              "│ Failed % of median   │      5       │      10      │      >20     │\n"
               "├──────────────────────┼──────────────┼──────────────┼──────────────┤\n"
               "│ L-tolerance (bright) │      8       │      5       │      <3      │\n"
               "│ Sky mask (%)         │      0       │     15       │     >30      │\n"
@@ -1111,6 +1124,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
             "entropy_t": float(self.filter_entries["Entropy threshold"].get()),
             "droplet_f": float(self.filter_entries["Droplet fraction"].get()),
             "obstruct_f": float(self.filter_entries["Obstruction fraction"].get()),
+            "failed_min_pct": float(self.filter_entries["Failed min size pct"].get()),
             "enabled": {k: v.get() for k, v in self.filter_enabled.items()},
             "export_good": bool(self.export_filtered_good_var.get()),
         }
@@ -1633,7 +1647,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
             labels = list(reason_counts.keys())
             values = [0] * len(labels)
         colors = ["#e74c3c", "#e67e22", "#3498db", "#2c3e50",
-                  "#95a5a6", "#8e44ad", "#1abc9c"]
+                  "#95a5a6", "#8e44ad", "#1abc9c", "#c0392b"]
         self.axes[1].barh(labels, values, color=colors[:len(labels)])
         self.axes[1].set_title(f"Filter Results ({n_bad} bad / {n_good} good)")
         self.axes[1].set_xlabel("Count")
@@ -1754,24 +1768,69 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
                 print(f"    Lens droplets:  fraction={cfg['droplet_f']}")
             if en.get("Obstruction"):
                 print(f"    Obstruction:    fraction={cfg['obstruct_f']}")
+            if en.get("Failed images"):
+                print(f"    Failed images:  flag if < {cfg['failed_min_pct']}% of median file size")
             bad_list = []
             bad_reasons = {}
             reason_counts = {
                 "blurry": 0, "clipped_overexposed": 0,
                 "underexposed": 0, "too_dark": 0,
                 "low_information": 0, "lens_droplets": 0,
-                "obstruction": 0,
+                "obstruction": 0, "failed_image": 0,
             }
             start_time = time.time()
+
+            # --- Pre-compute file-size threshold for "Failed images" filter ---
+            failed_size_threshold = 0  # bytes; 0 = only flag truly empty files
+            if en.get("Failed images"):
+                file_sizes = []
+                for p in images:
+                    try:
+                        sz = os.path.getsize(str(p))
+                    except OSError:
+                        sz = 0
+                    if sz > 0:
+                        file_sizes.append(sz)
+                if file_sizes:
+                    median_size = float(np.median(file_sizes))
+                    failed_size_threshold = median_size * (cfg["failed_min_pct"] / 100.0)
+                    print(f"    File size stats: median={median_size/1024:.1f} KB, "
+                          f"threshold={failed_size_threshold/1024:.1f} KB "
+                          f"({len(file_sizes)} non-zero files)")
 
             for idx, p in enumerate(images):
                 if self._cancel_requested:
                     self._ui_set_eta("Cancelled")
                     print("Filtering cancelled.")
                     return
+
+                # --- File-size pre-check (before attempting cv2.imread) ---
+                try:
+                    file_sz = os.path.getsize(str(p))
+                except OSError:
+                    file_sz = 0
+
+                if en.get("Failed images") and file_sz < failed_size_threshold:
+                    bad_list.append(str(p))
+                    if file_sz == 0:
+                        detail = "failed_image (0 bytes)"
+                    else:
+                        detail = f"failed_image ({file_sz/1024:.1f} KB < {failed_size_threshold/1024:.1f} KB threshold)"
+                    bad_reasons[p.name] = [detail]
+                    reason_counts["failed_image"] += 1
+                    print(f"  x {p.name}: {detail}")
+                    self._update_progress(idx, len(images), start_time)
+                    continue
+
                 img = cv2.imread(str(p))
                 if img is None:
-                    print(f"[WARN] Cannot read: {p.name}")
+                    # Always flag unreadable files regardless of checkbox state
+                    bad_list.append(str(p))
+                    detail = f"failed_image (unreadable, {file_sz/1024:.1f} KB)"
+                    bad_reasons[p.name] = [detail]
+                    reason_counts["failed_image"] += 1
+                    print(f"  x {p.name}: {detail}")
+                    self._update_progress(idx, len(images), start_time)
                     continue
                 reasons = []
                 if en.get("Blur") and is_blurry(img, cfg["blur_t"], local_blur_frac=cfg["local_blur_f"]):
@@ -1814,6 +1873,13 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
             n_bad = len(bad_list)
             n_good = len(images) - n_bad
             print(f"\nFilter complete: {n_bad} bad / {n_good} good out of {len(images)} images.")
+            active_counts = {k: v for k, v in reason_counts.items() if v > 0}
+            if active_counts:
+                print("  Breakdown by reason:")
+                for reason, count in active_counts.items():
+                    print(f"    {reason:<25s} {count:>5d}")
+            else:
+                print("  No bad images detected.")
 
             txt_path = os.path.join(cfg["output_folder"], "bad_images.txt")
             with open(txt_path, "w", encoding="utf-8") as f:

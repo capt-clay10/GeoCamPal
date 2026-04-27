@@ -6,6 +6,8 @@ import numpy as np
 # np.trapezoid was added in NumPy 1.25; fall back to the deprecated np.trapz
 if not hasattr(np, "trapezoid"):
     np.trapezoid = np.trapz
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from scipy.signal import welch
@@ -198,6 +200,41 @@ def detect_annotation_format(file_path):
         return 'unknown'
 
 
+def compute_stockdon_r2(beta, H0, T0):
+    """
+    Stockdon et al. (2006) empirical 2 % exceedance run-up.
+
+    Parameters
+    ----------
+    beta : float   — foreshore beach slope (dimensionless, e.g. 0.10)
+    H0   : float   — deep-water significant wave height (m)
+    T0   : float   — peak wave period (s)
+
+    Returns
+    -------
+    dict with keys:  R2, eta_bar, S, L0, beta, H0, T0
+    or None if any input is invalid.
+    """
+    try:
+        beta = float(beta)
+        H0   = float(H0)
+        T0   = float(T0)
+    except (TypeError, ValueError):
+        return None
+    if beta <= 0 or H0 <= 0 or T0 <= 0:
+        return None
+
+    g  = 9.81
+    L0 = g * T0 ** 2 / (2.0 * np.pi)
+
+    eta_bar = 0.35 * beta * np.sqrt(H0 * L0)
+    S       = np.sqrt(H0 * L0 * (0.563 * beta ** 2 + 0.004))
+    R2      = 1.1 * (eta_bar + S / 2.0)
+
+    return {"R2": R2, "eta_bar": eta_bar, "S": S, "L0": L0,
+            "beta": beta, "H0": H0, "T0": T0}
+
+
 def create_mask_from_coordinates(pixel_coords, image_width, image_height):
     """
     Create a binary mask image from pixel coordinates for visualization.
@@ -222,7 +259,7 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         super().__init__(master=master)
         self.title("Wave Run-Up Calculation")
         #self.geometry("1200x800")
-        fit_geometry(self, 1400, 800, resizable=True)
+        fit_geometry(self, 1400, 870, resizable=True)
         try:
             self.after(200, lambda: self.iconphoto(False, tk.PhotoImage(file=resource_path("launch_logo.png"))))
         except Exception:
@@ -247,6 +284,7 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         self._cancel_requested = False
         self._batch_running = False
         self._batch_start_time = None
+        self._stockdon_result = None  # last computed Stockdon R2% dict
 
         # Top frame: three panels
         self.top_frame = ctk.CTkFrame(self, fg_color="black")
@@ -275,9 +313,38 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         self.console_frame.pack(side="top", fill="both", expand=False, padx=10, pady=(0, 10))
         self.console_text = tk.Text(self.console_frame, wrap="word", height=10)
         self.console_text.pack(fill="both", expand=True, padx=5, pady=5)
+        self._console_help = (
+            "Wave Run-Up Tool ready.\n"
+            "────────────────────────────────────────────\n"
+            "Workflow:\n"
+            "  1. Load Raw Time-Stack Image (PNG with embedded\n"
+            "     pixel_resolution and time_interval metadata).\n"
+            "  2. Load Annotation — PNG mask, GeoJSON, or COCO JSON\n"
+            "     exported from the Feature Identifier.\n"
+            "  3. Set options:\n"
+            "     • Land on left    — tick if the shoreline is on the\n"
+            "                         left side of the timestack.\n"
+            "     • Manual Resolution — override the embedded pixel\n"
+            "                           size (metres per pixel).\n"
+            "     • IG threshold    — infragravity cutoff frequency\n"
+            "                         in Hz (default 0.05 Hz).\n"
+            "  4. Click 'Calculate Runup' → extracts the swash\n"
+            "     excursion signal and computes Welch PSD.\n"
+            "  5. Export Runup → saves a (time, distance) CSV.\n"
+            "\n"
+            "Stockdon (2006) R₂% comparison  (optional):\n"
+            "  Tick the checkbox and fill in:\n"
+            "     Slope — foreshore beach slope in degrees.\n"
+            "             The tool converts to β = tan(slope°)\n"
+            "             internally.  e.g. 6° → β ≈ 0.105\n"
+            "     H₀   — deep-water significant wave height (m).\n"
+            "     T₀   — peak wave period (s).\n"
+            "  The tool also computes L₀ = g·T₀²/2π internally.\n"
+            "  Leave any field blank to skip the comparison.\n"
+            "────────────────────────────────────────────\n"
+        )
         self._console_redir = setup_console(
-            self.console_text,
-            "Here you may see console outputs\n--------------------------------\n"
+            self.console_text, self._console_help
         )
 
         # Bottom frame
@@ -303,7 +370,7 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         self.land_left = tk.BooleanVar()
         self.chk_land_left = ctk.CTkCheckBox(self.controls_panel, text="Land on left", variable=self.land_left)
         self.chk_land_left.grid(row=0, column=2, padx=5, pady=5)
-        self.btn_calculate = ctk.CTkButton(self.controls_panel, text="Calculate Runup", command=self.calculate_runup)
+        self.btn_calculate = ctk.CTkButton(self.controls_panel, text="Calculate Runup", command=self.calculate_runup, fg_color="#0F52BA", hover_color="#2A6BD1")
         self.btn_calculate.grid(row=0, column=3, padx=5, pady=5)
       
 
@@ -330,6 +397,32 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         self.format_label = ctk.CTkLabel(self.resolution_panel, text="Annotation: None", text_color="gray")
         self.format_label.grid(row=0, column=6, padx=20, pady=5, sticky="w")
 
+        # Stockdon comparison (optional)
+        self.stockdon_panel = ctk.CTkFrame(self.bottom_panel)
+        self.stockdon_panel.pack(side="top", fill="x", padx=5, pady=2)
+        self.stockdon_enabled = tk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            self.stockdon_panel,
+            text="Stockdon (2006) R₂%",
+            variable=self.stockdon_enabled,
+            command=self._toggle_stockdon,
+        ).grid(row=0, column=0, padx=5, pady=5, sticky="w")
+        ctk.CTkLabel(self.stockdon_panel, text="Slope (°):").grid(
+            row=0, column=1, padx=(15, 3), pady=5)
+        self.stockdon_slope_entry = ctk.CTkEntry(
+            self.stockdon_panel, width=65, state="disabled")
+        self.stockdon_slope_entry.grid(row=0, column=2, padx=3, pady=5)
+        ctk.CTkLabel(self.stockdon_panel, text="H₀ (m):").grid(
+            row=0, column=3, padx=(15, 3), pady=5)
+        self.stockdon_H0_entry = ctk.CTkEntry(
+            self.stockdon_panel, width=65, state="disabled")
+        self.stockdon_H0_entry.grid(row=0, column=4, padx=3, pady=5)
+        ctk.CTkLabel(self.stockdon_panel, text="T₀ (s):").grid(
+            row=0, column=5, padx=(15, 3), pady=5)
+        self.stockdon_T0_entry = ctk.CTkEntry(
+            self.stockdon_panel, width=65, state="disabled")
+        self.stockdon_T0_entry.grid(row=0, column=6, padx=3, pady=5)
+
         # Export
         self.export_panel = ctk.CTkFrame(self.bottom_panel)
         self.export_panel.pack(side="top", fill="x", padx=5, pady=2)
@@ -337,7 +430,7 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         self.btn_select_out_folder.grid(row=0, column=0, padx=5, pady=5)
         self.out_folder_label = ctk.CTkLabel(self.export_panel, text="No folder selected")
         self.out_folder_label.grid(row=0, column=1, padx=5, pady=5, sticky="w")
-        self.btn_export_runup = ctk.CTkButton(self.export_panel, text="Export Runup", command=self.export_runup, fg_color="#0F52BA", hover_color="#2A6BD1")
+        self.btn_export_runup = ctk.CTkButton(self.export_panel, text="Export Runup", command=self.export_runup, fg_color="#8C7738", hover_color="#A18A45")
         self.btn_export_runup.grid(row=0, column=2, padx=5, pady=5)
         self.btn_save_settings = ctk.CTkButton(self.export_panel, text="Save Settings",fg_color="#4F5D75",hover_color="#61708A", command=self.save_settings)
         self.btn_save_settings.grid(row=0, column=3, padx=5, pady=5)
@@ -419,6 +512,10 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
                 "manual_resolution": bool(self.manual_res_var.get()),
                 "manual_resolution_value": self.manual_res_entry.get().strip(),
                 "ig_threshold_hz": self.ig_threshold_entry.get().strip(),
+                "stockdon_enabled": bool(self.stockdon_enabled.get()),
+                "stockdon_slope_deg": self.stockdon_slope_entry.get().strip(),
+                "stockdon_H0": self.stockdon_H0_entry.get().strip(),
+                "stockdon_T0": self.stockdon_T0_entry.get().strip(),
             },
         }
 
@@ -454,6 +551,22 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
                 self.manual_res_entry.insert(0, str(state.get("manual_resolution_value")))
             self.ig_threshold_entry.delete(0, tk.END)
             self.ig_threshold_entry.insert(0, str(state.get("ig_threshold_hz", "0.05")))
+
+            # Restore Stockdon fields
+            self.stockdon_enabled.set(bool(state.get("stockdon_enabled", False)))
+            self._toggle_stockdon()  # enable/disable entries accordingly
+            for entry, key, default in [
+                (self.stockdon_slope_entry, "stockdon_slope_deg", ""),
+                (self.stockdon_H0_entry,   "stockdon_H0",   ""),
+                (self.stockdon_T0_entry,   "stockdon_T0",   ""),
+            ]:
+                entry.configure(state="normal")
+                entry.delete(0, tk.END)
+                val = state.get(key, default)
+                if val not in (None, ""):
+                    entry.insert(0, str(val))
+                if not self.stockdon_enabled.get():
+                    entry.configure(state="disabled")
 
             raw_path = paths.get("raw_image") or ""
             ann_path = paths.get("annotation") or ""
@@ -520,11 +633,20 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         self.land_left.set(False)
         self.manual_res_var.set(False)
         self.manual_res_entry.delete(0, tk.END)
+
+        # Reset Stockdon fields
+        self._stockdon_result = None
+        self.stockdon_enabled.set(False)
+        for w in (self.stockdon_slope_entry,
+                  self.stockdon_H0_entry,
+                  self.stockdon_T0_entry):
+            w.configure(state="normal")
+            w.delete(0, tk.END)
+            w.configure(state="disabled")
         
-        # Clear console
+        # Clear console and reprint help
         self.console_text.delete(1.0, tk.END)
-        print("Session reset \n--------------------------------\n")
-        print("Here you may see console outputs\n--------------------------------\n")
+        print(self._console_help)
 
     def load_raw_image(self, file_path=None):
         if not file_path:
@@ -756,6 +878,44 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
 
         return ig_threshold_hz
 
+    # ── Stockdon helpers ─────────────────────────────────────────
+    def _toggle_stockdon(self):
+        """Enable / disable the Stockdon parameter entries."""
+        state = "normal" if self.stockdon_enabled.get() else "disabled"
+        for w in (self.stockdon_slope_entry,
+                  self.stockdon_H0_entry,
+                  self.stockdon_T0_entry):
+            w.configure(state=state)
+
+    def _try_stockdon(self):
+        """Compute Stockdon R2% from the GUI fields (returns None if disabled
+        or if any field is empty / invalid — the caller simply skips).
+        The slope entry is in degrees; converted to β = tan(θ) internally."""
+        self._stockdon_result = None
+        if not self.stockdon_enabled.get():
+            return None
+        slope_str = self.stockdon_slope_entry.get().strip()
+        H0   = self.stockdon_H0_entry.get().strip()
+        T0   = self.stockdon_T0_entry.get().strip()
+        if not slope_str or not H0 or not T0:
+            return None
+        try:
+            slope_deg = float(slope_str)
+        except (TypeError, ValueError):
+            return None
+        if slope_deg <= 0 or slope_deg >= 90:
+            print(f"[Stockdon] Invalid slope: {slope_deg}° "
+                  f"(must be between 0° and 90°)")
+            return None
+        beta = np.tan(np.radians(slope_deg))
+        print(f"[Stockdon] Slope {slope_deg:.2f}° → β = tan({slope_deg:.2f}°)"
+              f" = {beta:.4f}")
+        result = compute_stockdon_r2(beta, H0, T0)
+        if result is not None:
+            result["slope_deg"] = slope_deg
+        self._stockdon_result = result
+        return result
+
     def calculate_runup(self):
         if not self.raw_image_path or not self.mask_image_path:
             messagebox.showerror("Error", "Load both raw image and annotation first.")
@@ -856,6 +1016,27 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         # Detrended swash
         self.ax_stats_swash.clear()
         self.ax_stats_swash.plot(t_sorted, detr, linewidth=0.5, label="Detrended Swash")
+
+        # ── Optional Stockdon R₂% comparison ────────────────────
+        sk = self._try_stockdon()
+        if sk is not None:
+            obs_r2 = np.percentile(detr, 98)
+            self.ax_stats_swash.axhline(
+                sk["R2"], color="red", linestyle="--", linewidth=1.2,
+                label=f'Stockdon R₂% = {sk["R2"]:.2f} m')
+            self.ax_stats_swash.axhline(
+                obs_r2, color="blue", linestyle=":", linewidth=1.2,
+                label=f'Observed R₂% = {obs_r2:.2f} m')
+            print(f"\n── Stockdon et al. (2006) comparison ──")
+            print(f"   β = {sk['beta']:.4f}   H₀ = {sk['H0']:.2f} m   "
+                  f"T₀ = {sk['T0']:.1f} s")
+            print(f"   L₀ = {sk['L0']:.2f} m   "
+                  f"Setup η̄ = {sk['eta_bar']:.3f} m   "
+                  f"Swash S = {sk['S']:.3f} m")
+            print(f"   Stockdon R₂%  = {sk['R2']:.3f} m")
+            print(f"   Observed R₂%  = {obs_r2:.3f} m  "
+                  f"(98th percentile of detrended swash)")
+
         self.ax_stats_swash.set_title('Detrended Swash Excursion')
         self.ax_stats_swash.set_xlabel('Time (s)')
         self.ax_stats_swash.set_ylabel("d'(t) (m)")
@@ -895,7 +1076,49 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
             for sec, dist in zip(self.runup_time, self.runup_distance):
                 ts = (base_dt + datetime.timedelta(seconds=float(sec))).strftime("%Y-%m-%d-%H-%M-%S")
                 writer.writerow([ts, dist])
+
+            # Append Stockdon comparison as comment rows if available
+            sk = self._stockdon_result
+            if sk is not None:
+                detr = self.runup_distance - np.mean(self.runup_distance)
+                obs_r2 = np.percentile(detr, 98)
+                csvfile.write(f"# Stockdon_R2%,{sk['R2']:.4f}\n")
+                csvfile.write(f"# observed_R2%,{obs_r2:.4f}\n")
+                csvfile.write(f"# slope_deg,{sk.get('slope_deg', '')}\n")
+                csvfile.write(f"# beta,{sk['beta']:.4f}\n")
+                csvfile.write(f"# H0_m,{sk['H0']}\n")
+                csvfile.write(f"# T0_s,{sk['T0']}\n")
+                csvfile.write(f"# L0_m,{sk['L0']:.2f}\n")
+
         messagebox.showinfo("Export Runup", f"Exported to:\n{out_path}")
+
+        # Write Stockdon comparison text file if available
+        sk = self._stockdon_result
+        if sk is not None:
+            detr = self.runup_distance - np.mean(self.runup_distance)
+            obs_r2 = np.percentile(detr, 98)
+            diff = obs_r2 - sk["R2"]
+            txt_name = os.path.splitext(out_name)[0] + "_stockdon_comparison.txt"
+            txt_path = os.path.join(self.output_folder, txt_name)
+            with open(txt_path, "w") as f:
+                f.write("Stockdon et al. (2006) R₂% Comparison\n")
+                f.write("=" * 50 + "\n\n")
+                f.write("Input parameters\n")
+                f.write(f"  Foreshore slope : {sk.get('slope_deg', 'N/A')}°\n")
+                f.write(f"  β = tan(slope)  : {sk['beta']:.4f}\n")
+                f.write(f"  H₀              : {sk['H0']:.2f} m\n")
+                f.write(f"  T₀              : {sk['T0']:.1f} s\n")
+                f.write(f"  L₀ (computed)   : {sk['L0']:.2f} m\n\n")
+                f.write("Intermediate quantities\n")
+                f.write(f"  Setup η̄         : {sk['eta_bar']:.4f} m\n")
+                f.write(f"  Swash S          : {sk['S']:.4f} m\n\n")
+                f.write("Results\n")
+                f.write(f"  Stockdon R₂%     : {sk['R2']:.4f} m\n")
+                f.write(f"  Observed R₂%     : {obs_r2:.4f} m  "
+                        f"(98th percentile of detrended swash)\n")
+                f.write(f"  Difference       : {diff:+.4f} m  "
+                        f"(observed − predicted)\n")
+            print(f"Stockdon comparison saved to: {txt_name}")
 
     def select_batch_raw_folder(self):
         folder = filedialog.askdirectory(parent=self, title="Select Folder with Raw TS Images")
@@ -980,6 +1203,10 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         all_runup_data = []
         processed = 0
 
+        # Pre-compute Stockdon R₂% (same wave conditions for all images)
+        batch_stockdon = self._try_stockdon()
+        stockdon_rows = []  # collect (filename, observed_R2%) per image
+
         # 5) Loop through each pair
         for raw_name, annotation_name in valid_pairs:
             if self._cancel_requested:
@@ -1054,6 +1281,19 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
                     ts = (base_dt + datetime.timedelta(seconds=float(sec))).strftime("%Y-%m-%d-%H-%M-%S")
                     writer.writerow([ts, dist, ann_format])
 
+                # Append Stockdon comparison if available
+                if batch_stockdon is not None:
+                    detr = d_sorted - np.mean(d_sorted)
+                    obs_r2 = np.percentile(detr, 98)
+                    csvfile.write(f"# Stockdon_R2%,{batch_stockdon['R2']:.4f}\n")
+                    csvfile.write(f"# observed_R2%,{obs_r2:.4f}\n")
+                    csvfile.write(f"# slope_deg,{batch_stockdon.get('slope_deg', '')}\n")
+                    csvfile.write(f"# beta,{batch_stockdon['beta']:.4f}\n")
+                    csvfile.write(f"# H0_m,{batch_stockdon['H0']}\n")
+                    csvfile.write(f"# T0_s,{batch_stockdon['T0']}\n")
+                    csvfile.write(f"# L0_m,{batch_stockdon['L0']:.2f}\n")
+                    stockdon_rows.append((raw_name, obs_r2))
+
             all_runup_data.append((d_sorted, t_sorted))
             processed += 1
             print(f"Processed: {raw_name} + {annotation_name} ({ann_format})")
@@ -1106,6 +1346,69 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         self.ax_stats_swash.set_xlabel('Time (s)')
         self.ax_stats_swash.set_ylabel("d'(t) (m)")
         self.ax_stats_swash.set_title('Swash Excursions (Batch)')
+
+        # Overlay Stockdon R₂% on the batch swash plot if available
+        if batch_stockdon is not None:
+            self.ax_stats_swash.axhline(
+                batch_stockdon["R2"], color="red", linestyle="--",
+                linewidth=1.2,
+                label=f'Stockdon R₂% = {batch_stockdon["R2"]:.2f} m')
+            self.ax_stats_swash.legend(fontsize="small")
+            print(f"\n── Stockdon et al. (2006) ──")
+            print(f"   β={batch_stockdon['beta']:.4f}  "
+                  f"H₀={batch_stockdon['H0']:.2f} m  "
+                  f"T₀={batch_stockdon['T0']:.1f} s  →  "
+                  f"R₂% = {batch_stockdon['R2']:.3f} m")
+
+        # Write aggregated Stockdon comparison file
+        if batch_stockdon is not None and stockdon_rows:
+            obs_vals = np.array([r[1] for r in stockdon_rows])
+            txt_path = os.path.join(self.output_folder,
+                                    "stockdon_comparison.txt")
+            with open(txt_path, "w") as f:
+                f.write("Stockdon et al. (2006) R₂% Comparison — Batch\n")
+                f.write("=" * 60 + "\n\n")
+                f.write("Input parameters (constant across batch)\n")
+                f.write(f"  Foreshore slope : "
+                        f"{batch_stockdon.get('slope_deg', 'N/A')}°\n")
+                f.write(f"  β = tan(slope)  : "
+                        f"{batch_stockdon['beta']:.4f}\n")
+                f.write(f"  H₀              : "
+                        f"{batch_stockdon['H0']:.2f} m\n")
+                f.write(f"  T₀              : "
+                        f"{batch_stockdon['T0']:.1f} s\n")
+                f.write(f"  L₀ (computed)   : "
+                        f"{batch_stockdon['L0']:.2f} m\n")
+                f.write(f"  Setup η̄         : "
+                        f"{batch_stockdon['eta_bar']:.4f} m\n")
+                f.write(f"  Swash S          : "
+                        f"{batch_stockdon['S']:.4f} m\n")
+                f.write(f"  Stockdon R₂%     : "
+                        f"{batch_stockdon['R2']:.4f} m\n\n")
+                f.write("Per-image observed R₂%\n")
+                f.write("-" * 60 + "\n")
+                f.write(f"{'Image':<45} {'Obs R₂% (m)':>12}\n")
+                f.write("-" * 60 + "\n")
+                for name, obs in stockdon_rows:
+                    f.write(f"{name:<45} {obs:>12.4f}\n")
+                f.write("-" * 60 + "\n\n")
+                f.write("Summary statistics (observed R₂%)\n")
+                f.write(f"  N images : {len(obs_vals)}\n")
+                f.write(f"  Mean     : {np.mean(obs_vals):.4f} m\n")
+                f.write(f"  Std      : {np.std(obs_vals):.4f} m\n")
+                f.write(f"  Min      : {np.min(obs_vals):.4f} m\n")
+                f.write(f"  Max      : {np.max(obs_vals):.4f} m\n")
+                f.write(f"  Median   : {np.median(obs_vals):.4f} m\n\n")
+                mean_diff = np.mean(obs_vals) - batch_stockdon["R2"]
+                f.write("Comparison\n")
+                f.write(f"  Stockdon R₂%          : "
+                        f"{batch_stockdon['R2']:.4f} m\n")
+                f.write(f"  Mean observed R₂%     : "
+                        f"{np.mean(obs_vals):.4f} m\n")
+                f.write(f"  Mean difference       : "
+                        f"{mean_diff:+.4f} m  "
+                        f"(observed − predicted)\n")
+            print(f"Stockdon comparison saved to: stockdon_comparison.txt")
 
         self.fig_stats.tight_layout()
         self.canvas_stats.draw()
