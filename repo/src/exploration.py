@@ -248,9 +248,37 @@ def load_timeseries(csv_path, dt_col=0, val_col=1, sep=None,
     df = pd.read_csv(csv_path, sep=sep, header=0, encoding="utf-8",
                       engine="python")
 
-    # datetime column
-    dt_series = pd.to_datetime(df.iloc[:, dt_col], dayfirst=True,
-                                errors="coerce")
+    # datetime column — always work with strings to prevent pandas
+    # from misinterpreting integer timestamps as epoch nanoseconds
+    raw_dt = df.iloc[:, dt_col].astype(str).str.strip()
+    dt_series = pd.to_datetime(raw_dt, dayfirst=True, errors="coerce")
+
+    # If auto-parse failed for most rows, try common compact formats
+    # used in meteorological / hydrological data (no separators).
+    _COMPACT_DT_FMTS = [
+        "%Y%m%d%H",       # YYYYMMDDHH       (10 chars)
+        "%Y%m%d%H%M",     # YYYYMMDDHHMM     (12 chars)
+        "%Y%m%d%H%M%S",   # YYYYMMDDHHMMSS   (14 chars)
+        "%Y%m%d",          # YYYYMMDD          (8 chars)
+    ]
+    nat_frac = dt_series.isna().mean()
+    if nat_frac > 0.5:
+        for fmt in _COMPACT_DT_FMTS:
+            trial = pd.to_datetime(raw_dt, format=fmt, errors="coerce")
+            if trial.notna().mean() > 0.5:
+                dt_series = trial
+                break
+
+    # Guard against epoch-nanosecond misinterpretation: if the median
+    # year is before 1980 the parse is almost certainly wrong.
+    median_year = dt_series.dropna().dt.year.median() if dt_series.notna().any() else 2000
+    if median_year < 1980:
+        for fmt in _COMPACT_DT_FMTS:
+            trial = pd.to_datetime(raw_dt, format=fmt, errors="coerce")
+            if trial.notna().mean() > 0.5:
+                dt_series = trial
+                break
+
     # strip timezone
     try:
         if dt_series.dt.tz is not None:
@@ -739,6 +767,7 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
         self.plot_scatter_list = []   # one scatter per subplot
         self.scatter_meta = []
         self.hover_annotations = []
+        self.preview_image_list = []  # cached image list for green dots
 
         # per-series state: list of dicts
         self.series_state = []
@@ -811,7 +840,7 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
         self.bottom_panel.grid(
             row=2, column=0, sticky="nsew", padx=5, pady=5)
 
-        # ── Row 0: global top bar ──
+        # ── Row 1: global top bar ──
         top_bar = ctk.CTkFrame(self.bottom_panel)
         top_bar.pack(fill="x", padx=5, pady=2)
 
@@ -843,155 +872,179 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
             placeholder_text="%Y_%m_%d_%H_%M")
         self.fmt_entry.grid(row=0, column=5, padx=3, pady=3)
 
-        # ── Series panels ──
+        # ── Row 2: Series data panels (CSV, label, no-data) ──
         self.series_container = ctk.CTkFrame(
             self.bottom_panel, fg_color="transparent")
         self.series_container.pack(fill="x", padx=5, pady=2)
 
         self.series_panels = []
+        self.criterion_panels = []
         self.series_widgets = []
 
-        for idx in range(MAX_SERIES):
-            self._create_series_panel(idx)
+        # ── Row 3: Image folder + Visualise Data ──
+        image_bar = ctk.CTkFrame(self.bottom_panel)
+        image_bar.pack(fill="x", padx=5, pady=2)
 
-        # ── Row: image folder, output, actions ──
-        actions_bar = ctk.CTkFrame(self.bottom_panel)
-        actions_bar.pack(fill="x", padx=5, pady=2)
-
-        ctk.CTkButton(actions_bar, text="Browse Image Folder",
+        ctk.CTkButton(image_bar, text="Browse Image Folder",
                       command=self._browse_images
                       ).grid(row=0, column=0, padx=5, pady=5)
         self.img_label = ctk.CTkLabel(
-            actions_bar, text="No folder selected")
+            image_bar, text="No folder selected")
         self.img_label.grid(row=0, column=1, padx=5, pady=5, sticky="w")
 
-        ctk.CTkCheckBox(actions_bar, text="Include sub-folders",
+        ctk.CTkCheckBox(image_bar, text="Include sub-folders",
                         variable=self.recursive_var
                         ).grid(row=0, column=2, padx=10, pady=5)
 
-        ctk.CTkCheckBox(actions_bar, text="Copy images to output",
-                        variable=self.copy_images_var
-                        ).grid(row=0, column=3, padx=10, pady=5)
+        ctk.CTkButton(image_bar, text="Visualise Data",
+                      command=self._visualise_data,
+                      width=120, fg_color="#2e7d32",
+                      hover_color="#388e3c"
+                      ).grid(row=0, column=3, padx=10, pady=5)
 
-        ctk.CTkButton(actions_bar, text="Browse Output Folder",
+        # ── Row 4: Criterion panels (one per series) ──
+        self.criterion_container = ctk.CTkFrame(
+            self.bottom_panel, fg_color="transparent")
+        self.criterion_container.pack(fill="x", padx=5, pady=2)
+
+        # Create all series + criterion panels
+        for idx in range(MAX_SERIES):
+            self._create_series_panel(idx)
+
+        # ── Row 5: Output folder + Run Analysis ──
+        output_bar = ctk.CTkFrame(self.bottom_panel)
+        output_bar.pack(fill="x", padx=5, pady=2)
+
+        ctk.CTkButton(output_bar, text="Browse Output Folder",
                       command=self._browse_output,
                       fg_color="#8C7738", hover_color="#A18A45"
-                      ).grid(row=0, column=4, padx=5, pady=5)
+                      ).grid(row=0, column=0, padx=5, pady=5)
         self.output_label = ctk.CTkLabel(
-            actions_bar, text="No output folder selected")
+            output_bar, text="No output folder selected")
         self.output_label.grid(
-            row=0, column=5, padx=5, pady=5, sticky="w")
+            row=0, column=1, padx=5, pady=5, sticky="w")
 
-        # ── Row: run + settings ──
-        settings_bar = ctk.CTkFrame(self.bottom_panel)
-        settings_bar.pack(fill="x", padx=5, pady=2)
+        ctk.CTkCheckBox(output_bar, text="Copy images to output",
+                        variable=self.copy_images_var
+                        ).grid(row=0, column=2, padx=10, pady=5)
 
-        ctk.CTkButton(settings_bar, text="Run Analysis",
+        ctk.CTkButton(output_bar, text="Run Analysis",
                       command=self._run_threaded,
                       fg_color="#0F52BA", hover_color="#2A6BD1"
-                      ).pack(side="left", padx=5, pady=5)
+                      ).grid(row=0, column=3, padx=10, pady=5)
 
-        self.progress_bar = ctk.CTkProgressBar(settings_bar, width=160)
-        self.progress_bar.pack(side="left", padx=5, pady=5)
+        self.progress_bar = ctk.CTkProgressBar(output_bar, width=160)
+        self.progress_bar.grid(row=0, column=4, padx=5, pady=5)
         self.progress_bar.set(0)
 
-        self.eta_label = ctk.CTkLabel(settings_bar, text="", width=120)
-        self.eta_label.pack(side="left", padx=3, pady=5)
+        self.eta_label = ctk.CTkLabel(output_bar, text="", width=120)
+        self.eta_label.grid(row=0, column=5, padx=3, pady=5)
 
-        ctk.CTkButton(settings_bar, text="Save Settings",
+        # ── Row 6: Save / Load / Reset ──
+        bottom_bar = ctk.CTkFrame(self.bottom_panel)
+        bottom_bar.pack(fill="x", padx=5, pady=2)
+
+        ctk.CTkButton(bottom_bar, text="Save Settings",
                       command=self._save_settings,
                       width=100, fg_color="#4F5D75",
                       hover_color="#61708A"
                       ).pack(side="left", padx=5, pady=5)
 
-        ctk.CTkButton(settings_bar, text="Load Settings",
+        ctk.CTkButton(bottom_bar, text="Load Settings",
                       command=self._load_settings,
                       width=100, fg_color="#4F5D75",
                       hover_color="#61708A"
                       ).pack(side="left", padx=5, pady=5)
-        
-        ctk.CTkButton(settings_bar, text="Reset",
+
+        ctk.CTkButton(bottom_bar, text="Reset",
                       command=self._reset,
                       width=80, fg_color="#8B0000",
                       hover_color="#A52A2A"
                       ).pack(side="left", padx=5, pady=5)
 
     def _create_series_panel(self, idx):
-        """Build the widgets for one series input row."""
-        frame = ctk.CTkFrame(self.series_container)
-        frame.pack(fill="x", padx=2, pady=3)
-
+        """Build the widgets for one series: data row + criterion row."""
         w = {}  # widget references
 
-        # ── Row 0: file & label ──
-        ctk.CTkLabel(frame, text=f"Series {idx + 1}:",
+        # ── Data row (in series_container) ──
+        data_frame = ctk.CTkFrame(self.series_container)
+        data_frame.pack(fill="x", padx=2, pady=3)
+
+        ctk.CTkLabel(data_frame, text=f"Series {idx + 1}:",
                      font=("Serif", 13, "bold")
                      ).grid(row=0, column=0, padx=5, pady=2)
 
         w["browse_btn"] = ctk.CTkButton(
-            frame, text="Browse CSV", width=100,
+            data_frame, text="Browse CSV", width=100,
             command=lambda i=idx: self._browse_series_csv(i))
         w["browse_btn"].grid(row=0, column=1, padx=3, pady=2)
 
-        w["file_label"] = ctk.CTkLabel(frame, text="No file",
+        w["file_label"] = ctk.CTkLabel(data_frame, text="No file",
                                         width=150, anchor="w")
         w["file_label"].grid(row=0, column=2, padx=3, pady=2, sticky="w")
 
-        ctk.CTkLabel(frame, text="Label:"
+        ctk.CTkLabel(data_frame, text="Label:"
                      ).grid(row=0, column=3, padx=(10, 3), pady=2)
         default_labels = ["Water_Level", "Wave_Height", "Wind_Speed",
                           "Current", "Series_5"]
-        w["label_entry"] = ctk.CTkEntry(frame, width=120)
+        w["label_entry"] = ctk.CTkEntry(data_frame, width=120)
         w["label_entry"].insert(0, default_labels[idx])
         w["label_entry"].grid(row=0, column=4, padx=3, pady=2)
 
-        ctk.CTkLabel(frame, text="No-data:"
+        ctk.CTkLabel(data_frame, text="No-data:"
                      ).grid(row=0, column=5, padx=(10, 3), pady=2)
         w["nodata_entry"] = ctk.CTkEntry(
-            frame, width=80,
+            data_frame, width=80,
             placeholder_text="auto")
         w["nodata_entry"].grid(row=0, column=6, padx=3, pady=2)
 
-        # ── Row 1: criterion & parameters ──
-        ctk.CTkLabel(frame, text="Criterion:"
-                     ).grid(row=1, column=0, padx=5, pady=2)
+        # ── Criterion row (in criterion_container) ──
+        crit_frame = ctk.CTkFrame(self.criterion_container)
+        crit_frame.pack(fill="x", padx=2, pady=3)
+
+        ctk.CTkLabel(crit_frame, text=f"Series {idx + 1}:",
+                     font=("Serif", 12)
+                     ).grid(row=0, column=0, padx=5, pady=2)
+
+        ctk.CTkLabel(crit_frame, text="Criterion:"
+                     ).grid(row=0, column=1, padx=3, pady=2)
         w["criterion_var"] = ctk.StringVar(value="No Filter")
         w["criterion_menu"] = ctk.CTkOptionMenu(
-            frame, variable=w["criterion_var"],
+            crit_frame, variable=w["criterion_var"],
             values=CRITERIA, width=160,
             command=lambda v, i=idx: self._on_criterion_change(i, v),
             fg_color="white", text_color="black", button_color="#d0d0d0",
             button_hover_color="#a0a0a0", dropdown_fg_color="white",
             dropdown_text_color="black", dropdown_hover_color="#d0d0d0")
-        w["criterion_menu"].grid(row=1, column=1, padx=3, pady=2,
-                                  columnspan=2)
+        w["criterion_menu"].grid(row=0, column=2, padx=3, pady=2)
 
         # threshold / target / tolerance
-        w["thresh_label"] = ctk.CTkLabel(frame, text="Threshold:")
-        w["thresh_label"].grid(row=1, column=3, padx=3, pady=2)
-        w["thresh_entry"] = ctk.CTkEntry(frame, width=70)
-        w["thresh_entry"].grid(row=1, column=4, padx=3, pady=2)
+        w["thresh_label"] = ctk.CTkLabel(crit_frame, text="Threshold:")
+        w["thresh_label"].grid(row=0, column=3, padx=3, pady=2)
+        w["thresh_entry"] = ctk.CTkEntry(crit_frame, width=70)
+        w["thresh_entry"].grid(row=0, column=4, padx=3, pady=2)
 
-        w["tol_label"] = ctk.CTkLabel(frame, text="Tolerance:")
-        w["tol_label"].grid(row=1, column=5, padx=3, pady=2)
-        w["tol_entry"] = ctk.CTkEntry(frame, width=70)
+        w["tol_label"] = ctk.CTkLabel(crit_frame, text="Tolerance:")
+        w["tol_label"].grid(row=0, column=5, padx=3, pady=2)
+        w["tol_entry"] = ctk.CTkEntry(crit_frame, width=70)
         w["tol_entry"].insert(0, "0.5")
-        w["tol_entry"].grid(row=1, column=6, padx=3, pady=2)
+        w["tol_entry"].grid(row=0, column=6, padx=3, pady=2)
 
         # peak detection params
-        w["sep_label"] = ctk.CTkLabel(frame, text="Peak sep. (hrs):")
-        w["sep_label"].grid(row=1, column=7, padx=3, pady=2)
-        w["sep_entry"] = ctk.CTkEntry(frame, width=50)
+        w["sep_label"] = ctk.CTkLabel(crit_frame, text="Peak sep. (hrs):")
+        w["sep_label"].grid(row=0, column=7, padx=3, pady=2)
+        w["sep_entry"] = ctk.CTkEntry(crit_frame, width=50)
         w["sep_entry"].insert(0, "5")
-        w["sep_entry"].grid(row=1, column=8, padx=3, pady=2)
+        w["sep_entry"].grid(row=0, column=8, padx=3, pady=2)
 
-        w["prom_label"] = ctk.CTkLabel(frame, text="Prominence:")
-        w["prom_label"].grid(row=1, column=9, padx=3, pady=2)
-        w["prom_entry"] = ctk.CTkEntry(frame, width=50)
+        w["prom_label"] = ctk.CTkLabel(crit_frame, text="Prominence:")
+        w["prom_label"].grid(row=0, column=9, padx=3, pady=2)
+        w["prom_entry"] = ctk.CTkEntry(crit_frame, width=50)
         w["prom_entry"].insert(0, "0.2")
-        w["prom_entry"].grid(row=1, column=10, padx=3, pady=2)
+        w["prom_entry"].grid(row=0, column=10, padx=3, pady=2)
 
-        self.series_panels.append(frame)
+        self.series_panels.append(data_frame)
+        self.criterion_panels.append(crit_frame)
         self.series_widgets.append(w)
 
         # set initial visibility
@@ -1046,14 +1099,16 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
 #
 
     def _on_num_series_change(self, n):
-        """Show/hide series panels based on selected count."""
+        """Show/hide series and criterion panels based on selected count."""
         if isinstance(n, str):
             n = int(n)
         for idx in range(MAX_SERIES):
             if idx < n:
                 self.series_panels[idx].pack(fill="x", padx=2, pady=3)
+                self.criterion_panels[idx].pack(fill="x", padx=2, pady=3)
             else:
                 self.series_panels[idx].pack_forget()
+                self.criterion_panels[idx].pack_forget()
 
     def _on_criterion_change(self, idx, criterion):
         """Show/hide criterion-specific parameter fields."""
@@ -1110,13 +1165,56 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
         d = filedialog.askdirectory(parent=self, title="Select Image Folder")
         if d:
             self.image_folder = d
-            self.img_label.configure(text=d)
+            self.img_label.configure(text=os.path.basename(d) or d)
 
     def _browse_output(self):
         d = filedialog.askdirectory(parent=self, title="Select Output Folder")
         if d:
             self.output_folder = d
-            self.output_label.configure(text=d)
+            self.output_label.configure(text=os.path.basename(d) or d)
+
+    def _visualise_data(self):
+        """Scan images from the browsed folder, interpolate their
+        timestamps onto every loaded time series, and plot them as
+        green dots.  No filtering / analysis is performed."""
+        active = self._get_active_series()
+        if not active:
+            messagebox.showinfo(
+                "Visualise Data",
+                "No time series loaded yet.\n"
+                "Browse and load at least one CSV first.",
+                parent=self)
+            return
+        if not self.image_folder:
+            messagebox.showinfo(
+                "Visualise Data",
+                "No image folder selected.\n"
+                "Use 'Browse Image Folder' first.",
+                parent=self)
+            return
+
+        user_fmt = self.fmt_entry.get().strip() or None
+        recursive = bool(self.recursive_var.get())
+
+        print("\n[Visualise] Scanning images …")
+        image_list = collect_dated_images(
+            self.image_folder, user_fmt, recursive)
+        if not image_list:
+            messagebox.showwarning(
+                "Visualise Data",
+                "No images with parseable timestamps found.\n"
+                "Check your filename format.",
+                parent=self)
+            return
+
+        self.preview_image_list = image_list
+        labels = [w["label_entry"].get().strip() or f"Series_{i+1}"
+                  for i, _, w in active]
+        print(f"[Visualise] Found {len(image_list)} dated images.")
+        print(f"[Visualise] Showing on {len(active)} series: "
+              + ", ".join(labels))
+
+        self._refresh_plot(results=[], image_list=image_list)
 
 #
     # LOAD & PLOT
@@ -1215,14 +1313,32 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
             ann.set_visible(False)
             self.hover_annotations.append(ann)
 
-    def _refresh_plot(self, results=None, title=None):
-        """Redraw all subplots with loaded series and matched results."""
+    def _refresh_plot(self, results=None, title=None, image_list=None):
+        """Redraw all subplots with loaded series, image preview dots,
+        and matched-result dots.
+
+        Parameters
+        ----------
+        results : list or None
+            Matched image dicts from run_multi_series_analysis().
+        title : str or None
+            Plot title (shown after analysis).
+        image_list : list of (Path, datetime) or None
+            If given, these image timestamps are plotted as green dots
+            on every series (via interpolation).  Falls back to
+            self.preview_image_list when None so that a prior Visualise
+            call is preserved across Run Analysis.
+        """
         active = self._get_active_series()
         n_plots = max(1, len(active))
         self._rebuild_subplots(n_plots)
 
         self.plot_scatter_list = []
         self.scatter_meta = []
+
+        # Use explicitly passed list, else fall back to cached preview
+        img_dots = image_list if image_list is not None \
+            else self.preview_image_list
 
         series_colors = ["#3498db", "#e67e22", "#2ecc71",
                          "#9b59b6", "#e74c3c"]
@@ -1240,11 +1356,39 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
                         label=label)
                 ax.set_ylabel(label, fontsize=9, color="white")
                 ax.grid(True, alpha=0.3, color="#555555")
-                ax.legend(fontsize="small", loc="upper right",
-                          facecolor="#333333", edgecolor="#555555",
-                          labelcolor="white")
 
-                # overlay matched results on this series
+                # ── green dots: ALL images (preview) ──
+                if img_dots:
+                    gx, gy, gmeta = [], [], []
+                    ts = df["datetime"].astype("int64").to_numpy(
+                        dtype=np.int64)
+                    vals = df["value"].to_numpy(dtype=float)
+                    ts_min, ts_max = ts[0], ts[-1]
+
+                    for img_path, img_dt in img_dots:
+                        img_ns = pd.Timestamp(img_dt).value
+                        if img_ns < ts_min or img_ns > ts_max:
+                            continue
+                        v = float(np.interp(img_ns, ts, vals))
+                        gx.append(img_dt)
+                        gy.append(v)
+                        gmeta.append({
+                            "x": img_dt, "y": v,
+                            "text": (f"Image: {img_path.name}\n"
+                                     f"Time: {img_dt}\n"
+                                     f"[{label}] value: {v:.3f}"),
+                            "ax_idx": ax_idx,
+                        })
+
+                    if gx:
+                        sc_g = ax.scatter(
+                            gx, gy, c="#2ecc71", s=8, alpha=0.5,
+                            zorder=4, picker=True, label="Images")
+                        self.plot_scatter_list.append(
+                            (ax_idx, sc_g, gmeta))
+                        self.scatter_meta.extend(gmeta)
+
+                # ── red dots: matched results ──
                 if results:
                     xs, ys, cs, meta_batch = [], [], [], []
                     for r in results:
@@ -1283,7 +1427,8 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
 
                     if xs:
                         sc = ax.scatter(xs, ys, c=cs, s=12,
-                                        zorder=5, picker=True)
+                                        zorder=5, picker=True,
+                                        label="Matched")
                         self.plot_scatter_list.append(
                             (ax_idx, sc, meta_batch))
                         self.scatter_meta.extend(meta_batch)
@@ -1296,6 +1441,10 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
                                 else timedelta(hours=6))
                         pad = span * 0.05 + timedelta(hours=1)
                         ax.set_xlim(dt_first - pad, dt_last + pad)
+
+                ax.legend(fontsize="small", loc="upper right",
+                          facecolor="#333333", edgecolor="#555555",
+                          labelcolor="white")
             else:
                 ax.set_visible(False)
 
@@ -1397,6 +1546,7 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
         self.image_folder = None
         self.output_folder = None
         self.matched_results = []
+        self.preview_image_list = []
         self.img_label.configure(text="No folder selected")
         self.output_label.configure(text="No output folder selected")
         self.progress_bar.set(0)
@@ -1491,9 +1641,11 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
             self.image_folder = paths.get("image_folder") or None
             self.output_folder = paths.get("output_folder") or None
             self.img_label.configure(
-                text=self.image_folder or "No folder selected")
+                text=os.path.basename(self.image_folder)
+                if self.image_folder else "No folder selected")
             self.output_label.configure(
-                text=self.output_folder or "No output folder selected")
+                text=os.path.basename(self.output_folder)
+                if self.output_folder else "No output folder selected")
 
             # global params
             n = int(glb.get("num_series", 1))
