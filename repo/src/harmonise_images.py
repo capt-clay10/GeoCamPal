@@ -569,6 +569,9 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
         # averaging state
         self.exclude_bad_avg_var = tk.BooleanVar(value=False)
 
+        # manually loaded bad-image JSON (shared across brightness/colour/average)
+        self.loaded_bad_json_path = None
+
         # colour harmonisation state
         self.ref_colour_path = None
         self.ref_colour_bgr = None
@@ -642,6 +645,11 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
         ctk.CTkCheckBox(row1b, text="Average per folder",
                         variable=self.run_average_var,
                         command=self._toggle_task_sections).pack(side="left", padx=8)
+
+        # Shared status label for manually loaded bad-image JSON
+        self.bad_json_status_label = ctk.CTkLabel(
+            row1b, text="", font=("Arial", 10), text_color="#2ECC71")
+        self.bad_json_status_label.pack(side="left", padx=(15, 5))
 
         # Row 2 — filter parameters (collapsible)
         self.filter_section_frame = ctk.CTkFrame(self.bottom_panel)
@@ -770,9 +778,16 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
         self.sky_entry.grid(row=0, column=4, padx=3, pady=3)
 
         self.exclude_bad_var = tk.BooleanVar(value=True)
-        ctk.CTkCheckBox(row3, text="Exclude filtered bad images",
-                        variable=self.exclude_bad_var).grid(
-            row=0, column=5, padx=10, pady=3)
+        bri_excl_frame = ctk.CTkFrame(row3, fg_color="transparent")
+        bri_excl_frame.grid(row=0, column=5, padx=5, pady=3)
+        ctk.CTkCheckBox(bri_excl_frame, text="Exclude bad",
+                        variable=self.exclude_bad_var).pack(
+            side="left", padx=(0, 4))
+        ctk.CTkButton(bri_excl_frame, text="Load JSON",
+                      command=self._browse_bad_json,
+                      width=75, height=24,
+                      fg_color="#4F5D75", hover_color="#61708A",
+                      font=("Arial", 10)).pack(side="left")
 
         ctk.CTkButton(row3, text="Preview",
                       command=self._preview_brightness_threaded,
@@ -816,9 +831,16 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
         self.colour_algo_menu.grid(row=0, column=4, padx=3, pady=3)
 
         self.exclude_bad_colour_var = tk.BooleanVar(value=True)
-        ctk.CTkCheckBox(row4, text="Exclude bad",
-                        variable=self.exclude_bad_colour_var).grid(
-            row=0, column=5, padx=5, pady=3)
+        col_excl_frame = ctk.CTkFrame(row4, fg_color="transparent")
+        col_excl_frame.grid(row=0, column=5, padx=5, pady=3)
+        ctk.CTkCheckBox(col_excl_frame, text="Exclude bad",
+                        variable=self.exclude_bad_colour_var).pack(
+            side="left", padx=(0, 4))
+        ctk.CTkButton(col_excl_frame, text="Load JSON",
+                      command=self._browse_bad_json,
+                      width=75, height=24,
+                      fg_color="#4F5D75", hover_color="#61708A",
+                      font=("Arial", 10)).pack(side="left")
 
         ctk.CTkButton(row4, text="Preview",
                       command=self._preview_colour_threaded,
@@ -844,9 +866,16 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
                      font=("Arial", 12, "bold")).grid(
             row=0, column=0, padx=5, pady=3, sticky="w")
 
-        ctk.CTkCheckBox(row4b, text="Use good filtered images only",
-                        variable=self.exclude_bad_avg_var).grid(
-            row=0, column=1, padx=5, pady=3)
+        avg_excl_frame = ctk.CTkFrame(row4b, fg_color="transparent")
+        avg_excl_frame.grid(row=0, column=1, padx=5, pady=3)
+        ctk.CTkCheckBox(avg_excl_frame, text="Use good filtered images only",
+                        variable=self.exclude_bad_avg_var).pack(
+            side="left", padx=(0, 4))
+        ctk.CTkButton(avg_excl_frame, text="Load JSON",
+                      command=self._browse_bad_json,
+                      width=75, height=24,
+                      fg_color="#4F5D75", hover_color="#61708A",
+                      font=("Arial", 10)).pack(side="left")
 
         ctk.CTkLabel(
             row4b,
@@ -1035,8 +1064,9 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
               "  All 'exclude bad' options (brightness, colour, averaging)\n"
               "  resolve the bad-image list in this order:\n"
               "    1. In-memory list from a filter run in this session.\n"
-              "    2. bad_images.json in the output folder (cross-session).\n"
-              "  If neither source is available, a warning is shown and the\n"
+              "    2. Manually uploaded JSON via the 'Load JSON' button.\n"
+              "    3. bad_images.json in the output folder (cross-session).\n"
+              "  If no source is available, a warning is shown and the\n"
               "  task is aborted.  This lets you filter once, then run\n"
               "  brightness / colour / averaging in separate sessions.\n"
               "\n"
@@ -1203,7 +1233,8 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
         """
         # 1. in-memory list from current session
         if self.bad_list:
-            print(f"  [{task_label}] Using in-memory bad list ({len(self.bad_list)} images)")
+            source = "uploaded JSON" if self.loaded_bad_json_path else "filter run"
+            print(f"  [{task_label}] Using in-memory bad list ({len(self.bad_list)} images, source: {source})")
             return list(self.bad_list)
 
         # 2. try loading from JSON in the output folder
@@ -1252,8 +1283,11 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
             "Warning",
             f"'Use good filtered images' is enabled but no bad-image list "
             f"was found.\n\n"
-            f"Either run the Filter step first, or ensure bad_images.json "
-            f"exists in the output folder:\n{self.output_folder}",
+            f"Either:\n"
+            f"  • Run the Filter step first, or\n"
+            f"  • Use the 'Load JSON' button to upload a bad_images.json, or\n"
+            f"  • Ensure bad_images.json exists in the output folder:\n"
+            f"    {self.output_folder}",
             parent=self,
         )
         return None
@@ -1304,6 +1338,58 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
             self.fig.tight_layout()
             self.canvas_plot.draw()
 
+    def _browse_bad_json(self):
+        """Let user upload a bad_images.json from a previous filter run."""
+        init_dir = self.output_folder or self.input_folder or None
+        f = filedialog.askopenfilename(
+            parent=self,
+            title="Select Bad Images JSON File",
+            initialdir=init_dir,
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")])
+        if not f:
+            return
+        try:
+            with open(f, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            loaded = []
+            for item in data.get("bad_images", []):
+                abs_p = item.get("absolute_path", "")
+                if abs_p and os.path.isfile(abs_p):
+                    loaded.append(abs_p)
+                else:
+                    rel_p = item.get("relative_path", "")
+                    if rel_p and self.input_folder:
+                        reconstructed = os.path.join(self.input_folder, rel_p)
+                        if os.path.isfile(reconstructed):
+                            loaded.append(reconstructed)
+            if not loaded:
+                messagebox.showwarning(
+                    "Warning",
+                    f"No valid image paths could be resolved from:\n{f}\n\n"
+                    f"Ensure the input folder is set and the JSON paths match.",
+                    parent=self)
+                return
+            self.bad_list = loaded
+            self.loaded_bad_json_path = f
+            self._update_bad_json_label()
+            print(f"Loaded bad-image list from JSON: {os.path.basename(f)} "
+                  f"({len(loaded)} bad images)")
+        except Exception as e:
+            messagebox.showerror("Error",
+                                  f"Could not parse JSON file:\n{f}\n\nError: {e}",
+                                  parent=self)
+
+    def _update_bad_json_label(self):
+        """Update the shared label showing loaded bad-list status."""
+        if self.loaded_bad_json_path and self.bad_list:
+            name = os.path.basename(self.loaded_bad_json_path)
+            text = f"Bad list loaded: {name} ({len(self.bad_list)} images)"
+        elif self.bad_list:
+            text = f"Bad list: {len(self.bad_list)} images (from filter run)"
+        else:
+            text = ""
+        self.bad_json_status_label.configure(text=text)
+
     # ——— settings / cancel helpers ———
 
     def _request_cancel(self):
@@ -1333,6 +1419,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
                 "input_folder": self.input_folder or "",
                 "output_folder": self.output_folder or "",
                 "ref_colour_path": self.ref_colour_path or "",
+                "loaded_bad_json_path": self.loaded_bad_json_path or "",
             },
             "ui_state": {
                 "recursive": bool(self.recursive_var.get()),
@@ -1426,6 +1513,33 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
             else:
                 self.ref_colour_label.configure(text="No reference selected")
 
+            # Restore loaded bad-image JSON path
+            bad_json = paths.get("loaded_bad_json_path") or ""
+            self.loaded_bad_json_path = bad_json or None
+            if self.loaded_bad_json_path and os.path.isfile(self.loaded_bad_json_path):
+                # Re-parse the JSON to populate bad_list
+                try:
+                    with open(self.loaded_bad_json_path, "r", encoding="utf-8") as fh:
+                        bdata = json.load(fh)
+                    loaded = []
+                    for item in bdata.get("bad_images", []):
+                        abs_p = item.get("absolute_path", "")
+                        if abs_p and os.path.isfile(abs_p):
+                            loaded.append(abs_p)
+                        else:
+                            rel_p = item.get("relative_path", "")
+                            if rel_p and self.input_folder:
+                                reconstructed = os.path.join(self.input_folder, rel_p)
+                                if os.path.isfile(reconstructed):
+                                    loaded.append(reconstructed)
+                    if loaded:
+                        self.bad_list = loaded
+                except Exception:
+                    self.loaded_bad_json_path = None
+            else:
+                self.loaded_bad_json_path = None
+            self._update_bad_json_label()
+
             self._toggle_task_sections()
             print(f"Settings loaded: {path}")
         except Exception as e:
@@ -1448,11 +1562,13 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
         self.output_folder = None
         self.bad_list = []
         self.bad_details = []
+        self.loaded_bad_json_path = None
         self.ref_colour_path = None
         self.ref_colour_bgr = None
         self.input_label.configure(text="No folder selected")
         self.output_label.configure(text="No output folder selected")
         self.ref_colour_label.configure(text="No reference selected")
+        self.bad_json_status_label.configure(text="")
         self.progress_bar.set(0)
         self.eta_label.configure(text="ETA: --")
         self.recursive_var.set(False)
@@ -1858,6 +1974,8 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
                 self._update_progress(idx, len(images), start_time)
 
             self.bad_list = bad_list
+            self.loaded_bad_json_path = None  # in-memory list now from filter run
+            self._ui_call(self._update_bad_json_label)
             details = []
             input_root = Path(cfg["input_folder"])
             for bp in bad_list:
