@@ -324,7 +324,7 @@ class LensCorrectionWindow(ctk.CTkToplevel):
 
     def _ui_message(self, kind, title, message):
         fn = getattr(messagebox, f"show{kind}")
-        self._ui_call(fn, title, message)
+        self._ui_call(fn, title, message, parent=self)
 
     def _ui_progress(self, value, eta_text=None):
         self._ui_call(self._update_progress_ui, value, eta_text)

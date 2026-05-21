@@ -14,6 +14,7 @@ Basemap priority:
 import math
 import os
 import threading
+import time
 import re
 from pathlib import Path
 from typing import List, Dict, Any
@@ -36,7 +37,7 @@ from tkinter import filedialog, messagebox
 
 from utils import (
     fit_geometry, resource_path, setup_console, restore_console,
-    save_settings_json, load_settings_json,
+    save_settings_json, load_settings_json, compute_eta, format_eta,
 )
 
 try:
@@ -224,7 +225,8 @@ def _bilinear_sample(grid_z, xs, ys, query_x, query_y):
 # ——— vectorised line‑of‑sight viewshed on a DEM ———
 
 def compute_viewshed_mask(dem_path, x0, y0, cam_height_m, utm_crs,
-                          bounds, width_px=600, height_px=600):
+                          bounds, width_px=600, height_px=600,
+                          progress_fn=None):
     """
     Return (bool_mask, cam_ground_z) where True = visible from camera.
     Uses vectorised ray marching along radial lines sampled from the DEM
@@ -319,6 +321,10 @@ def compute_viewshed_mask(dem_path, x0, y0, cam_height_m, utm_crs,
             # mark blocked where terrain exceeds LOS
             newly_blocked = (terrain_z > los_z) & (dist > 1.0)
             vis[newly_blocked] = False
+
+            # report progress periodically
+            if progress_fn is not None and step % max(1, n_steps // 50) == 0:
+                progress_fn(step / n_steps)
 
         # pixels very close to camera are always visible
         vis[dist < 1.0] = True
@@ -756,10 +762,18 @@ class FOVGeneratorWindow(ctk.CTkToplevel):
         ctk.CTkButton(row6, text="Generate FOV Map",
                       command=self._generate_threaded, fg_color="#0F52BA", hover_color="#3A7AE0").grid(row=0, column=4, padx=10, pady=5)
 
+        self.progress_bar = ctk.CTkProgressBar(row6, width=160)
+        self.progress_bar.grid(row=0, column=5, padx=5, pady=5)
+        self.progress_bar.set(0)
+
+        self.eta_label = ctk.CTkLabel(row6, text="ETA: --",
+                                       font=("Arial", 10))
+        self.eta_label.grid(row=0, column=6, padx=5, pady=5)
+
         self.btn_reset = ctk.CTkButton(
             row6, text="Reset", command=self._reset,
             width=80, fg_color="#8B0000", hover_color="#A52A2A")
-        self.btn_reset.grid(row=0, column=5, padx=5, pady=5, sticky="e")
+        self.btn_reset.grid(row=0, column=7, padx=5, pady=5, sticky="e")
 
         # ---- CONSOLE ----
         self.console_frame = ctk.CTkFrame(self)
@@ -872,8 +886,14 @@ class FOVGeneratorWindow(ctk.CTkToplevel):
         def _show():
             fn = getattr(messagebox, f"show{kind}", None)
             if fn is not None:
-                fn(title, message)
+                fn(title, message, parent=self)
         self._ui_call(_show)
+
+    def _ui_set_progress(self, frac):
+        self._ui_call(lambda: self.progress_bar.set(frac))
+
+    def _ui_set_eta(self, text):
+        self._ui_call(lambda: self.eta_label.configure(text=text))
 
     def _get_float_value(self, raw, name):
         try:
@@ -931,6 +951,8 @@ class FOVGeneratorWindow(ctk.CTkToplevel):
     def _reset(self):
         self._generation_token += 1
         self._set_busy(False)
+        self.progress_bar.set(0)
+        self.eta_label.configure(text="ETA: --")
         self.basemap_path = None
         self.dem_path = None
         self.output_folder = None
@@ -1012,6 +1034,10 @@ class FOVGeneratorWindow(ctk.CTkToplevel):
 
     def _generate(self, cfg, token):
         try:
+            gen_start = time.time()
+            self._ui_set_progress(0)
+            self._ui_set_eta("ETA: --")
+
             def _is_stale():
                 return token != self._generation_token
 
@@ -1171,6 +1197,10 @@ class FOVGeneratorWindow(ctk.CTkToplevel):
 
             gdf = gpd.GeoDataFrame(records, crs=utm)
 
+            self._ui_set_progress(0.10)
+            elapsed = time.time() - gen_start
+            self._ui_set_eta(f"ETA: {format_eta(elapsed * 9)}")  # rough est
+
             # ---- collect wedge geometries for FOV-restricted viewshed ----
             from shapely.ops import unary_union
             wedge_geoms = [r["geometry"] for r in records
@@ -1190,9 +1220,20 @@ class FOVGeneratorWindow(ctk.CTkToplevel):
             if has_dem:
                 print(f"Computing viewshed from DEM ({vs_px}×{vs_px} grid, "
                       f"this may take a moment)…")
+                vs_start = time.time()
+
+                def _vs_progress(frac):
+                    """Map viewshed progress (0-1) to overall 10%-90%."""
+                    overall = 0.10 + frac * 0.80
+                    self._ui_set_progress(overall)
+                    eta = compute_eta(vs_start, max(1, int(frac * 100)),
+                                      100)
+                    self._ui_set_eta(f"ETA: {format_eta(eta)}")
+
                 vis_mask, cam_ground_z_vs = compute_viewshed_mask(
                     dem_path, x0, y0, H_m, utm, bounds,
-                    width_px=vs_px, height_px=vs_px)
+                    width_px=vs_px, height_px=vs_px,
+                    progress_fn=_vs_progress)
                 # use DEM-derived ground elevation if not already set
                 if cam_ground_z is None and cam_ground_z_vs > 0:
                     cam_ground_z = cam_ground_z_vs
@@ -1215,6 +1256,8 @@ class FOVGeneratorWindow(ctk.CTkToplevel):
                     print("[WARN] Viewshed returned None; using flat ground.")
             else:
                 vis_mask_fov = None
+                # No DEM: skip viewshed, jump progress
+                self._ui_set_progress(0.90)
 
             # ---- get DEM elevation range for colorbar (always, if DEM exists) ----
             _dem_elev_range = [None, None]
@@ -1223,6 +1266,9 @@ class FOVGeneratorWindow(ctk.CTkToplevel):
                     dem_path, bounds, utm)
                 if e_lo is not None:
                     _dem_elev_range = [e_lo, e_hi]
+
+            self._ui_set_progress(0.95)
+            self._ui_set_eta("ETA: rendering…")
 
             if _is_stale():
                 return
@@ -1253,13 +1299,20 @@ class FOVGeneratorWindow(ctk.CTkToplevel):
             }
             if _is_stale():
                 return
+            self._ui_set_progress(1.0)
+            elapsed = time.time() - gen_start
+            self._ui_set_eta(f"Done ({format_eta(elapsed)})")
             self._ui_call(self._apply_generate_results, result)
 
         except Exception as e:
             print(f"[ERROR] {e}")
             import traceback
             traceback.print_exc()
+            self._ui_set_progress(0)
+            self._ui_set_eta("ETA: Error")
             self._ui_message("error", "Error", str(e))
+        finally:
+            self._set_busy(False)
 
     def _apply_generate_results(self, result):
         gdf = result["gdf"]

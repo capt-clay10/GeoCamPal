@@ -749,7 +749,7 @@ class TimestackTool(ctk.CTkToplevel):
 
     def _ui_message(self, kind, title, message):
         fn = getattr(messagebox, f"show{kind}")
-        self._ui_call(fn, title, message)
+        self._ui_call(fn, title, message, parent=self)
 
     def _ui_single_progress(self, current, total):
         total = max(int(total), 1)

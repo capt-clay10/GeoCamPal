@@ -27,7 +27,7 @@ import sys
 import threading
 import time
 import tkinter as tk
-from tkinter import filedialog
+from tkinter import filedialog, messagebox
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
@@ -318,6 +318,94 @@ def save_settings_json(
     return path
 
 
+def _looks_like_path_key(key: str) -> bool:
+    """
+    Return True if *key* suggests its value is a file or directory path.
+
+    Matched patterns (case-insensitive):
+      • contains ``path``, ``folder``
+      • ends with ``_dir``, ``_file``
+    """
+    k = key.lower()
+    if "path" in k or "folder" in k:
+        return True
+    if k.endswith("_dir") or k.endswith("_file"):
+        return True
+    return False
+
+
+def validate_settings_paths(
+    data: Dict[str, Any],
+    parent=None,
+) -> Tuple[Dict[str, Any], List[str]]:
+    """
+    Walk a loaded settings dict and clear file/directory path values
+    that no longer exist on disk.
+
+    Detection heuristic
+    -------------------
+    A JSON value is treated as a path if **all** of the following hold:
+
+      1. It is a non-empty string.
+      2. ``os.path.isabs(value)`` is True (avoids false positives on
+         format strings, column names, etc.).
+      3. Either the key name looks like a path key (see
+         ``_looks_like_path_key``), **or** it sits directly inside a
+         dictionary whose key is ``"paths"`` (the convention used by
+         every GeoCamPal module).
+
+    Values that fail the existence check are replaced with ``""``
+    (empty string).  Because every module already guards path usage
+    with ``if value:`` or ``value or None``, this is sufficient to
+    prevent stale paths from appearing in the GUI while keeping all
+    other settings intact.
+
+    Returns ``(data, missing)`` where *missing* is a list of the
+    path strings that were cleared.
+    """
+    missing: List[str] = []
+
+    def _walk(obj, in_paths_dict: bool = False):
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                is_paths_key = (key.lower() == "paths")
+                if isinstance(value, str) and value:
+                    should_check = in_paths_dict or _looks_like_path_key(key)
+                    if should_check and os.path.isabs(value) and not os.path.exists(value):
+                        missing.append(value)
+                        obj[key] = ""
+                elif isinstance(value, (dict, list)):
+                    _walk(value, in_paths_dict=is_paths_key or in_paths_dict)
+        elif isinstance(obj, list):
+            for item in obj:
+                if isinstance(item, (dict, list)):
+                    _walk(item, in_paths_dict=in_paths_dict)
+
+    _walk(data)
+
+    if missing:
+        for p in missing:
+            print(f"[WARNING] Settings path not found: {p}")
+        summary = "\n".join(f"  \u2022 {p}" for p in missing)
+        msg = (
+            "The following files/directories from the saved settings "
+            "could not be found:\n\n"
+            f"{summary}\n\n"
+            "Those entries have been cleared.\n"
+            "All other settings were loaded normally."
+        )
+        try:
+            messagebox.showwarning(
+                "Settings \u2014 Missing Files",
+                msg,
+                parent=parent if parent is not None else None,
+            )
+        except Exception:
+            pass  # headless / testing — console message is enough
+
+    return data, missing
+
+
 def load_settings_json(
     parent,
     module_name: str,
@@ -325,6 +413,11 @@ def load_settings_json(
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     """
     Ask the user for a settings JSON file and load it.
+
+    After loading, any file/directory paths stored in the JSON that no
+    longer exist on disk are automatically cleared so the GUI does not
+    show stale entries.  A single warning is shown listing every path
+    that was not found.
 
     Returns ``(data, path)`` or ``(None, None)`` if cancelled.
     """
@@ -342,6 +435,9 @@ def load_settings_json(
 
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
+
+    # Validate file/directory paths — clears missing ones in-place
+    validate_settings_paths(data, parent=parent)
 
     return data, path
 

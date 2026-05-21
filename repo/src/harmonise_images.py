@@ -36,6 +36,7 @@ import threading
 import time
 import random
 import json
+import pickle
 from pathlib import Path
 
 import numpy as np
@@ -569,6 +570,12 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
         # averaging state
         self.exclude_bad_avg_var = tk.BooleanVar(value=False)
 
+        # lens correction state
+        self.lens_calib_path = None
+        self.lens_calib_data = None
+        self.exclude_bad_lens_var = tk.BooleanVar(value=True)
+        self.lens_crop_var = tk.BooleanVar(value=True)  # alpha=0 when checked
+
         # manually loaded bad-image JSON (shared across brightness/colour/average)
         self.loaded_bad_json_path = None
 
@@ -629,12 +636,16 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
                      font=("Arial", 12, "bold")).pack(side="left", padx=5)
 
         self.run_filter_var = tk.BooleanVar(value=True)
+        self.run_lens_var = tk.BooleanVar(value=False)
         self.run_brightness_var = tk.BooleanVar(value=True)
         self.run_colour_var = tk.BooleanVar(value=True)
         self.run_average_var = tk.BooleanVar(value=False)
 
         ctk.CTkCheckBox(row1b, text="Filter bad images",
                         variable=self.run_filter_var,
+                        command=self._toggle_task_sections).pack(side="left", padx=8)
+        ctk.CTkCheckBox(row1b, text="Apply lens corr",
+                        variable=self.run_lens_var,
                         command=self._toggle_task_sections).pack(side="left", padx=8)
         ctk.CTkCheckBox(row1b, text="Harmonise brightness",
                         variable=self.run_brightness_var,
@@ -756,6 +767,48 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
                  "rain-on-lens, blocked & failed/corrupt images",
             font=("Arial", 10), text_color="gray", justify="left",
         ).pack(side="left", padx=5)
+
+        # Row 2c — lens correction (collapsible)  [NEW]
+        self.lens_section_frame = ctk.CTkFrame(self.bottom_panel)
+        lens_row = self.lens_section_frame
+
+        ctk.CTkLabel(lens_row, text="Lens Correction",
+                     font=("Arial", 12, "bold")).grid(
+            row=0, column=0, padx=5, pady=3, sticky="w")
+
+        ctk.CTkButton(lens_row, text="Select Calibration (.pkl)",
+                      command=self._browse_lens_calib, width=180).grid(
+            row=0, column=1, padx=5, pady=3)
+        self.lens_calib_label = ctk.CTkLabel(lens_row,
+                                              text="No calibration selected")
+        self.lens_calib_label.grid(row=0, column=2, padx=5, pady=3, sticky="w")
+
+        ctk.CTkCheckBox(lens_row, text="Crop to valid pixels",
+                        variable=self.lens_crop_var).grid(
+            row=0, column=3, padx=10, pady=3)
+
+        lens_excl_frame = ctk.CTkFrame(lens_row, fg_color="transparent")
+        lens_excl_frame.grid(row=0, column=4, padx=5, pady=3)
+        ctk.CTkCheckBox(lens_excl_frame, text="Exclude bad",
+                        variable=self.exclude_bad_lens_var).pack(
+            side="left", padx=(0, 4))
+        ctk.CTkButton(lens_excl_frame, text="Load JSON",
+                      command=self._browse_bad_json,
+                      width=75, height=24,
+                      fg_color="#4F5D75", hover_color="#61708A",
+                      font=("Arial", 10)).pack(side="left")
+
+        ctk.CTkButton(lens_row, text="Run Lens Correction",
+                      command=self._lens_threaded,
+                      fg_color="#0F52BA", hover_color="#2A6BD1").grid(
+            row=0, column=5, padx=5, pady=3)
+
+        ctk.CTkLabel(
+            lens_row,
+            text="-> Undistorts images using a lens_calibration.pkl\n"
+                 "   produced by the Lens Correction module",
+            font=("Arial", 10), text_color="gray", justify="left",
+        ).grid(row=0, column=6, padx=5, pady=3, sticky="w")
 
         # Row 3 — harmonise BRIGHTNESS (collapsible)
         self.brightness_section_frame = ctk.CTkFrame(self.bottom_panel)
@@ -1105,7 +1158,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
     def _ui_message(self, level, title, text):
         fn = getattr(messagebox, f"show{level}", None)
         if fn is not None:
-            self._ui_call(fn, title, text)
+            self._ui_call(fn, title, text, parent=self)
 
     def _ui_set_progress_fraction(self, frac):
         self._ui_call(lambda: self.progress_bar.set(frac))
@@ -1116,6 +1169,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
     def _toggle_task_sections(self, initial=False):
         sections = [
             (self.run_filter_var.get(), self.filter_section_frame),
+            (self.run_lens_var.get(), self.lens_section_frame),
             (self.run_brightness_var.get(), self.brightness_section_frame),
             (self.run_colour_var.get(), self.colour_section_frame),
             (self.run_average_var.get(), self.average_section_frame),
@@ -1218,6 +1272,32 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
             "recursive": bool(self.recursive_var.get()),
             "exclude_bad": exclude_bad,
             "bad_list": bad_list,
+        }
+
+    def _collect_lens_config(self):
+        if not self._check_folders_ui():
+            return None
+        if self.lens_calib_data is None:
+            messagebox.showwarning(
+                "Warning",
+                "Select a lens calibration .pkl file first.",
+                parent=self)
+            return None
+        exclude_bad = bool(self.exclude_bad_lens_var.get())
+        bad_list = []
+        if exclude_bad:
+            bad_list = self._resolve_bad_list("lens correction")
+            if bad_list is None:
+                return None  # user was warned, abort
+        return {
+            "input_folder": self.input_folder,
+            "output_folder": self.output_folder,
+            "recursive": bool(self.recursive_var.get()),
+            "exclude_bad": exclude_bad,
+            "bad_list": bad_list,
+            "calib_path": self.lens_calib_path,
+            "calib_data": self.lens_calib_data,
+            "crop_to_valid": bool(self.lens_crop_var.get()),
         }
 
     def _resolve_bad_list(self, task_label=""):
@@ -1338,6 +1418,55 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
             self.fig.tight_layout()
             self.canvas_plot.draw()
 
+    def _browse_lens_calib(self):
+        """Let user pick a lens_calibration.pkl produced by the
+        Lens Correction module."""
+        init_dir = self.input_folder if self.input_folder else None
+        f = filedialog.askopenfilename(
+            parent=self,
+            title="Select Lens Calibration File",
+            initialdir=init_dir,
+            filetypes=[("Pickle files", "*.pkl"), ("All files", "*.*")])
+        if not f:
+            return
+        try:
+            with open(f, "rb") as fh:
+                data = pickle.load(fh)
+            if (not isinstance(data, dict)
+                    or "camera_matrix" not in data
+                    or "dist_coeff" not in data):
+                messagebox.showerror(
+                    "Error",
+                    "Invalid lens calibration file:\n"
+                    "expected a dict with 'camera_matrix' and 'dist_coeff'.",
+                    parent=self)
+                return
+            self.lens_calib_path = f
+            self.lens_calib_data = data
+            name = os.path.basename(f)
+            img_size = data.get("image_size")
+            if img_size is not None and len(img_size) >= 2:
+                calib_H = int(img_size[0])
+                calib_W = int(img_size[1])
+                size_str = f"{calib_W}x{calib_H}"
+            else:
+                calib_H = calib_W = None
+                size_str = "?"
+            rms = data.get("rms_error")
+            rms_str = f", RMS={rms:.3f}px" if rms is not None else ""
+            self.lens_calib_label.configure(
+                text=f"{name}  ({size_str}{rms_str})")
+            print(f"Lens calibration loaded: {name}")
+            if calib_W is not None:
+                print(f"  Calibrated image size: {calib_W} x {calib_H} px")
+            if rms is not None:
+                print(f"  RMS reprojection error: {rms:.4f} px")
+        except Exception as e:
+            messagebox.showerror(
+                "Error",
+                f"Cannot load .pkl file:\n{f}\n\n{e}",
+                parent=self)
+
     def _browse_bad_json(self):
         """Let user upload a bad_images.json from a previous filter run."""
         init_dir = self.output_folder or self.input_folder or None
@@ -1420,16 +1549,20 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
                 "output_folder": self.output_folder or "",
                 "ref_colour_path": self.ref_colour_path or "",
                 "loaded_bad_json_path": self.loaded_bad_json_path or "",
+                "lens_calib_path": self.lens_calib_path or "",
             },
             "ui_state": {
                 "recursive": bool(self.recursive_var.get()),
                 "run_filter": bool(self.run_filter_var.get()),
+                "run_lens": bool(self.run_lens_var.get()),
                 "run_brightness": bool(self.run_brightness_var.get()),
                 "run_colour": bool(self.run_colour_var.get()),
                 "run_average": bool(self.run_average_var.get()),
                 "exclude_bad_brightness": bool(self.exclude_bad_var.get()),
                 "exclude_bad_colour": bool(self.exclude_bad_colour_var.get()),
                 "exclude_bad_avg": bool(self.exclude_bad_avg_var.get()),
+                "exclude_bad_lens": bool(self.exclude_bad_lens_var.get()),
+                "lens_crop_to_valid": bool(self.lens_crop_var.get()),
                 "export_filtered_good": bool(self.export_filtered_good_var.get()),
                 "tol": self.tol_entry.get().strip(),
                 "sky_pct": self.sky_entry.get().strip(),
@@ -1470,12 +1603,15 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
 
             self.recursive_var.set(bool(ui.get("recursive", False)))
             self.run_filter_var.set(bool(ui.get("run_filter", True)))
+            self.run_lens_var.set(bool(ui.get("run_lens", False)))
             self.run_brightness_var.set(bool(ui.get("run_brightness", True)))
             self.run_colour_var.set(bool(ui.get("run_colour", True)))
             self.run_average_var.set(bool(ui.get("run_average", False)))
             self.exclude_bad_var.set(bool(ui.get("exclude_bad_brightness", True)))
             self.exclude_bad_colour_var.set(bool(ui.get("exclude_bad_colour", True)))
             self.exclude_bad_avg_var.set(bool(ui.get("exclude_bad_avg", False)))
+            self.exclude_bad_lens_var.set(bool(ui.get("exclude_bad_lens", True)))
+            self.lens_crop_var.set(bool(ui.get("lens_crop_to_valid", True)))
             self.export_filtered_good_var.set(bool(ui.get("export_filtered_good", False)))
 
             self.tol_entry.delete(0, tk.END)
@@ -1540,6 +1676,37 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
                 self.loaded_bad_json_path = None
             self._update_bad_json_label()
 
+            # Restore lens calibration path
+            lens_path = paths.get("lens_calib_path") or ""
+            self.lens_calib_path = None
+            self.lens_calib_data = None
+            if lens_path and os.path.isfile(lens_path):
+                try:
+                    with open(lens_path, "rb") as fh:
+                        calib = pickle.load(fh)
+                    if (isinstance(calib, dict)
+                            and "camera_matrix" in calib
+                            and "dist_coeff" in calib):
+                        self.lens_calib_path = lens_path
+                        self.lens_calib_data = calib
+                        img_size = calib.get("image_size")
+                        if img_size is not None and len(img_size) >= 2:
+                            size_str = f"{int(img_size[1])}x{int(img_size[0])}"
+                        else:
+                            size_str = "?"
+                        rms = calib.get("rms_error")
+                        rms_str = f", RMS={rms:.3f}px" if rms is not None else ""
+                        self.lens_calib_label.configure(
+                            text=f"{os.path.basename(lens_path)}  ({size_str}{rms_str})")
+                    else:
+                        self.lens_calib_label.configure(
+                            text="Saved calibration invalid")
+                except Exception:
+                    self.lens_calib_label.configure(
+                        text="Saved calibration missing/unreadable")
+            else:
+                self.lens_calib_label.configure(text="No calibration selected")
+
             self._toggle_task_sections()
             print(f"Settings loaded: {path}")
         except Exception as e:
@@ -1565,20 +1732,26 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
         self.loaded_bad_json_path = None
         self.ref_colour_path = None
         self.ref_colour_bgr = None
+        self.lens_calib_path = None
+        self.lens_calib_data = None
         self.input_label.configure(text="No folder selected")
         self.output_label.configure(text="No output folder selected")
         self.ref_colour_label.configure(text="No reference selected")
+        self.lens_calib_label.configure(text="No calibration selected")
         self.bad_json_status_label.configure(text="")
         self.progress_bar.set(0)
         self.eta_label.configure(text="ETA: --")
         self.recursive_var.set(False)
         self.run_filter_var.set(True)
+        self.run_lens_var.set(False)
         self.run_brightness_var.set(True)
         self.run_colour_var.set(True)
         self.run_average_var.set(False)
         self.exclude_bad_var.set(True)
         self.exclude_bad_colour_var.set(True)
         self.exclude_bad_avg_var.set(False)
+        self.exclude_bad_lens_var.set(True)
+        self.lens_crop_var.set(True)
         self.export_filtered_good_var.set(False)
         for var in self.filter_enabled.values():
             var.set(True)
@@ -1835,6 +2008,31 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
         self.axes[2].bar(labels, values)
         self.axes[2].set_title("Averaging Results")
         self.axes[2].set_ylabel("Count")
+        self.fig.tight_layout()
+        self.canvas_plot.draw()
+
+    def _render_lens_results(self, counts, elapsed, calib_name):
+        self._restore_normal_plots()
+        self.axes[0].axis("off")
+        self.axes[1].clear()
+        labels = ["corrected", "skipped", "failed"]
+        values = [counts.get(k, 0) for k in labels]
+        bar_colors = ["#2ecc71", "#7f8c8d", "#e74c3c"]
+        self.axes[1].bar(labels, values, color=bar_colors)
+        self.axes[1].set_title("Lens Correction Results")
+        self.axes[1].set_ylabel("Count")
+
+        self.axes[2].clear()
+        self.axes[2].text(
+            0.5, 0.5,
+            f"Calibration:\n{calib_name}\n\n"
+            f"{counts.get('corrected', 0)} corrected\n"
+            f"{counts.get('skipped', 0)} skipped\n"
+            f"{counts.get('failed', 0)} failed\n\n"
+            f"{format_eta(elapsed)} elapsed",
+            ha="center", va="center", fontsize=11,
+            transform=self.axes[2].transAxes)
+        self.axes[2].axis("off")
         self.fig.tight_layout()
         self.canvas_plot.draw()
 
@@ -2488,6 +2686,206 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
 
         except Exception as e:
             print(f"[ERROR] {e}")
+            self._ui_message("error", "Error", str(e))
+        finally:
+            self._processing = False
+
+    # ——— lens correction ———
+
+    def _lens_threaded(self):
+        if self._processing:
+            return
+        try:
+            cfg = self._collect_lens_config()
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+            return
+        if cfg is None:
+            return
+        threading.Thread(target=self._run_lens_correction,
+                         args=(cfg,), daemon=True).start()
+
+    def _run_lens_correction(self, cfg):
+        """Apply lens distortion correction (cv2.undistort) to each image.
+
+        Strategy
+        --------
+        - If the image size matches the calibration's `image_size`, K and D
+          are used directly.
+        - If the size differs but the aspect ratio matches, K is scaled
+          proportionally (fx, fy, cx, cy by sx, sy).  This handles the
+          common case of the same camera shooting at different resolutions.
+        - If the aspect ratio differs, the image is skipped with a warning
+          (D would no longer model the actual lens geometry).
+
+        Output is written to ``<output>/<inputname>_lens_corrected/...``
+        preserving sub-folder structure.  Originals are never modified.
+        Rectification maps are cached per (W, H) so we don't recompute the
+        maps for every image when sizes are homogeneous.
+        """
+        try:
+            self._processing = True
+            self._cancel_requested = False
+            self._ui_set_progress_fraction(0)
+            self._ui_set_eta("ETA: --")
+
+            calib = cfg["calib_data"]
+            K = np.asarray(calib["camera_matrix"], dtype=np.float64)
+            D = np.asarray(calib["dist_coeff"], dtype=np.float64)
+            img_size = calib.get("image_size")
+            if img_size is not None and len(img_size) >= 2:
+                # image_size is stored as (W, H) by lens_correction.py
+                calib_W = int(img_size[0])
+                calib_H = int(img_size[1])
+            else:
+                calib_H = calib_W = None
+            alpha = 0.0 if cfg["crop_to_valid"] else 1.0
+
+            images = self._gather_images_from(
+                cfg["input_folder"], recursive=cfg["recursive"],
+                exclude_bad=cfg["exclude_bad"], bad_list=cfg["bad_list"])
+            if not images:
+                self._ui_message("warning", "Warning", "No images remaining.")
+                return
+
+            mode_str = ("Crop to valid pixels (alpha=0)"
+                        if cfg["crop_to_valid"] else
+                        "Keep all pixels (alpha=1)")
+            print(f"\nLens correction: {len(images)} images")
+            print(f"  Calibration: {os.path.basename(cfg['calib_path'])}")
+            if calib_W and calib_H:
+                print(f"  Calibrated size: {calib_W} x {calib_H} px")
+            print(f"  Mode: {mode_str}")
+
+            # Up-front compatibility check against the first image
+            sample = cv2.imread(str(images[0]))
+            if sample is not None and calib_W and calib_H:
+                sH, sW = sample.shape[:2]
+                if (sH, sW) != (calib_H, calib_W):
+                    # Check for 90° rotation (same sensor, portrait↔landscape)
+                    is_rotated = ((sW, sH) == (calib_H, calib_W) or
+                                  (sH, sW) == (calib_W, calib_H))
+                    if is_rotated:
+                        print(f"  [INFO] First image size {sW}x{sH} is a 90° "
+                              f"rotation of calibration {calib_W}x{calib_H}. "
+                              f"Images will be rotated → undistorted → "
+                              f"rotated back.")
+                    else:
+                        aspect_calib = calib_W / calib_H
+                        aspect_sample = sW / sH
+                        if abs(aspect_calib - aspect_sample) < 0.01:
+                            print(f"  [INFO] First image size {sW}x{sH} differs "
+                                  f"from calibration {calib_W}x{calib_H}, but "
+                                  f"aspect matches — K will be scaled per image.")
+                        else:
+                            print(f"  [WARN] First image size {sW}x{sH} has a "
+                                  f"different aspect ratio from calibration "
+                                  f"{calib_W}x{calib_H}. Mismatched images will "
+                                  f"be skipped.")
+
+            input_root = Path(cfg["input_folder"])
+            counts = {"corrected": 0, "skipped": 0, "failed": 0}
+            start_time = time.time()
+            map_cache = {}  # (W, H) -> (mapx, mapy)
+
+            for idx, p in enumerate(images):
+                if self._cancel_requested:
+                    self._ui_set_eta("Cancelled")
+                    print("Lens correction cancelled.")
+                    return
+                img = cv2.imread(str(p))
+                if img is None:
+                    counts["failed"] += 1
+                    print(f"  [SKIP] {p.name}: cannot read")
+                    self._update_progress(idx, len(images), start_time)
+                    continue
+                iH, iW = img.shape[:2]
+
+                # Detect 90° rotation (portrait↔landscape from same sensor)
+                rotated_90 = False
+                if (calib_W and calib_H and
+                    (iH, iW) != (calib_H, calib_W) and
+                    (iW == calib_H and iH == calib_W)):
+                    rotated_90 = True
+
+                # If rotated, rotate image to match calibration orientation,
+                # undistort, then rotate back.
+                if rotated_90:
+                    # Rotate 90° CW so image dims match (calib_H, calib_W)
+                    img_work = cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
+                    work_H, work_W = img_work.shape[:2]
+                else:
+                    img_work = img
+                    work_H, work_W = iH, iW
+
+                # Decide K for this (possibly rotated) image
+                Ki = K
+                if calib_W and calib_H and (work_H, work_W) != (calib_H, calib_W):
+                    aspect_calib = calib_W / calib_H
+                    aspect_img = work_W / work_H
+                    if abs(aspect_calib - aspect_img) > 0.01:
+                        counts["skipped"] += 1
+                        if counts["skipped"] <= 5:
+                            print(f"  [SKIP] {p.name}: aspect mismatch "
+                                  f"({iW}x{iH} vs calib {calib_W}x{calib_H})")
+                        self._update_progress(idx, len(images), start_time)
+                        continue
+                    sx = work_W / calib_W
+                    sy = work_H / calib_H
+                    Ki = K.copy()
+                    Ki[0, 0] *= sx  # fx
+                    Ki[1, 1] *= sy  # fy
+                    Ki[0, 2] *= sx  # cx
+                    Ki[1, 2] *= sy  # cy
+                Di = D
+
+                cache_key = (work_W, work_H)
+                if cache_key not in map_cache:
+                    new_K, _ = cv2.getOptimalNewCameraMatrix(
+                        Ki, Di, (work_W, work_H), alpha, (work_W, work_H))
+                    mapx, mapy = cv2.initUndistortRectifyMap(
+                        Ki, Di, None, new_K, (work_W, work_H), cv2.CV_32FC1)
+                    map_cache[cache_key] = (mapx, mapy)
+                mapx, mapy = map_cache[cache_key]
+                corrected = cv2.remap(img_work, mapx, mapy,
+                                       interpolation=cv2.INTER_LINEAR)
+
+                # Rotate back to original orientation if we rotated earlier
+                if rotated_90:
+                    corrected = cv2.rotate(corrected,
+                                           cv2.ROTATE_90_COUNTERCLOCKWISE)
+
+                out_path = self._build_preserved_output_path(
+                    p, input_root, cfg["output_folder"], "lens_corrected")
+                cv2.imwrite(str(out_path), corrected)
+                counts["corrected"] += 1
+
+                if (idx + 1) % 20 == 0 or idx == 0:
+                    print(f"  {idx + 1}/{len(images)} | {p.name}")
+                self._update_progress(idx, len(images), start_time)
+
+            elapsed = time.time() - start_time
+            print(f"\nLens correction complete "
+                  f"({format_eta(elapsed)} elapsed):")
+            print(f"  corrected: {counts['corrected']}")
+            if counts["skipped"] > 0:
+                print(f"  skipped:   {counts['skipped']} "
+                      f"(size / aspect mismatch)")
+            if counts["failed"] > 0:
+                print(f"  failed:    {counts['failed']} (unreadable)")
+
+            out_root = self._build_output_root(
+                cfg["output_folder"], input_root, "lens_corrected")
+            self._ui_call(self._render_lens_results, counts, elapsed,
+                          os.path.basename(cfg["calib_path"]))
+            self._ui_set_eta("Done")
+            self._ui_message("info", "Done",
+                             f"Lens-corrected images saved to:\n{out_root}")
+
+        except Exception as e:
+            print(f"[ERROR] {e}")
+            import traceback
+            traceback.print_exc()
             self._ui_message("error", "Error", str(e))
         finally:
             self._processing = False

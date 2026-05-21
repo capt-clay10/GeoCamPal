@@ -378,7 +378,8 @@ class ProfileHovmullerWindow(ctk.CTkToplevel):
             "warning": messagebox.showwarning,
             "error": messagebox.showerror,
         }
-        self._ui_call(funcs.get(level, messagebox.showinfo), title, message)
+        self._ui_call(funcs.get(level, messagebox.showinfo), title, message,
+                      parent=self)
 
     def _collect_generate_config(self):
         if not self.image_folder:
