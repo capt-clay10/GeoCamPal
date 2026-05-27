@@ -750,7 +750,7 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
         self.title("Multi-Time-Series Image Explorer")
         fit_geometry(self, 1400, 900, resizable=True)
         try:
-            self.iconbitmap(resource_path("launch_logo.ico"))
+            self.after(200, lambda: self.iconphoto(False, tk.PhotoImage(file=resource_path("launch_logo.png"))))
         except Exception:
             pass
 

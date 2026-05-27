@@ -657,7 +657,7 @@ class HSVMaskEditingMixin:
             self.edge_points = new_points
 
         if not session:
-            messagebox.showwarning("Warning", "No features to confirm.")
+            messagebox.showwarning("Warning", "No features to confirm.", parent=self)
             return
 
         # Commit all session features into the main features list
@@ -1763,7 +1763,7 @@ class HSVMaskEditingMixin:
         # 1) Read user input
         feature_name_raw = self.feature_id_entry.get().strip()
         if not feature_name_raw:
-            messagebox.showerror("Error", "Feature ID is missing. Provide a label/name for your dataset.")
+            messagebox.showerror("Error", "Feature ID is missing. Provide a label/name for your dataset.", parent=self)
             return
         feature_name = self._sanitize_feature_id(feature_name_raw)
 
@@ -1778,18 +1778,18 @@ class HSVMaskEditingMixin:
 
         # 2) Ensure we have an image and features
         if not isinstance(self.full_image, np.ndarray):
-            messagebox.showerror("Error", "No full image is loaded or invalid image data.")
+            messagebox.showerror("Error", "No full image is loaded or invalid image data.", parent=self)
             return
         if not self.features and self.edge_points:
             self.features = [("polyline", self.edge_points.copy())]
         if not self.features:
-            messagebox.showerror("Error", "No features to export. Please confirm a shape or polygon first.")
+            messagebox.showerror("Error", "No features to export. Please confirm a shape or polygon first.", parent=self)
             return
 
         # 3) Prepare output folders
         export_path = self.export_path_entry.get().strip()
         if not export_path:
-            messagebox.showerror("Error", "Please specify an export folder.")
+            messagebox.showerror("Error", "Please specify an export folder.", parent=self)
             return
         base_folder     = os.path.join(export_path, "training dataset")
         images_folder   = os.path.join(base_folder, "images")
@@ -1924,17 +1924,18 @@ class HSVMaskEditingMixin:
             f"- Overlay ⇒ {overlay_path}\n"
             f"- GeoJSON ⇒ {geojson_path}\n"
             f"- COCO    ⇒ {coco_path}"
-            f"{cls_msg}"
+            f"{cls_msg}",
+            parent=self,
         )
 
 
     def export_mask_as_training_data(self):
         if self.current_mask is None:
-            messagebox.showerror("Error", "No mask available for exporting.")
+            messagebox.showerror("Error", "No mask available for exporting.", parent=self)
             return
         export_path = self.export_path_entry.get().strip()
         if not export_path:
-            messagebox.showerror("Error", "Please select an export folder.")
+            messagebox.showerror("Error", "Please select an export folder.", parent=self)
             return
 
         base_folder = os.path.join(export_path, "training dataset")
@@ -1968,16 +1969,16 @@ class HSVMaskEditingMixin:
         self._export_class_points(export_path)
 
         messagebox.showinfo("Export Mask Training Data",
-                            f"Mask training data exported.\n{base_folder}")
+                            f"Mask training data exported.\n{base_folder}", parent=self)
 
     def export_as_test_data(self):
         if not isinstance(self.full_image, np.ndarray):
-            messagebox.showerror("Error", "No full image available.")
+            messagebox.showerror("Error", "No full image available.", parent=self)
             return
         export_path = self.export_path_entry.get().strip()
         if not export_path:
             messagebox.showerror(
-                "Error", "Please specify a path to save files.")
+                "Error", "Please specify a path to save files.", parent=self)
             return
         test_folder = os.path.join(export_path, "test dataset")
         os.makedirs(test_folder, exist_ok=True)
@@ -1985,19 +1986,19 @@ class HSVMaskEditingMixin:
         dest_path = os.path.join(test_folder, base_name)
         shutil.copy2(self.image_path, dest_path)
         messagebox.showinfo("Export Test Data",
-                            f"Test image exported to:\n{dest_path}")
+                            f"Test image exported to:\n{dest_path}", parent=self)
 
     def export_as_overlay(self):
         if not isinstance(self.full_image, np.ndarray):
-            messagebox.showerror("Error", "No full image available.")
+            messagebox.showerror("Error", "No full image available.", parent=self)
             return
         if not self.edge_points or len(self.edge_points) < 2:
-            messagebox.showerror("Error", "No valid edge to export.")
+            messagebox.showerror("Error", "No valid edge to export.", parent=self)
             return
         export_path = self.export_path_entry.get().strip()
         if not export_path:
             messagebox.showerror(
-                "Error", "Please specify a path to save files.")
+                "Error", "Please specify a path to save files.", parent=self)
             return
         base_name = os.path.basename(self.image_path)
         overlay = self.full_image.copy()
@@ -2010,4 +2011,4 @@ class HSVMaskEditingMixin:
             export_path, os.path.splitext(base_name)[0] + "_overlay.png")
         cv2.imwrite(out_overlay, overlay)
         messagebox.showinfo(
-            "Export Overlay", f"Overlay saved to:\n{out_overlay}")
+            "Export Overlay", f"Overlay saved to:\n{out_overlay}", parent=self)

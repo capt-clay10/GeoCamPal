@@ -551,7 +551,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
         #self.geometry("1400x1020")
         fit_geometry(self, 1400, 1020, resizable=True)
         try:
-            self.iconbitmap(resource_path("launch_logo.ico"))
+            self.after(200, lambda: self.iconphoto(False, tk.PhotoImage(file=resource_path("launch_logo.png"))))
         except Exception:
             pass
 

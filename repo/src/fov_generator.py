@@ -26,6 +26,7 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
+from matplotlib.colors import LinearSegmentedColormap, TwoSlopeNorm, Normalize
 
 import shapely.geometry as geom
 import pyproj
@@ -391,6 +392,59 @@ def _compute_hillshade(elevation, azimuth_deg=315, altitude_deg=45,
     return hs
 
 
+# ——— coastal DEM colormap (diverging at sea level) ———
+
+def _build_coastal_cmap_and_norm(e_min, e_max):
+    """Build a diverging colormap and norm centred at 0 m (sea level).
+
+    Below 0 m  — dark blue → medium blue → light cyan  (bathymetry)
+    Above 0 m  — sandy beige → green → brown → white   (land/terrain)
+
+    Returns (cmap, norm).  If the data is entirely above or below zero,
+    falls back to a simple linear norm with the appropriate half of the
+    colour range.
+    """
+    # Bathymetry colours (deep → shallow)
+    bathy_colors = [
+        (0.05, 0.10, 0.35),   # deep navy
+        (0.10, 0.25, 0.55),   # dark blue
+        (0.20, 0.45, 0.70),   # medium blue
+        (0.45, 0.70, 0.85),   # steel blue
+        (0.70, 0.88, 0.95),   # light cyan
+    ]
+    # Land colours (coast → high elevation)
+    land_colors = [
+        (0.85, 0.82, 0.65),   # sandy beige (shore)
+        (0.55, 0.72, 0.40),   # green lowland
+        (0.40, 0.55, 0.25),   # darker green
+        (0.55, 0.40, 0.25),   # brown hills
+        (0.70, 0.60, 0.45),   # tan upland
+        (0.95, 0.95, 0.95),   # near-white peaks
+    ]
+
+    has_below = e_min < 0
+    has_above = e_max > 0
+
+    if has_below and has_above:
+        # True diverging: join bathymetry and land at 0
+        all_colors = bathy_colors + land_colors
+        cmap = LinearSegmentedColormap.from_list(
+            "coastal_dem", all_colors, N=512)
+        norm = TwoSlopeNorm(vmin=e_min, vcenter=0, vmax=e_max)
+    elif has_below:
+        # Only bathymetry
+        cmap = LinearSegmentedColormap.from_list(
+            "coastal_bathy", bathy_colors, N=256)
+        norm = Normalize(vmin=e_min, vmax=e_max)
+    else:
+        # Only land
+        cmap = LinearSegmentedColormap.from_list(
+            "coastal_land", land_colors, N=256)
+        norm = Normalize(vmin=e_min, vmax=e_max)
+
+    return cmap, norm
+
+
 def _load_dem_hillshade(dem_path, ax, bounds_utm, utm_crs):
     """Render a hillshade derived from the DEM as background.
 
@@ -419,15 +473,14 @@ def _load_dem_hillshade(dem_path, ax, bounds_utm, utm_crs):
                 cell_m = cell_m * 111_000.0
 
         hs = _compute_hillshade(elev, cell_size=max(cell_m, 0.01))
-        # colour the hillshade with a terrain tint
-        terrain_cmap = plt.cm.terrain
-        # normalise elevation for colour
+        # colour the hillshade with a coastal terrain tint
         e_min, e_max = float(np.nanmin(elev)), float(np.nanmax(elev))
+        coastal_cmap, coastal_norm = _build_coastal_cmap_and_norm(e_min, e_max)
         if e_max - e_min < 0.01:
-            e_norm = np.zeros_like(elev)
+            e_mapped = np.zeros_like(elev)
         else:
-            e_norm = (elev - e_min) / (e_max - e_min)
-        rgb = terrain_cmap(e_norm)[..., :3]
+            e_mapped = coastal_norm(elev)
+        rgb = coastal_cmap(e_mapped)[..., :3]
         # blend hillshade with terrain colour
         hs3 = np.dstack([hs, hs, hs])
         blended = np.clip(rgb * 0.5 + hs3 * 0.5, 0, 1)
@@ -927,7 +980,7 @@ class FOVGeneratorWindow(ctk.CTkToplevel):
     def _browse_basemap(self):
         p = filedialog.askopenfilename(
             title="Select Basemap GeoTIFF",
-            filetypes=[("GeoTIFF", "*.tif *.tiff")])
+            filetypes=[("GeoTIFF", "*.tif *.tiff")],parent=self)
         if p:
             self.basemap_path = p
             self.basemap_label.configure(text=os.path.basename(p))
@@ -935,13 +988,13 @@ class FOVGeneratorWindow(ctk.CTkToplevel):
     def _browse_dem(self):
         p = filedialog.askopenfilename(
             title="Select DEM GeoTIFF",
-            filetypes=[("GeoTIFF", "*.tif *.tiff")])
+            filetypes=[("GeoTIFF", "*.tif *.tiff")],parent=self)
         if p:
             self.dem_path = p
             self.dem_label.configure(text=os.path.basename(p))
 
     def _browse_output(self):
-        d = filedialog.askdirectory(title="Select Output Folder")
+        d = filedialog.askdirectory(title="Select Output Folder",parent=self)
         if d:
             self.output_folder = d
             self.output_label.configure(text=d)
@@ -1356,19 +1409,52 @@ class FOVGeneratorWindow(ctk.CTkToplevel):
         IN_FOCUS_HATCH = "///"
         _bg_msg_printed = [False]
 
-        def _draw_background(ax_target):
+        def _draw_background(ax_target, prefer="basemap"):
+            """Draw background on an axis.
+
+            prefer:
+              "basemap" — try basemap first, fall back to DEM hillshade
+              "dem"     — try DEM hillshade first, fall back to basemap
+
+            When both files are provided this lets the left plot show the
+            basemap and the right plot show the DEM hillshade.  When only
+            one file is provided both plots get the same background.
+            """
             bg_loaded = False
-            if basemap_path and os.path.exists(basemap_path):
-                bg_loaded = _load_geotiff_basemap(basemap_path, ax_target, bounds, utm)
-            if not bg_loaded and has_dem:
-                bg_loaded, e_lo, e_hi = _load_dem_hillshade(dem_path, ax_target, bounds, utm)
-                if bg_loaded:
-                    if e_lo is not None and _dem_elev_range[0] is None:
-                        _dem_elev_range[0] = e_lo
-                        _dem_elev_range[1] = e_hi
-                    if not _bg_msg_printed[0]:
-                        print("[INFO] Using DEM hillshade as background.")
-                        _bg_msg_printed[0] = True
+
+            if prefer == "dem":
+                # DEM hillshade first, basemap fallback
+                if has_dem:
+                    bg_loaded, e_lo, e_hi = _load_dem_hillshade(
+                        dem_path, ax_target, bounds, utm)
+                    if bg_loaded:
+                        if e_lo is not None and _dem_elev_range[0] is None:
+                            _dem_elev_range[0] = e_lo
+                            _dem_elev_range[1] = e_hi
+                        if not _bg_msg_printed[0]:
+                            print("[INFO] Using DEM hillshade as viewshed "
+                                  "background.")
+                            _bg_msg_printed[0] = True
+                if not bg_loaded and basemap_path and os.path.exists(
+                        basemap_path):
+                    bg_loaded = _load_geotiff_basemap(
+                        basemap_path, ax_target, bounds, utm)
+            else:
+                # basemap first, DEM hillshade fallback
+                if basemap_path and os.path.exists(basemap_path):
+                    bg_loaded = _load_geotiff_basemap(
+                        basemap_path, ax_target, bounds, utm)
+                if not bg_loaded and has_dem:
+                    bg_loaded, e_lo, e_hi = _load_dem_hillshade(
+                        dem_path, ax_target, bounds, utm)
+                    if bg_loaded:
+                        if e_lo is not None and _dem_elev_range[0] is None:
+                            _dem_elev_range[0] = e_lo
+                            _dem_elev_range[1] = e_hi
+                        if not _bg_msg_printed[0]:
+                            print("[INFO] Using DEM hillshade as background.")
+                            _bg_msg_printed[0] = True
+
             if not bg_loaded:
                 ax_target.set_facecolor("#f0f0f0")
                 ring_distances = [d for d in [50, 100, 200, 500, 1000, 2000] if d <= range_m * 1.2]
@@ -1426,7 +1512,7 @@ class FOVGeneratorWindow(ctk.CTkToplevel):
         _draw_decorations(self.ax, "Camera Field of View")
 
         if self.ax_vs is not None and vis_mask is not None:
-            _draw_background(self.ax_vs)
+            _draw_background(self.ax_vs, prefer="dem")
             left_b, bottom_b, right_b, top_b = bounds
             vs_rgba = np.zeros((*vis_mask.shape, 4), dtype=np.float32)
             fov = fov_mask if fov_mask is not None else np.ones_like(vis_mask, dtype=bool)
@@ -1458,12 +1544,14 @@ class FOVGeneratorWindow(ctk.CTkToplevel):
 
         if _dem_elev_range[0] is not None and _dem_elev_range[1] is not None:
             import matplotlib.cm as cm
-            from matplotlib.colors import Normalize
             e_lo, e_hi = _dem_elev_range
-            norm = Normalize(vmin=e_lo, vmax=e_hi)
-            sm = cm.ScalarMappable(cmap=plt.cm.terrain, norm=norm)
+            coastal_cmap, coastal_norm = _build_coastal_cmap_and_norm(
+                e_lo, e_hi)
+            sm = cm.ScalarMappable(cmap=coastal_cmap, norm=coastal_norm)
             sm.set_array([])
-            cbar = self.fig.colorbar(sm, ax=self.ax, orientation="vertical", fraction=0.03, pad=0.02, shrink=0.6)
+            # Attach colorbar to the axis showing the DEM
+            cbar_ax = self.ax_vs if self.ax_vs is not None else self.ax
+            cbar = self.fig.colorbar(sm, ax=cbar_ax, orientation="vertical", fraction=0.03, pad=0.02, shrink=0.6)
             cbar.set_label("Elevation (m)", fontsize=8)
             cbar.ax.tick_params(labelsize=7)
 
@@ -1498,7 +1586,7 @@ class FOVGeneratorWindow(ctk.CTkToplevel):
 
         if output_folder:
             plot_path = os.path.join(output_folder, "fov_map.png")
-            leg = self.fig.legend(handles=all_handles, loc="lower center", bbox_to_anchor=(0.5, -0.02), ncol=min(3, len(all_handles)), frameon=True, framealpha=0.95, fontsize="small")
+            leg = self.fig.legend(handles=all_handles, loc="lower center", bbox_to_anchor=(0.5, -0.25), ncol=min(3, len(all_handles)), frameon=True, framealpha=0.95, fontsize="small")
             self.fig.savefig(plot_path, dpi=200, bbox_extra_artists=(leg,), bbox_inches="tight")
             leg.remove()
             self.canvas_plot.draw()

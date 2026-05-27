@@ -331,7 +331,12 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
 
         self.sa_progress.set(0)
         self.sa_status_label.configure(text="")
-        self.log("\n--- Session reset. Active SA search will stop at the next safe check. ---\n")
+
+        # Clear console and re-display only the initial banner
+        self.text_console.delete("1.0", tk.END)
+        self.text_console.insert(tk.END,
+            "Here you may see console outputs\n--------------------------------\n")
+        self.text_console.see(tk.END)
 
     def toggle_advanced(self):
         if self.advanced_var.get():
@@ -357,14 +362,14 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
     def compute_matrix(self):
         """Load CSV, optionally exclude by GCP_ID, compute homography, save matrix."""
         if not self.input_file:
-            messagebox.showerror("Error", "Please select an input GCP file.")
+            messagebox.showerror("Error", "Please select an input GCP file.", parent=self)
             return
         if not self.output_folder:
-            messagebox.showerror("Error", "Please select an output folder.")
+            messagebox.showerror("Error", "Please select an output folder.", parent=self)
             return
         output_name = self.entry_output_name.get().strip()
         if not output_name:
-            messagebox.showerror("Error", "Please enter an output file name.")
+            messagebox.showerror("Error", "Please enter an output file name.", parent=self)
             return
 
         self.log("Reading GCP file...")
@@ -382,7 +387,8 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
             messagebox.showerror(
                 "Error",
                 f"Missing required columns: {missing}\n\n"
-                f"Found columns: {list(gcp_data.columns)}"
+                f"Found columns: {list(gcp_data.columns)}",
+                parent=self,
             )
             return
 
@@ -417,7 +423,7 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
 
         if len(self.pixel_points) < 4:
             self.log("Not enough GCPs! Need at least 4.")
-            messagebox.showerror("Error", "Not enough GCPs! Need at least 4.")
+            messagebox.showerror("Error", "Not enough GCPs! Need at least 4.", parent=self)
             return
 
         # -------------- normalize & RANSAC ----------------
@@ -427,7 +433,7 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
         H_norm, _ = cv2.findHomography(p_norm[:, :2], u_norm[:, :2], cv2.RANSAC, 0.5)
         if H_norm is None:
             self.log("Failed to compute homography matrix.")
-            messagebox.showerror("Error", "Failed to compute homography matrix. Check input data.")
+            messagebox.showerror("Error", "Failed to compute homography matrix. Check input data.", parent=self)
             return
 
         H_final = np.linalg.inv(T_u) @ H_norm @ T_p
@@ -444,18 +450,18 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
             np.savetxt(out_path, H_final, header=header)
         except Exception as e:
             self.log(f"Error saving homography matrix: {e}")
-            messagebox.showerror("Error", f"Error saving homography matrix: {e}")
+            messagebox.showerror("Error", f"Error saving homography matrix: {e}", parent=self)
             return
 
         self.log("\nHomography Matrix Computed and Saved!")
         self.log(f"Output Path: {out_path}")
         self.log(f"Homography matrix:\n{H_final}")
-        messagebox.showinfo("Success", "Homography matrix computed and saved successfully.")
+        messagebox.showinfo("Success", "Homography matrix computed and saved successfully.", parent=self)
 
     def compute_accuracy(self):
         """Apply H to each pixel point and report per-GCP error."""
         if self.H_final is None or self.pixel_points is None:
-            messagebox.showerror("Error", "Please compute the homography matrix first!")
+            messagebox.showerror("Error", "Please compute the homography matrix first!", parent=self)
             return
 
         self.log("Computing accuracy…")
@@ -631,11 +637,11 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
 
     def accept_and_export_new_matrix(self):
         if self.best_H_annealing is None:
-            messagebox.showerror("Error", "Run SA search first.")
+            messagebox.showerror("Error", "Run SA search first.", parent=self)
             return
         out_name = self.entry_output_name.get().strip()
         if not out_name:
-            messagebox.showerror("Error", "Please enter an output file name.")
+            messagebox.showerror("Error", "Please enter an output file name.", parent=self)
             return
         path = os.path.join(self.output_folder, f"{out_name}_bestsubset.txt")
         try:
@@ -645,10 +651,10 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
             np.savetxt(path, self.best_H_annealing, header=header)
         except Exception as e:
             self.log(f"Error exporting: {e}")
-            messagebox.showerror("Error", f"Error exporting best matrix: {e}")
+            messagebox.showerror("Error", f"Error exporting best matrix: {e}", parent=self)
             return
         self.log(f"Best homography matrix exported to: {path}")
-        messagebox.showinfo("Success", "Best homography matrix exported successfully.")
+        messagebox.showinfo("Success", "Best homography matrix exported successfully.", parent=self)
 
 
 # %%                                     Main

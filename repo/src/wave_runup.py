@@ -294,6 +294,11 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         self.photo_raw = None
         self.runup_time = None
         self.runup_distance = None
+        self.runup_vertical = None
+        self.runup_detrended_h = None   # detrended horizontal
+        self.runup_detrended_v = None   # detrended vertical
+        self.psd_freq = None            # PSD frequencies
+        self.psd_power = None           # PSD power values
         self.output_folder = ""
         self.batch_raw_folder = ""
         self.batch_mask_folder = ""
@@ -303,32 +308,36 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         self._batch_start_time = None
         self._stockdon_result = None  # last computed Stockdon R2% dict
 
-        # Top frame: three panels
+        # Top frame: three panels (grid layout for unequal widths)
         self.top_frame = ctk.CTkFrame(self, fg_color="black")
         self.top_frame.pack(side="top", fill="both", expand=True)
+        self.top_frame.columnconfigure(0, weight=1)   # image – narrower
+        self.top_frame.columnconfigure(1, weight=2)   # runup contour
+        self.top_frame.columnconfigure(2, weight=2)   # stats
+        self.top_frame.rowconfigure(0, weight=1)
 
-        # Image panel - removed fixed size constraints to allow proper scaling
+        # Image panel – narrower input preview
         self.image_panel = ctk.CTkFrame(self.top_frame)
-        self.image_panel.pack(side="left", fill="both", expand=True, padx=5, pady=5)
+        self.image_panel.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
 
         # Runup contour panel
         self.plot_panel = ctk.CTkFrame(self.top_frame)
-        self.plot_panel.pack(side="left", fill="both", expand=True, padx=5, pady=5)
-        self.fig, self.ax = plt.subplots(figsize=(5, 4))
+        self.plot_panel.grid(row=0, column=1, sticky="nsew", padx=5, pady=5)
+        self.fig, self.ax = plt.subplots(figsize=(5, 3))
         self.canvas_plot = FigureCanvasTkAgg(self.fig, master=self.plot_panel)
         self.canvas_plot.get_tk_widget().pack(fill="both", expand=True)
 
         # Stats panel
         self.stats_panel = ctk.CTkFrame(self.top_frame)
-        self.stats_panel.pack(side="left", fill="both", expand=True, padx=5, pady=5)
-        self.fig_stats, (self.ax_stats_psd, self.ax_stats_swash) = plt.subplots(2, 1, figsize=(5, 4))
+        self.stats_panel.grid(row=0, column=2, sticky="nsew", padx=5, pady=5)
+        self.fig_stats, (self.ax_stats_psd, self.ax_stats_swash) = plt.subplots(2, 1, figsize=(5, 3))
         self.canvas_stats = FigureCanvasTkAgg(self.fig_stats, master=self.stats_panel)
         self.canvas_stats.get_tk_widget().pack(fill="both", expand=True)
 
         # Middle console
         self.console_frame = ctk.CTkFrame(self)
         self.console_frame.pack(side="top", fill="both", expand=False, padx=10, pady=(0, 10))
-        self.console_text = tk.Text(self.console_frame, wrap="word", height=10)
+        self.console_text = tk.Text(self.console_frame, wrap="word", height=6)
         self.console_text.pack(fill="both", expand=True, padx=5, pady=5)
         self._console_help = (
             "Wave Run-Up Tool ready.\n"
@@ -345,6 +354,9 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
             "                           size (metres per pixel).\n"
             "     • IG threshold    — infragravity cutoff frequency\n"
             "                         in Hz (default 0.05 Hz).\n"
+            "     • Beach Slope (°) — optional average beach slope.\n"
+            "                         When set, vertical runup is\n"
+            "                         computed as d × tan(slope).\n"
             "  4. Click 'Calculate Runup' → extracts the swash\n"
             "     excursion signal and computes Welch PSD.\n"
             "  5. Export Runup → saves a (time, distance) CSV.\n"
@@ -366,8 +378,8 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
             self.console_text, self._console_help
         )
 
-        # Bottom frame
-        self.bottom_panel = ctk.CTkFrame(self)
+        # Bottom frame — scrollable so it never pushes the window off-screen
+        self.bottom_panel = ctk.CTkScrollableFrame(self, height=220)
         self.bottom_panel.pack(side="top", fill="x", padx=5, pady=5)
 
         # Controls
@@ -389,8 +401,12 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         self.land_left = tk.BooleanVar()
         self.chk_land_left = ctk.CTkCheckBox(self.controls_panel, text="Land on left", variable=self.land_left)
         self.chk_land_left.grid(row=0, column=2, padx=5, pady=5)
-        self.btn_calculate = ctk.CTkButton(self.controls_panel, text="Calculate Runup", command=self.calculate_runup, fg_color="#0F52BA", hover_color="#2A6BD1")
-        self.btn_calculate.grid(row=0, column=3, padx=5, pady=5)
+
+        ctk.CTkLabel(self.controls_panel, text="Beach Slope (°):").grid(
+            row=0, column=3, padx=(20, 3), pady=5, sticky="w")
+        self.beach_slope_entry = ctk.CTkEntry(self.controls_panel, width=65,
+                                              placeholder_text="optional")
+        self.beach_slope_entry.grid(row=0, column=4, padx=3, pady=5)
       
 
         # Resolution
@@ -426,21 +442,30 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
             variable=self.stockdon_enabled,
             command=self._toggle_stockdon,
         ).grid(row=0, column=0, padx=5, pady=5, sticky="w")
+        ctk.CTkLabel(self.stockdon_panel, text="Compare to Stockdon Runup",
+                     text_color="gray").grid(
+            row=0, column=1, padx=(0, 10), pady=5, sticky="w")
         ctk.CTkLabel(self.stockdon_panel, text="Slope (°):").grid(
-            row=0, column=1, padx=(15, 3), pady=5)
+            row=0, column=2, padx=(15, 3), pady=5)
         self.stockdon_slope_entry = ctk.CTkEntry(
             self.stockdon_panel, width=65, state="disabled")
-        self.stockdon_slope_entry.grid(row=0, column=2, padx=3, pady=5)
+        self.stockdon_slope_entry.grid(row=0, column=3, padx=3, pady=5)
         ctk.CTkLabel(self.stockdon_panel, text="H₀ (m):").grid(
-            row=0, column=3, padx=(15, 3), pady=5)
+            row=0, column=4, padx=(15, 3), pady=5)
         self.stockdon_H0_entry = ctk.CTkEntry(
             self.stockdon_panel, width=65, state="disabled")
-        self.stockdon_H0_entry.grid(row=0, column=4, padx=3, pady=5)
+        self.stockdon_H0_entry.grid(row=0, column=5, padx=3, pady=5)
         ctk.CTkLabel(self.stockdon_panel, text="T₀ (s):").grid(
-            row=0, column=5, padx=(15, 3), pady=5)
+            row=0, column=6, padx=(15, 3), pady=5)
         self.stockdon_T0_entry = ctk.CTkEntry(
             self.stockdon_panel, width=65, state="disabled")
-        self.stockdon_T0_entry.grid(row=0, column=6, padx=3, pady=5)
+        self.stockdon_T0_entry.grid(row=0, column=7, padx=3, pady=5)
+
+        self.btn_calculate = ctk.CTkButton(
+            self.stockdon_panel, text="Calculate Runup",
+            command=self.calculate_runup,
+            fg_color="#0F52BA", hover_color="#2A6BD1")
+        self.btn_calculate.grid(row=0, column=8, padx=(20, 5), pady=5)
 
         # Export
         self.export_panel = ctk.CTkFrame(self.bottom_panel)
@@ -531,6 +556,7 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
                 "manual_resolution": bool(self.manual_res_var.get()),
                 "manual_resolution_value": self.manual_res_entry.get().strip(),
                 "ig_threshold_hz": self.ig_threshold_entry.get().strip(),
+                "beach_slope_deg": self.beach_slope_entry.get().strip(),
                 "stockdon_enabled": bool(self.stockdon_enabled.get()),
                 "stockdon_slope_deg": self.stockdon_slope_entry.get().strip(),
                 "stockdon_H0": self.stockdon_H0_entry.get().strip(),
@@ -570,6 +596,12 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
                 self.manual_res_entry.insert(0, str(state.get("manual_resolution_value")))
             self.ig_threshold_entry.delete(0, tk.END)
             self.ig_threshold_entry.insert(0, str(state.get("ig_threshold_hz", "0.05")))
+
+            # Restore beach slope
+            self.beach_slope_entry.delete(0, tk.END)
+            bs_val = state.get("beach_slope_deg", "")
+            if bs_val not in (None, ""):
+                self.beach_slope_entry.insert(0, str(bs_val))
 
             # Restore Stockdon fields
             self.stockdon_enabled.set(bool(state.get("stockdon_enabled", False)))
@@ -620,6 +652,11 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         self.photo_raw = None
         self.runup_time = None
         self.runup_distance = None
+        self.runup_vertical = None
+        self.runup_detrended_h = None
+        self.runup_detrended_v = None
+        self.psd_freq = None
+        self.psd_power = None
         
         # Clear image panel
         for child in self.image_panel.winfo_children():
@@ -652,6 +689,7 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         self.land_left.set(False)
         self.manual_res_var.set(False)
         self.manual_res_entry.delete(0, tk.END)
+        self.beach_slope_entry.delete(0, tk.END)
 
         # Reset Stockdon fields
         self._stockdon_result = None
@@ -859,8 +897,8 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
     def display_image_with_axes(self, combined_image, resolution_x_m, time_interval_sec):
         width, height = combined_image.size
         
-        # Use larger figure size that matches other panels
-        fig_w, fig_h = 5, 4  # Same as the other panels
+        # Use smaller figure for the input preview panel
+        fig_w, fig_h = 3, 3
         
         # Flip image vertically so that:
         # - Row 0 (top of original image, t=max) goes to bottom of display
@@ -882,6 +920,23 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         self.canvas_img_fig = FigureCanvasTkAgg(fig, master=self.image_panel)
         self.canvas_img_fig.get_tk_widget().pack(fill="both", expand=True)
         self.canvas_img_fig.draw()
+
+    def _get_beach_slope_rad(self):
+        """Return the beach slope in radians, or None if the field is empty."""
+        slope_str = self.beach_slope_entry.get().strip()
+        if not slope_str:
+            return None
+        try:
+            slope_deg = float(slope_str)
+        except (TypeError, ValueError):
+            messagebox.showerror("Error",
+                                 "Beach Slope must be a valid number in degrees.")
+            return None
+        if slope_deg <= 0 or slope_deg >= 90:
+            messagebox.showerror("Error",
+                                 "Beach Slope must be between 0° and 90° (exclusive).")
+            return None
+        return np.radians(slope_deg)
 
     def _get_ig_threshold(self):
         """Return the user-configured IG cutoff in Hz."""
@@ -1001,18 +1056,46 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         # Store for export
         self.runup_time, self.runup_distance = t_sorted, d_sorted
 
+        # Compute vertical runup if beach slope is given
+        beach_slope_rad = self._get_beach_slope_rad()
+        if beach_slope_rad is not None:
+            self.runup_vertical = d_sorted * np.tan(beach_slope_rad)
+            slope_deg = np.degrees(beach_slope_rad)
+            print(f"Beach slope {slope_deg:.2f}° → vertical runup computed "
+                  f"(tan {slope_deg:.2f}° = {np.tan(beach_slope_rad):.4f})")
+        else:
+            self.runup_vertical = None
+
         # Plot the extracted runup contour
         self.ax.clear()
         self.ax.plot(d_sorted, t_sorted, 'bo-', markersize=1, linewidth=0.5, label="Runup Contour")
         self.ax.set_xlabel("Cross-shore distance (m)")
         self.ax.set_ylabel("Time (s)")
-        self.ax.set_title(f"Extracted Runup ({len(t_sorted)} points)")
+        self.ax.set_title(f"Extracted Runup ({len(t_sorted)} pts)", fontsize=9)
         self.ax.grid(True)
-        self.ax.legend()
+        self.ax.legend(fontsize="x-small", loc="upper right")
+        self.fig.tight_layout()
         self.canvas_plot.draw()
 
         # --- Stats (single image) ---
-        detr = d_sorted - np.mean(d_sorted)
+        # Always compute horizontal detrended
+        detr_h = d_sorted - np.mean(d_sorted)
+        self.runup_detrended_h = detr_h
+
+        # Use vertical signal for spectral analysis when slope is available
+        if self.runup_vertical is not None:
+            signal = self.runup_vertical
+            detr = signal - np.mean(signal)
+            self.runup_detrended_v = detr
+            signal_label = "Detrended Vertical Swash"
+            ylabel = "z'(t) (m)"
+        else:
+            signal = d_sorted
+            detr = detr_h
+            self.runup_detrended_v = None
+            signal_label = "Detrended Swash"
+            ylabel = "d'(t) (m)"
+
         dt = np.diff(t_sorted)
         fs = 1.0 / np.mean(dt) if len(dt) > 0 else 1.0
 
@@ -1020,6 +1103,8 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         fxx, pxx = welch(detr, fs=fs, nperseg=min(256, len(detr)))
         pos = fxx > 0
         fxx, pxx = fxx[pos], pxx[pos]
+        self.psd_freq = fxx
+        self.psd_power = pxx
         ig_mask = fxx < ig_threshold_hz
         E_ig = np.trapezoid(pxx[ig_mask], fxx[ig_mask])
         E_tot = np.trapezoid(pxx, fxx)
@@ -1033,24 +1118,25 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
             label=f'IG (<{ig_threshold_hz:.3g} Hz) {ig_pct:.1f}%'
         )
         self.ax_stats_psd.set_xscale('log')
-        self.ax_stats_psd.set_title(f'Power Spectral Density (IG cutoff = {ig_threshold_hz:.3g} Hz)')
-        self.ax_stats_psd.set_ylabel('PSD')
-        self.ax_stats_psd.legend()
+        self.ax_stats_psd.set_title(f'PSD (IG cutoff {ig_threshold_hz:.3g} Hz)', fontsize=9)
+        self.ax_stats_psd.set_ylabel('PSD', fontsize=8)
+        self.ax_stats_psd.legend(fontsize="x-small", loc="upper right")
 
         # Detrended swash
         self.ax_stats_swash.clear()
-        self.ax_stats_swash.plot(t_sorted, detr, linewidth=0.5, label="Detrended Swash")
+        self.ax_stats_swash.plot(t_sorted, detr, linewidth=0.5, label=signal_label)
 
         # ── Optional Stockdon R₂% comparison ────────────────────
         sk = self._try_stockdon()
         if sk is not None:
             obs_r2 = np.percentile(detr, 98)
+            unit_note = " (vertical)" if self.runup_vertical is not None else " (horizontal)"
             self.ax_stats_swash.axhline(
                 sk["R2"], color="red", linestyle="--", linewidth=1.2,
                 label=f'Stockdon R₂% = {sk["R2"]:.2f} m')
             self.ax_stats_swash.axhline(
                 obs_r2, color="blue", linestyle=":", linewidth=1.2,
-                label=f'Observed R₂% = {obs_r2:.2f} m')
+                label=f'Obs R₂% = {obs_r2:.2f} m{unit_note}')
             print(f"\n── Stockdon et al. (2006) comparison ──")
             print(f"   β = {sk['beta']:.4f}   H₀ = {sk['H0']:.2f} m   "
                   f"T₀ = {sk['T0']:.1f} s")
@@ -1058,13 +1144,12 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
                   f"Setup η̄ = {sk['eta_bar']:.3f} m   "
                   f"Swash S = {sk['S']:.3f} m")
             print(f"   Stockdon R₂%  = {sk['R2']:.3f} m")
-            print(f"   Observed R₂%  = {obs_r2:.3f} m  "
-                  f"(98th percentile of detrended swash)")
+            print(f"   Observed R₂%  = {obs_r2:.3f} m{unit_note}")
 
-        self.ax_stats_swash.set_title('Detrended Swash Excursion')
-        self.ax_stats_swash.set_xlabel('Time (s)')
-        self.ax_stats_swash.set_ylabel("d'(t) (m)")
-        self.ax_stats_swash.legend()
+        self.ax_stats_swash.set_title(signal_label, fontsize=9)
+        self.ax_stats_swash.set_xlabel('Time (s)', fontsize=8)
+        self.ax_stats_swash.set_ylabel(ylabel, fontsize=8)
+        self.ax_stats_swash.legend(fontsize="x-small", loc="upper right")
 
         self.fig_stats.tight_layout()
         self.canvas_stats.draw()
@@ -1096,15 +1181,24 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         
         with open(out_path, 'w', newline='') as csvfile:
             writer = csv.writer(csvfile)
-            writer.writerow(["time", "distance"])
-            for sec, dist in zip(self.runup_time, self.runup_distance):
+            writer.writerow(["time", "horizontal_distance",
+                             "horizontal_distance_detrended",
+                             "vertical_distance",
+                             "vertical_distance_detrended"])
+            for i, (sec, dist) in enumerate(zip(self.runup_time, self.runup_distance)):
                 ts = (base_dt + datetime.timedelta(seconds=float(sec))).strftime("%Y-%m-%d-%H-%M-%S")
-                writer.writerow([ts, dist])
+                h_detr = self.runup_detrended_h[i] if self.runup_detrended_h is not None else ""
+                vert = self.runup_vertical[i] if self.runup_vertical is not None else ""
+                v_detr = self.runup_detrended_v[i] if self.runup_detrended_v is not None else ""
+                writer.writerow([ts, dist, h_detr, vert, v_detr])
 
             # Append Stockdon comparison as comment rows if available
             sk = self._stockdon_result
             if sk is not None:
-                detr = self.runup_distance - np.mean(self.runup_distance)
+                if self.runup_vertical is not None:
+                    detr = self.runup_vertical - np.mean(self.runup_vertical)
+                else:
+                    detr = self.runup_distance - np.mean(self.runup_distance)
                 obs_r2 = np.percentile(detr, 98)
                 csvfile.write(f"# Stockdon_R2%,{sk['R2']:.4f}\n")
                 csvfile.write(f"# observed_R2%,{obs_r2:.4f}\n")
@@ -1115,12 +1209,31 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
                 csvfile.write(f"# T0_s,{sk['T0']}\n")
                 csvfile.write(f"# L0_m,{sk['L0']:.2f}\n")
 
-        messagebox.showinfo("Export Runup", f"Exported to:\n{out_path}")
+        print(f"Runup CSV saved: {out_name}")
+
+        # ── Export PSD CSV ────────────────────────────────────────
+        if self.psd_freq is not None and self.psd_power is not None:
+            psd_name = os.path.splitext(out_name)[0] + "_psd.csv"
+            psd_path = os.path.join(self.output_folder, psd_name)
+            with open(psd_path, 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(["frequency_hz", "psd"])
+                for freq, power in zip(self.psd_freq, self.psd_power):
+                    writer.writerow([freq, power])
+            print(f"PSD CSV saved: {psd_name}")
+
+        # ── Export clean plot PNG (legends below each subplot) ───
+        self._export_clean_plot(out_name)
+
+        messagebox.showinfo("Export Runup", f"Exported to:\n{self.output_folder}")
 
         # Write Stockdon comparison text file if available
         sk = self._stockdon_result
         if sk is not None:
-            detr = self.runup_distance - np.mean(self.runup_distance)
+            if self.runup_vertical is not None:
+                detr = self.runup_vertical - np.mean(self.runup_vertical)
+            else:
+                detr = self.runup_distance - np.mean(self.runup_distance)
             obs_r2 = np.percentile(detr, 98)
             diff = obs_r2 - sk["R2"]
             txt_name = os.path.splitext(out_name)[0] + "_stockdon_comparison.txt"
@@ -1150,6 +1263,84 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
                         f"(observed − predicted)\n")
             print(f"Stockdon comparison saved to: {txt_name}")
 
+    def _export_clean_plot(self, csv_name):
+        """Save a publication-quality plot PNG with legends below each subplot."""
+        if self.runup_time is None or self.runup_distance is None:
+            return
+
+        fig, axes = plt.subplots(1, 3, figsize=(14, 4))
+        ax_contour, ax_psd, ax_swash = axes
+
+        t = self.runup_time
+        d = self.runup_distance
+
+        # 1) Runup contour
+        ax_contour.plot(d, t, 'bo-', markersize=1, linewidth=0.5, label="Runup Contour")
+        ax_contour.set_xlabel("Cross-shore distance (m)")
+        ax_contour.set_ylabel("Time (s)")
+        ax_contour.set_title(f"Extracted Runup ({len(t)} pts)")
+        ax_contour.grid(True)
+        ax_contour.legend(fontsize="small", loc="upper center",
+                          bbox_to_anchor=(0.5, -0.25), ncol=1)
+
+        # 2) PSD
+        if self.psd_freq is not None and self.psd_power is not None:
+            try:
+                ig_threshold_hz = float(self.ig_threshold_entry.get())
+            except Exception:
+                ig_threshold_hz = 0.05
+            fxx, pxx = self.psd_freq, self.psd_power
+            ig_mask = fxx < ig_threshold_hz
+            E_ig = np.trapezoid(pxx[ig_mask], fxx[ig_mask])
+            E_tot = np.trapezoid(pxx, fxx)
+            ig_pct = 100 * E_ig / E_tot if E_tot > 0 else 0
+            ax_psd.plot(fxx, pxx, label='PSD')
+            ax_psd.fill_between(fxx, pxx, where=ig_mask, alpha=0.3,
+                                label=f'IG (<{ig_threshold_hz:.3g} Hz) {ig_pct:.1f}%')
+            ax_psd.set_xscale('log')
+            ax_psd.set_title(f'PSD (IG cutoff {ig_threshold_hz:.3g} Hz)')
+            ax_psd.set_ylabel('PSD')
+            ax_psd.set_xlabel('Frequency (Hz)')
+            ax_psd.legend(fontsize="small", loc="upper center",
+                          bbox_to_anchor=(0.5, -0.25), ncol=1)
+
+        # 3) Detrended swash
+        if self.runup_detrended_v is not None:
+            detr = self.runup_detrended_v
+            label = "Detrended Vertical Swash"
+            ylabel = "z'(t) (m)"
+        elif self.runup_detrended_h is not None:
+            detr = self.runup_detrended_h
+            label = "Detrended Swash"
+            ylabel = "d'(t) (m)"
+        else:
+            detr = None
+
+        if detr is not None:
+            ax_swash.plot(t, detr, linewidth=0.5, label=label)
+            sk = self._stockdon_result
+            if sk is not None:
+                obs_r2 = np.percentile(detr, 98)
+                unit_note = " (vert.)" if self.runup_vertical is not None else " (horiz.)"
+                ax_swash.axhline(sk["R2"], color="red", linestyle="--",
+                                 linewidth=1.2,
+                                 label=f'Stockdon R₂% = {sk["R2"]:.2f} m')
+                ax_swash.axhline(obs_r2, color="blue", linestyle=":",
+                                 linewidth=1.2,
+                                 label=f'Obs R₂% = {obs_r2:.2f} m{unit_note}')
+            ax_swash.set_title(label)
+            ax_swash.set_xlabel('Time (s)')
+            ax_swash.set_ylabel(ylabel)
+            ax_swash.legend(fontsize="small", loc="upper center",
+                            bbox_to_anchor=(0.5, -0.25), ncol=1)
+
+        fig.tight_layout(rect=[0, 0.08, 1, 1])
+        plot_name = os.path.splitext(csv_name)[0] + "_plot.png"
+        plot_path = os.path.join(self.output_folder, plot_name)
+        fig.savefig(plot_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        print(f"Clean plot saved: {plot_name}")
+
     def select_batch_raw_folder(self):
         folder = filedialog.askdirectory(parent=self, title="Select Folder with Raw TS Images")
         if folder:
@@ -1171,6 +1362,8 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         ig_threshold_hz = self._get_ig_threshold()
         if ig_threshold_hz is None:
             return
+
+        batch_slope_rad = self._get_beach_slope_rad()
 
         print("Batch process has started")
 
@@ -1304,16 +1497,35 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
 
             out_name = os.path.splitext(raw_name.replace("raw", "runup"))[0] + ".csv"
             out_path = os.path.join(self.output_folder, out_name)
+
+            # Compute vertical distance if slope given
+            if batch_slope_rad is not None:
+                v_sorted = d_sorted * np.tan(batch_slope_rad)
+            else:
+                v_sorted = None
+
+            # Compute detrended signals
+            h_detr = d_sorted - np.mean(d_sorted)
+            v_detr = (v_sorted - np.mean(v_sorted)) if v_sorted is not None else None
+
             with open(out_path, 'w', newline='') as csvfile:
                 writer = csv.writer(csvfile)
-                writer.writerow(["time", "distance", "format"])
-                for sec, dist in zip(t_sorted, d_sorted):
+                writer.writerow(["time", "horizontal_distance",
+                                 "horizontal_distance_detrended",
+                                 "vertical_distance",
+                                 "vertical_distance_detrended"])
+                for i, (sec, dist) in enumerate(zip(t_sorted, d_sorted)):
                     ts = (base_dt + datetime.timedelta(seconds=float(sec))).strftime("%Y-%m-%d-%H-%M-%S")
-                    writer.writerow([ts, dist, ann_format])
+                    vert = v_sorted[i] if v_sorted is not None else ""
+                    vd = v_detr[i] if v_detr is not None else ""
+                    writer.writerow([ts, dist, h_detr[i], vert, vd])
 
                 # Append Stockdon comparison if available
                 if batch_stockdon is not None:
-                    detr = d_sorted - np.mean(d_sorted)
+                    if v_sorted is not None:
+                        detr = v_sorted - np.mean(v_sorted)
+                    else:
+                        detr = d_sorted - np.mean(d_sorted)
                     obs_r2 = np.percentile(detr, 98)
                     csvfile.write(f"# Stockdon_R2%,{batch_stockdon['R2']:.4f}\n")
                     csvfile.write(f"# observed_R2%,{obs_r2:.4f}\n")
@@ -1347,7 +1559,11 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         self.ax_stats_swash.clear()
 
         for d_arr, t_arr in all_runup_data:
-            detr = d_arr - np.mean(d_arr)
+            if batch_slope_rad is not None:
+                signal = d_arr * np.tan(batch_slope_rad)
+            else:
+                signal = d_arr
+            detr = signal - np.mean(signal)
             dt = np.diff(t_arr)
             fs = 1.0 / np.mean(dt) if len(dt) > 0 else 1.0
             fxx, pxx = welch(detr, fs=fs, nperseg=min(256, len(detr)))
@@ -1370,13 +1586,18 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
                               label=f'Incident% (≥{ig_threshold_hz:.3g} Hz)')
         self.ax_stats_psd.set_xticks(idx)
         self.ax_stats_psd.set_xticklabels([str(i + 1) for i in idx])
+        self.ax_stats_psd.tick_params(axis='x', labelsize=4) 
         self.ax_stats_psd.set_ylabel('%')
         self.ax_stats_psd.set_title(f'Energy Partitioning (IG cutoff = {ig_threshold_hz:.3g} Hz)')
         self.ax_stats_psd.legend()
 
+        batch_ylabel = "z'(t) (m)" if batch_slope_rad is not None else "d'(t) (m)"
+        batch_swash_title = ('Vertical Swash Excursions (Batch)'
+                             if batch_slope_rad is not None
+                             else 'Swash Excursions (Batch)')
         self.ax_stats_swash.set_xlabel('Time (s)')
-        self.ax_stats_swash.set_ylabel("d'(t) (m)")
-        self.ax_stats_swash.set_title('Swash Excursions (Batch)')
+        self.ax_stats_swash.set_ylabel(batch_ylabel)
+        self.ax_stats_swash.set_title(batch_swash_title)
 
         # Overlay Stockdon R₂% on the batch swash plot if available
         if batch_stockdon is not None:

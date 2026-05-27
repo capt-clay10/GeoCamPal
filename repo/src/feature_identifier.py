@@ -99,10 +99,21 @@ class FeatureIdentifier(HSVMaskEditingMixin, HSVMaskProcessingMixin, HSVMaskUIMi
 
         self.mode = mode
         ctk.set_widget_scaling(1)
-        try:
-            self.iconbitmap(self.resource_path("launch_logo.ico"))
-        except Exception:
-            pass
+
+        # Set the window icon after a short delay — CTkToplevel resets the
+        # icon during construction, so an immediate call is overwritten.
+        def _set_icon():
+            try:
+                self.iconphoto(
+                    False,
+                    tk.PhotoImage(file=self.resource_path("launch_logo.png")),
+                )
+            except Exception:
+                try:
+                    self.iconbitmap(self.resource_path("launch_logo.ico"))
+                except Exception:
+                    pass
+        self.after(200, _set_icon)
 
         # --- State variables ---
         self.do_invert_mask = tk.BooleanVar(master=self, value=False)
@@ -213,9 +224,12 @@ class FeatureIdentifier(HSVMaskEditingMixin, HSVMaskProcessingMixin, HSVMaskUIMi
             fit_geometry(self.image_display_window, 1200, 800, resizable=True)
 
             try:
-                self.image_display_window.iconbitmap(
-                    self.resource_path("launch_logo.ico"))
-            except:
+                _idw = self.image_display_window
+                _idw.after(200, lambda: _idw.iconphoto(
+                    False,
+                    tk.PhotoImage(file=self.resource_path("launch_logo.png")),
+                ))
+            except Exception:
                 pass
 
             # Ensure image display window opens on top

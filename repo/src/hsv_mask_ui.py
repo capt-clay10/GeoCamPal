@@ -145,7 +145,7 @@ class BBoxSelectorWindow(tk.Toplevel):
     def confirm_bbox(self):
         if not self.bbox:
             messagebox.showwarning(
-                "BBox Selection", "No bounding box was selected.")
+                "BBox Selection", "No bounding box was selected.", parent=self)
             return
         x, y, w, h = self.bbox
         x_orig = int(x / self.zoom_scale)
@@ -603,17 +603,7 @@ class HSVMaskUIMixin:
             self.edge_thickness_slider.set(2)
             self.edge_thickness_slider.pack(side="top")
 
-        # ── Row 5: Export Options ──────────────────────────────────────────────────
-        export_frame = ctk.CTkFrame(parent)
-        export_frame.pack(side="top", fill="x", pady=5)
-
-        ctk.CTkLabel(export_frame, text="Export Folder:").pack(side="left", padx=5)
-        self.export_path_entry = ctk.CTkEntry(export_frame, width=200)
-        self.export_path_entry.pack(side="left", padx=5)
-        btn_browse = ctk.CTkButton(export_frame, text="Browse output folder", command=self.browse_export_folder, fg_color="#8C7738")
-        btn_browse.pack(side="left", padx=5)
-
-        # ── Row 6: Feature frame ───────────────────────────────────────────────────
+        # ── Row 5: Feature frame ───────────────────────────────────────────────────
         featureid_frame = ctk.CTkFrame(parent)
         featureid_frame.pack(side="top", fill="x", pady=5)
 
@@ -631,7 +621,7 @@ class HSVMaskUIMixin:
         self.category_id_entry.insert(0, "1")
         self.category_id_entry.pack(side="left", padx=5)
 
-        # ── Row 7: Export buttons or Batch button ──────────────────────────────────
+        # ── Row 6: Export buttons or Batch button ──────────────────────────────────
         export_buttons_frame = ctk.CTkFrame(parent)
         export_buttons_frame.pack(side="top", fill="x", pady=5)
 
@@ -653,8 +643,18 @@ class HSVMaskUIMixin:
                     export_buttons_frame, text="Export as Overlay", command=self.export_as_overlay, fg_color="#6693F5"
                 )
                 btn_export_overlay.pack(side="left", padx=5)
-        else:
-            # batch mode
+
+        # ── Row 7: Export folder, settings, reset (last config row) ───────────────
+        export_frame = ctk.CTkFrame(parent)
+        export_frame.pack(side="top", fill="x", pady=5)
+
+        ctk.CTkLabel(export_frame, text="Export Folder:").pack(side="left", padx=5)
+        self.export_path_entry = ctk.CTkEntry(export_frame, width=200)
+        self.export_path_entry.pack(side="left", padx=5)
+        btn_browse = ctk.CTkButton(export_frame, text="Browse output folder", command=self.browse_export_folder, fg_color="#8C7738")
+        btn_browse.pack(side="left", padx=5)
+
+        if self.mode == "batch":
             btn_batch_process = ctk.CTkButton(export_frame, text="Batch Process", command=self.batch_process)
             btn_batch_process.pack(side="left", padx=5)
 
@@ -771,7 +771,7 @@ class HSVMaskUIMixin:
     def open_bbox_selector(self):
         if self.full_image is None:
             messagebox.showwarning(
-                "BBox Selector", "Please load an image first.")
+                "BBox Selector", "Please load an image first.", parent=self)
             return
         if self.full_image.ndim == 3:
             pil_img = Image.fromarray(cv2.cvtColor(
@@ -843,7 +843,7 @@ class HSVMaskUIMixin:
     def _aoi_draw_on_image(self):
         """Open a click-to-draw popup to define the profile line."""
         if self.full_image is None:
-            messagebox.showwarning("AOI", "Please load an image first.")
+            messagebox.showwarning("AOI", "Please load an image first.", parent=self)
             return
         if self.full_image.ndim == 3:
             pil_img = Image.fromarray(cv2.cvtColor(self.full_image, cv2.COLOR_BGR2RGB))
@@ -901,7 +901,7 @@ class HSVMaskUIMixin:
         """Show 1D intensity profile with threshold markers, zoom toolbar, and hover cursor."""
         import numpy as np
         if self.full_image is None:
-            messagebox.showwarning("AOI", "No image loaded.")
+            messagebox.showwarning("AOI", "No image loaded.", parent=self)
             return
         try:
             x1 = int(self.aoi_x1_entry.get())
@@ -909,7 +909,7 @@ class HSVMaskUIMixin:
             x2 = int(self.aoi_x2_entry.get())
             y2 = int(self.aoi_y2_entry.get())
         except (ValueError, TypeError):
-            messagebox.showwarning("AOI", "Define profile coordinates first.")
+            messagebox.showwarning("AOI", "Define profile coordinates first.", parent=self)
             return
 
         avg_w = max(1, int(self.aoi_width_entry.get() or "5"))
@@ -1027,7 +1027,7 @@ class HSVMaskUIMixin:
         """Build the AOI mask from the profile threshold range or polygon."""
         import numpy as np
         if self.full_image is None:
-            messagebox.showwarning("AOI", "No image loaded.")
+            messagebox.showwarning("AOI", "No image loaded.", parent=self)
             return
 
         # Check if we have a polygon AOI (drawn or from text entry)
@@ -1057,7 +1057,7 @@ class HSVMaskUIMixin:
                 min_val = int(self.aoi_min_entry.get())
                 max_val = int(self.aoi_max_entry.get())
             except (ValueError, TypeError):
-                messagebox.showwarning("AOI", "Set Min and Max values first (use Preview Profile).")
+                messagebox.showwarning("AOI", "Set Min and Max values first (use Preview Profile).", parent=self)
                 return
 
             gray = cv2.cvtColor(self.full_image, cv2.COLOR_BGR2GRAY) if self.full_image.ndim == 3 else self.full_image.copy()
@@ -1125,7 +1125,7 @@ class HSVMaskUIMixin:
         """Open a popup where the user clicks vertices to define a polygon AOI."""
         import numpy as np
         if self.full_image is None:
-            messagebox.showwarning("AOI", "Please load an image first.")
+            messagebox.showwarning("AOI", "Please load an image first.", parent=self)
             return
 
         if self.full_image.ndim == 3:
@@ -1281,7 +1281,7 @@ class HSVMaskUIMixin:
         import numpy as np
 
         if self.full_image is None:
-            messagebox.showwarning("Color Picker", "Load an image first.")
+            messagebox.showwarning("Color Picker", "Load an image first.", parent=self)
             return
 
         self._normalise_color_pick_points()
@@ -1546,9 +1546,9 @@ class HSVMaskUIMixin:
                 self, "feature_identifier", data, initialdir=export_dir)
             if path:
                 messagebox.showinfo(
-                    "Save Settings", f"Settings saved to {path}")
+                    "Save Settings", f"Settings saved to {path}", parent=self)
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to save settings: {e}")
+            messagebox.showerror("Error", f"Failed to save settings: {e}", parent=self)
 
     def _build_selector_payload(self):
         """Build selector geometry dict (pixel-first, world when available)."""
@@ -1744,7 +1744,7 @@ class HSVMaskUIMixin:
             self._update_batch_settings_summary(data)
 
         messagebox.showinfo(
-            "Load Settings", f"Settings loaded from {file_path}")
+            "Load Settings", f"Settings loaded from {file_path}", parent=self)
 
     def _update_batch_settings_summary(self, data):
         """Update the batch mode summary label showing which pipeline steps are active."""

@@ -16,6 +16,7 @@ Supported color spaces:  RGB · HSV · LAB · Normalised RGB (r, g, b)
 Outputs:
   • color_stats.csv     — per-image channel statistics
   • outliers.txt        — images > N σ from dataset mean (optional)
+  • color_explorer_plots.png — combined figure (all three panels)
   • Plots exportable as PNG from the matplotlib toolbar
 """
 
@@ -232,6 +233,7 @@ class ColorSpaceExplorerWindow(ctk.CTkToplevel):
         self._analysis_thread = None
         self._pending_reset = False
         self._pending_close = False
+        self._scatter_cbar = None  # track colorbar so we can remove it on re-run
 
         # ——— layout: 3 rows — plots | console | controls ———
         self.grid_rowconfigure(0, weight=3)
@@ -507,6 +509,7 @@ class ColorSpaceExplorerWindow(ctk.CTkToplevel):
             "OUTPUTS (saved to the output folder)\n"
             "  color_stats.csv   — Per-image channel statistics + class label.\n"
             "  outliers.txt      — Images flagged as color outliers.\n"
+            "  color_explorer_plots.png — Combined figure (all three panels).\n"
             "\n"
             "WORKFLOW TIPS\n"
             "  • Use RGB or LAB to inspect general brightness / color drift.\n"
@@ -628,6 +631,14 @@ class ColorSpaceExplorerWindow(ctk.CTkToplevel):
         self.eta_label.configure(text="")
         self.recursive_var.set(False)
 
+        # Remove colorbar before clearing axes
+        if self._scatter_cbar is not None:
+            try:
+                self._scatter_cbar.remove()
+            except Exception:
+                pass
+            self._scatter_cbar = None
+
         for ax in self.axes:
             ax.clear()
             ax.axis("off")
@@ -644,19 +655,19 @@ class ColorSpaceExplorerWindow(ctk.CTkToplevel):
         """Open a popup showing the first image in the folder; user clicks
         vertices to define a polygon AOI.  Double-click to close."""
         if not self.input_folder:
-            messagebox.showwarning("AOI", "Select an image folder first.")
+            messagebox.showwarning("AOI", "Select an image folder first.", parent=self)
             return
 
         images = collect_images(self.input_folder, self.recursive_var.get())
         if not images:
-            messagebox.showwarning("AOI", "No images found in the folder.")
+            messagebox.showwarning("AOI", "No images found in the folder.", parent=self)
             return
 
         # Load the first image for reference
         ref_path = images[0]
         ref_bgr = cv2.imread(str(ref_path))
         if ref_bgr is None:
-            messagebox.showerror("AOI", f"Cannot read: {ref_path.name}")
+            messagebox.showerror("AOI", f"Cannot read: {ref_path.name}", parent=self)
             return
 
         ref_rgb = cv2.cvtColor(ref_bgr, cv2.COLOR_BGR2RGB)
@@ -720,7 +731,8 @@ class ColorSpaceExplorerWindow(ctk.CTkToplevel):
             pts = self.aoi_polygon_pts
             if len(pts) < 3:
                 messagebox.showwarning("AOI",
-                                       "Need at least 3 vertices.")
+                                       "Need at least 3 vertices.",
+                                       parent=win)
                 return
             # Close polygon visually
             p1, p2 = pts[-1], pts[0]
@@ -774,7 +786,8 @@ class ColorSpaceExplorerWindow(ctk.CTkToplevel):
         ground_frac = max(0.0, min(ground_pct / 100.0, 0.9))
         if sky_frac + ground_frac >= 1.0:
             messagebox.showwarning("Warning",
-                                   "Sky + ground crop must be < 100%.")
+                                   "Sky + ground crop must be < 100%.",
+                                   parent=self)
             return None
 
         try:
@@ -839,13 +852,13 @@ class ColorSpaceExplorerWindow(ctk.CTkToplevel):
         self._ui_call(self.eta_label.configure, text=text)
 
     def _show_warning(self, title, message):
-        self._ui_call(messagebox.showwarning, title, message)
+        self._ui_call(lambda: messagebox.showwarning(title, message, parent=self))
 
     def _show_info(self, title, message):
-        self._ui_call(messagebox.showinfo, title, message)
+        self._ui_call(lambda: messagebox.showinfo(title, message, parent=self))
 
     def _show_error(self, title, message):
-        self._ui_call(messagebox.showerror, title, message)
+        self._ui_call(lambda: messagebox.showerror(title, message, parent=self))
 
     def _draw_canvas(self):
         self._ui_call(self.canvas_plot.draw)
@@ -1017,6 +1030,13 @@ class ColorSpaceExplorerWindow(ctk.CTkToplevel):
             # ---- Plot 2: 2-D scatter density --------------------------
             print("Generating 2-D scatter density …")
             ax1 = self.axes[1]
+            # Remove previous colorbar before clearing axes
+            if self._scatter_cbar is not None:
+                try:
+                    self._scatter_cbar.remove()
+                except Exception:
+                    pass
+                self._scatter_cbar = None
             ax1.clear()
             sx = params["scatter_x"]
             sy = params["scatter_y"]
@@ -1030,7 +1050,8 @@ class ColorSpaceExplorerWindow(ctk.CTkToplevel):
                 hb = ax1.hexbin(x_data, y_data,
                                 gridsize=80, cmap="inferno",
                                 mincnt=1, linewidths=0.1)
-                self.fig.colorbar(hb, ax=ax1, label="count", shrink=0.8)
+                self._scatter_cbar = self.fig.colorbar(
+                    hb, ax=ax1, label="count", shrink=0.8)
                 ax1.set_xlim(ch_ranges[sx])
                 ax1.set_ylim(ch_ranges[sy])
 
@@ -1085,7 +1106,25 @@ class ColorSpaceExplorerWindow(ctk.CTkToplevel):
                 ax2.set_ylabel("Value")
                 ax2.legend(fontsize="small")
                 ax2.grid(True, alpha=0.2)
-                ax2.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
+
+                # Smart tick placement based on the date span
+                date_span = (dts[-1] - dts[0]).total_seconds() / 86400  # days
+                if date_span < 60:
+                    # Short span: one tick per day avoids duplicate labels
+                    ax2.xaxis.set_major_locator(mdates.DayLocator())
+                    ax2.xaxis.set_major_formatter(
+                        mdates.DateFormatter("%Y-%m-%d"))
+                elif date_span < 365:
+                    ax2.xaxis.set_major_locator(
+                        mdates.AutoDateLocator(minticks=4, maxticks=10))
+                    ax2.xaxis.set_major_formatter(
+                        mdates.DateFormatter("%Y-%m-%d"))
+                else:
+                    ax2.xaxis.set_major_locator(
+                        mdates.AutoDateLocator(minticks=4, maxticks=10))
+                    ax2.xaxis.set_major_formatter(
+                        mdates.DateFormatter("%Y-%m"))
+
                 self.fig.autofmt_xdate()
                 print(f"  {len(dated)} images with parseable timestamps.")
             else:
@@ -1207,8 +1246,19 @@ class ColorSpaceExplorerWindow(ctk.CTkToplevel):
                             f.write(f"{o['filename']}\t{o['max_z']:.3f}\t"
                                     f"{o['channel']}\t{o['value']:.3f}\n")
                     print(f"Saved: {out_path}")
+
+                # Plot — save the combined figure
+                try:
+                    combined_path = os.path.join(
+                        self.output_folder, "color_explorer_plots.png")
+                    self.fig.savefig(combined_path, dpi=180,
+                                     bbox_inches="tight",
+                                     facecolor="white")
+                    print(f"Saved: {combined_path}")
+                except Exception as plot_err:
+                    print(f"  [WARNING] Could not save plot: {plot_err}")
             else:
-                print("\nNo output folder selected — CSV/outlier "
+                print("\nNo output folder selected — CSV/outlier/plot "
                       "files not saved.")
 
             self._set_progress(1.0)
@@ -1230,6 +1280,14 @@ class ColorSpaceExplorerWindow(ctk.CTkToplevel):
             import traceback
             traceback.print_exc()
             self._show_error("Error", str(e))
+
+        finally:
+            self._is_running = False
+            self._cancel_requested = False
+            if self._pending_close:
+                self._ui_call(self._finalize_close)
+            elif self._pending_reset:
+                self._ui_call(self._reset)
 
 
 # ——— standalone ———

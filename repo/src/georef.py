@@ -24,6 +24,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 from osgeo import gdal, osr
 gdal.UseExceptions()
+gdal.PushErrorHandler('CPLQuietErrorHandler')   # suppress non-fatal TIFF warnings
 
 from utils import fit_geometry, resource_path, setup_console, restore_console, save_settings_json, load_settings_json
 
@@ -251,13 +252,14 @@ def _write_geotiff(path, bgr, alpha, gt, epsg, lock=None):
     def _do():
         drv = gdal.GetDriverByName("GTiff")
         ds = drv.Create(path, w, h, 4, gdal.GDT_Byte,
-                        ["COMPRESS=DEFLATE","TILED=YES","ALPHA=YES"])
+                        ["COMPRESS=DEFLATE","TILED=YES"])
         if ds is None: return False
         ds.SetGeoTransform(gt)
         srs = osr.SpatialReference(); srs.ImportFromEPSG(int(epsg))
         ds.SetProjection(srs.ExportToWkt())
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
         for i in range(3): ds.GetRasterBand(i+1).WriteArray(rgb[:,:,i])
+        ds.GetRasterBand(4).SetColorInterpretation(gdal.GCI_AlphaBand)
         ds.GetRasterBand(4).WriteArray(alpha)
         ds.FlushCache(); ds = None; return True
     if lock:
@@ -497,7 +499,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
         super().__init__(master=master, **kw)
         self.title("Georeferencing Tool")
         fit_geometry(self, 1250, 900, resizable=True)
-        try: self.iconbitmap(resource_path("launch_logo.ico"))
+        try: self.after(200, lambda: self.iconphoto(False, tk.PhotoImage(file=resource_path("launch_logo.png"))))
         except: pass
         self._img_path = ""
         self._method_key = "homo"
@@ -831,6 +833,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
         if img is None: messagebox.showerror("Error", "Cannot read image.", parent=self); return
         self._show(self._img_path, self._orig_lbl)
         mk = self._method_key; scale = self._get_scale()
+        print(f"\n[Initial Georef] Starting initial georeferencing ({self._method_var.get()})…")
         try:
             hi, wi = img.shape[:2]
             source_corners = self._get_source_corners(hi, wi)
@@ -885,6 +888,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
                     mg = max(50, (ex.max()-ex.min())*0.05)
                     te = [ex.min()-mg, ey.min()-mg, ex.max()+mg, ey.max()+mg]
                 gcps, epsg = _make_gdal_gcps(df)
+                epsg = epsg if epsg else self.user_epsg
                 srs = osr.SpatialReference(); srs.ImportFromEPSG(epsg)
                 gsd = _estimate_gsd(df)
                 import tempfile
@@ -994,6 +998,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
         img = cv2.imread(self._img_path)
         if img is None: messagebox.showerror("Error", "Cannot read image.", parent=self); return
         mk = self._method_key; scale = self._get_scale(); aoi = self._aoi
+        print(f"\n[Secondary Georef] Starting secondary georeferencing ({self._method_var.get()})…")
         try:
             hi, wi = img.shape[:2]
             source_corners = self._get_source_corners(hi, wi)
@@ -1041,7 +1046,8 @@ class GeoReferenceModule(ctk.CTkToplevel):
                 df = self._get_working_df()
                 if df is None or len(df) < 4: messagebox.showerror("Error", "Need >= 4 GCPs.", parent=self); return
                 if not self._resolve_epsg(): return
-                gcps, epsg = _make_gdal_gcps(df); srs = osr.SpatialReference(); srs.ImportFromEPSG(epsg)
+                gcps, epsg = _make_gdal_gcps(df); epsg = epsg if epsg else self.user_epsg
+                srs = osr.SpatialReference(); srs.ImportFromEPSG(epsg)
                 gsd = _estimate_gsd(df)
                 if aoi and self._preview_gt:
                     gt = self._preview_gt; x1, y1, x2, y2 = aoi
@@ -1092,6 +1098,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
             return _write_geotiff(out_path, rect, alpha, gt, self.user_epsg, self._lock)
         else:
             df = self._get_working_df(); gcps, epsg = _make_gdal_gcps(df)
+            epsg = epsg if epsg else self.user_epsg
             srs = osr.SpatialReference(); srs.ImportFromEPSG(epsg)
             gsd = abs(self._preview_gt[1]) if self._preview_gt else _estimate_gsd(df)
             if self._aoi and self._preview_gt:
