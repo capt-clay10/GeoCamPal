@@ -1,7 +1,7 @@
 # GeoCamPal
 
 <p align="center">
-  <img src="https://img.shields.io/github/license/capt-clay10/GeoCamPal?style=for-the-badge" alt="License">
+  <img src="https://img.shields.io/badge/license-MIT-green?style=for-the-badge" alt="License">
   <img src="https://img.shields.io/badge/python-3.8%2B-blue?style=for-the-badge" alt="Python 3.8+">
 </p>
 
