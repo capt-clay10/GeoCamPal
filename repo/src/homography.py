@@ -1,3 +1,74 @@
+"""
+homography.py  —  GeoCamPal Homography Matrix Tool
+===================================================
+
+Purpose
+-------
+Computes a 3×3 homography matrix that maps pixel coordinates from a
+coastal camera image to real-world (map) coordinates, using a set of
+Ground Control Points (GCPs).  The resulting matrix is saved as a
+plain-text file and can be loaded directly by the Georeferencing module
+for image rectification.
+
+Method
+------
+Points are normalised before computation (isotropic scaling to mean
+distance sqrt(2) from the centroid) to improve numerical conditioning.
+OpenCV's RANSAC-based findHomography is then applied to the normalised
+point sets and the result is denormalised back to the original coordinate
+frames.
+
+GCPs
+----
+Input is a CSV file with at minimum the columns:
+
+    GCP_ID    — unique identifier (e.g. GCP_1, GCP_2, …)
+    Pixel_X   — column coordinate in the image (pixels)
+    Pixel_Y   — row coordinate in the image (pixels)
+    Real_X    — easting / longitude in the target CRS
+    Real_Y    — northing / latitude in the target CRS
+
+An optional EPSG column is read if present and embedded as a comment
+in the output .txt file so the Georeferencing module can recover the
+CRS without manual entry.  A minimum of 4 GCPs is required.
+
+Individual GCPs can be excluded by entering their numeric suffixes
+(e.g. "6,7,12" excludes GCP_6, GCP_7, GCP_12) before computing.
+
+Accuracy
+--------
+After the matrix is computed, Compute Accuracy projects every pixel
+point through H and reports the per-GCP residual in map units (metres).
+Mean error across all GCPs is also printed to the console.
+
+Simulated annealing (Advanced)
+-------------------------------
+When the Advanced panel is enabled, a simulated annealing search finds
+the subset of GCPs that minimises a composite cost function combining
+mean error, standard deviation, and penalties for large outliers and low
+inlier fraction.  Parameters:
+
+    Number of GCPs       — subset size used per candidate solution
+    Max iterations       — total SA iterations
+    Initial temperature  — starting acceptance temperature
+    Cooling rate         — geometric cooling factor per iteration
+    Number of swaps      — GCPs swapped per candidate move
+    RANSAC threshold     — pixel tolerance for OpenCV RANSAC inside SA
+
+The best matrix found is exported separately as <name>_bestsubset.txt.
+
+Outputs
+-------
+    <name>.txt             — 3×3 homography matrix (space-delimited),
+                             optional EPSG comment on the first line
+    <name>_bestsubset.txt  — SA-optimised matrix (Advanced mode only)
+
+Dependencies
+------------
+    numpy, opencv-python (cv2), pandas, customtkinter, utils, csv_utils
+"""
+
+
 import numpy as np
 import cv2
 import pandas as pd

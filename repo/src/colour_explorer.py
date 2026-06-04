@@ -1,23 +1,57 @@
 """
-Color Space Explorer
+colour_explorer.py  —  GeoCamPal Color Space Explorer
+======================================================
 
-Exploratory analysis of color distributions across a folder of images.
-Treats images as data — visualises color-channel distributions, scatter
-density clouds, and temporal color signatures.
+Purpose
+-------
+Batch-analyses color distributions across a folder of images and
+produces three diagnostic plots side-by-side: smoothed per-channel
+histograms, a 2-D scatter-density plot of any two channels, and a
+temporal color timeline keyed to timestamps in the filenames.
+A configurable z-score threshold flags images whose mean channel
+values deviate significantly from the dataset mean (outlier detection).
 
-Analysis modes:
-  • Channel histograms  — per-channel distribution across all images
-  • 2-D scatter density — joint distribution of any two color channels
-  • Color timeline      — channel statistics vs. image timestamp
-  • Outlier detection   — flag images with anomalous color profiles
+The module is self-contained and can be launched standalone or opened
+from the GeoCamPal main launcher.
 
-Supported color spaces:  RGB · HSV · LAB · Normalised RGB (r, g, b)
+Supported color spaces
+----------------------
+    RGB             — raw red, green, blue (0–255)
+    HSV             — hue (0–180), saturation (0–255), value (0–255)
+    LAB             — CIE L*, a*, b* via OpenCV (uint8 range 0–255)
+    Normalised RGB  — r = R/(R+G+B), g, b  (range 0–1)
 
-Outputs:
-  • color_stats.csv     — per-image channel statistics
-  • outliers.txt        — images > N σ from dataset mean (optional)
-  • color_explorer_plots.png — combined figure (all three panels)
-  • Plots exportable as PNG from the matplotlib toolbar
+Inputs
+------
+    Image folder    — JPEG, PNG, BMP, TIFF (optionally recursive)
+    AOI polygon     — optional; drawn interactively on the first image
+    Feature class   — optional free-text label written to CSV output
+
+Outputs  (saved to the user-selected output folder)
+-------
+    color_stats.csv           — per-image channel statistics (mean, std,
+                                median, p05, p95) plus datetime and label
+    outliers.txt              — filenames exceeding the sigma threshold
+    color_explorer_plots.png  — combined figure of all three panels
+
+Timestamp parsing
+-----------------
+Datetimes are extracted from filenames using a set of common coastal
+camera naming conventions (e.g. YYYY_MM_DD_HH_MM_SS).  A custom
+strftime format string can be provided if the auto-detection fails.
+
+Dependencies
+------------
+    numpy, opencv-python (cv2), matplotlib, customtkinter, Pillow
+
+Notes
+-----
+    Timestamp parsing is duplicated from exploration.py so that this
+    module remains standalone and importable without the full package.
+
+    The scatter density plot uses matplotlib hexbin rather than
+    individual scatter points; this keeps rendering fast when thousands
+    of pixel samples are drawn from hundreds of images.
 """
 
 # %% ————————————————————————————— imports —————————————————————————————

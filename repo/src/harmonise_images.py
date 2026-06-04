@@ -1,30 +1,117 @@
 """
-Harmonise Images
+harmonise_images.py  —  GeoCamPal Harmonise Images
+====================================================
 
-Three sub‑tasks in one window:
-  1. **Filter bad images** — robust blur, clipping‑based over‑exposure,
-     under‑exposure, darkness, low‑information (entropy), rain/droplets
-     on lens, partial obstruction detection, and failed/corrupt image
-     detection (0‑byte, truncated, or unreadable files).
-  2. **Harmonise brightness** — luminance‑based gain (with soft‑knee) or
-     L‑channel histogram matching, optional sky masking for reference
-     computation, and post‑correction sanity check.
-  3. **Harmonise colour** — full‑colour transfer to a user‑selected
-     reference image using Reinhard, per‑channel LAB histogram matching,
-     or iterative distribution transfer (Pitié et al., 2007).
+Purpose
+-------
+Pre-processing pipeline for coastal camera image sequences.  Four
+sub-tasks are available in a single window; they can be run
+independently or in sequence as part of a workflow.
 
-Both harmonisation stages include a **preview** system: a random 5 %
-sample (minimum 1) is processed first and shown as before/after pairs
-with Next/Previous navigation.  The user can inspect and then commit
-with "Process All".
+Sub-tasks
+---------
+1. Filter bad images
+   Scans every image and assigns a pass/fail verdict using a
+   combination of signal-quality metrics:
 
-Outputs:
-  • bad_images.txt / bad_images.json  — list of identified bad images and reasons
-  • _filtered_good/                   — optional export of images that passed filtering
-  • _brightness_harmonised/           — brightness‑corrected images
-  • _colour_harmonised/               — colour‑corrected images
+       blur             — Laplacian variance, with a uniform-scene
+                          guard to avoid false positives on calm water
+                          or overcast sky, and an optional block-wise
+                          test for partial obstructions (frost, ice).
+       clipped_overexposed — pixels saturated in all three channels,
+                          distinguishing true overexposure from bright
+                          natural features such as white sand.
+       underexposed     — excess dark pixels relative to a threshold.
+       too_dark         — maximum pixel value below a floor (nighttime,
+                          camera failure).
+       low_information  — image entropy below threshold; catches fog,
+                          haze, and lens condensation.
+       lens_droplets    — bright residuals from rain or droplets after
+                          Gaussian smoothing.
+       obstruction      — grid-based dark-block fraction to catch
+                          foreign objects or bird on the housing.
 
-Originals are NEVER modified or overwritten.
+   Failed images are listed in bad_images.txt and bad_images.json.
+   Passing images can optionally be copied to a _filtered_good/ folder.
+
+2. Harmonise brightness
+   Corrects inter-image luminance variation relative to a reference
+   image or a target mean L value.  Two algorithms are available:
+
+       Soft-gain match  — linear L-channel gain with a soft-knee rolloff
+                          above a configurable threshold to prevent hard
+                          highlight clipping.
+       Histogram match  — full L-channel CDF matching via scikit-image;
+                          falls back to soft-gain if skimage is absent.
+
+   Both algorithms include a saturation-preservation step that restores
+   the original HSV-S channel after the L correction, preventing colour
+   washout on low-chroma scenes (coastal, overcast, dawn/dusk).
+   A post-correction sanity check reverts any image whose corrected mean
+   L is further from the reference than the original.
+   An optional sky mask excludes the top N% of the image from the
+   reference luminance calculation.
+   Output goes to _brightness_harmonised/.
+
+3. Harmonise colour
+   Transfers colour characteristics from a single reference image to
+   all others.  Three algorithms are available:
+
+       Reinhard (fast)         — per-channel LAB mean/std shift
+                                 (Reinhard et al., 2001).  Fast;
+                                 suitable for same-scene time-lapse.
+       Histogram Match (LAB)   — per-channel LAB CDF matching via
+                                 scikit-image.  Better for larger
+                                 colour shifts.
+       Iterative Transfer      — 3-D distribution transfer in LAB space
+                                 via random rotations and 1-D histogram
+                                 matching (Pitié et al., 2007).  Best
+                                 quality; slowest.
+
+   A post-correction sanity check reverts images whose mean LAB
+   distance to the reference worsened after correction.
+   Output goes to _colour_harmonised/.
+
+4. Lens correction
+   Applies camera lens undistortion using a calibration file (.pkl)
+   produced by the Lens Correction tool.  K is scaled proportionally
+   when the image dimensions differ from the calibration resolution
+   (same sensor, different output size).  Rectification maps are cached
+   per unique (W, H) to avoid redundant computation.  Images with an
+   incompatible aspect ratio are skipped with a warning.
+   Output goes to _lens_corrected/.
+
+Preview system
+--------------
+Both harmonisation stages and lens correction generate a before/after
+preview from a 5% random sample (minimum 1 image) before committing
+to the full batch.  Results are shown as side-by-side pairs with
+Next/Previous navigation.
+
+TIFF metadata preservation
+--------------------------
+When processing georeferenced TIFFs, the CRS, affine transform, nodata
+value, extra bands (alpha, NIR, masks), and TIFF tags are read from the
+source file and written unchanged to the output.  Only the RGB channels
+are modified.  Requires rasterio; plain 3-band TIFFs fall back to
+cv2.imwrite.
+
+Originals are never modified or overwritten.
+
+Outputs  (written to the user-selected output folder)
+-------
+    bad_images.txt             — tab-separated filenames and reason codes
+    bad_images.json            — structured list of {filename, reasons}
+    _filtered_good/            — images that passed all filters (optional)
+    _brightness_harmonised/    — brightness-corrected images
+    _colour_harmonised/        — colour-corrected images
+    _lens_corrected/           — lens-undistorted images
+
+Dependencies
+------------
+    numpy, opencv-python (cv2), matplotlib, customtkinter,
+    scikit-image (optional, for histogram matching),
+    rasterio (optional, for GeoTIFF metadata preservation)
 """
 
 # %% ————————————————————————————— imports —————————————————————————————
@@ -66,10 +153,138 @@ try:
 except ImportError:
     HAS_SKIMAGE = False
 
+try:
+    import rasterio
+    HAS_RASTERIO = True
+except ImportError:
+    HAS_RASTERIO = False
+
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("green")
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
+
+
+# %% ————————————————————————————— TIFF preservation helpers ————————————
+
+def _read_tiff_metadata(path):
+    """
+    Read metadata from a TIFF file that should be preserved through
+    harmonisation.
+
+    Returns a dict when the file is a TIF **and** carries data beyond a
+    plain 3‑band RGB raster (geo‑referencing, extra bands, tags, etc.).
+    Returns ``None`` for non‑TIF formats, plain 3‑band TIFs without any
+    geo info, or when rasterio is unavailable — in those cases the caller
+    falls back to ``cv2.imwrite`` which is perfectly adequate.
+
+    Checked metadata:
+      • CRS and affine transform  (geo‑referencing)
+      • Band count               (alpha, masks, NIR, …)
+      • Nodata value
+      • TIFF tags                 (AREA_OR_POINT, etc.)
+      • Compression scheme
+      • Per‑band colour interpretation
+    """
+    if not HAS_RASTERIO:
+        return None
+    ext = Path(path).suffix.lower()
+    if ext not in {".tif", ".tiff"}:
+        return None
+    try:
+        with rasterio.open(str(path)) as src:
+            has_geo = not (src.crs is None
+                          and src.transform == rasterio.transform.Affine.identity())
+            has_extra_bands = src.count > 3
+
+            if not has_geo and not has_extra_bands:
+                return None  # plain 3‑band TIFF, nothing special to keep
+
+            return {
+                "crs": src.crs,
+                "transform": src.transform,
+                "nodata": src.nodata,
+                "count": src.count,
+                "dtype": src.dtypes[0],
+                "tags": src.tags(),
+                "compress": src.profile.get("compress", "deflate"),
+                "colorinterp": [ci.name for ci in src.colorinterp],
+                "has_geo": has_geo,
+            }
+    except Exception:
+        return None
+
+
+def _save_preserving_tiff(out_path, img_bgr, tiff_meta, source_path=None):
+    """
+    Save *img_bgr* (OpenCV BGR uint8 array) to *out_path*, preserving
+    any TIFF metadata and extra bands from the original source file.
+
+    Harmonisation only modifies the RGB channels.  Everything else in the
+    source file — alpha, masks, NIR bands, CRS, affine transform, nodata,
+    TIFF tags — is read back from *source_path* and written unchanged.
+
+    When *tiff_meta* is ``None`` (non‑TIF input, or a plain 3‑band TIF
+    with no geo info), this falls back to ``cv2.imwrite`` — identical to
+    the original behaviour.
+
+    Parameters
+    ----------
+    out_path : Path or str
+        Destination file path.
+    img_bgr : ndarray
+        The harmonised image in OpenCV BGR uint8 format (H, W, 3).
+    tiff_meta : dict or None
+        Metadata dict from ``_read_tiff_metadata()``, or ``None``.
+    source_path : Path or str or None
+        Original source file.  Required when the source had extra bands
+        (band 4+) so they can be read back and re‑attached.
+    """
+    if tiff_meta is None or not HAS_RASTERIO:
+        cv2.imwrite(str(out_path), img_bgr)
+        return
+
+    h, w = img_bgr.shape[:2]
+    rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+
+    # ── recover extra bands (4+) from the source file ──────────────
+    orig_band_count = tiff_meta["count"]
+    extra_bands = []  # list of 2‑D arrays, one per extra band
+    if orig_band_count > 3 and source_path is not None:
+        try:
+            with rasterio.open(str(source_path)) as src:
+                for b in range(4, orig_band_count + 1):  # 1‑indexed
+                    extra_bands.append(src.read(b))
+        except Exception:
+            extra_bands = []
+
+    out_count = 3 + len(extra_bands)
+
+    # ── build output profile ───────────────────────────────────────
+    profile = {
+        "driver": "GTiff",
+        "height": h,
+        "width": w,
+        "count": out_count,
+        "dtype": "uint8",
+        "compress": tiff_meta.get("compress", "deflate"),
+    }
+    if tiff_meta.get("has_geo"):
+        profile["crs"] = tiff_meta["crs"]
+        profile["transform"] = tiff_meta["transform"]
+    if tiff_meta.get("nodata") is not None:
+        profile["nodata"] = tiff_meta["nodata"]
+
+    # ── write ──────────────────────────────────────────────────────
+    with rasterio.open(str(out_path), "w", **profile) as dst:
+        dst.write(rgb[:, :, 0], 1)
+        dst.write(rgb[:, :, 1], 2)
+        dst.write(rgb[:, :, 2], 3)
+        for i, band in enumerate(extra_bands):
+            dst.write(band, 4 + i)
+        tags = tiff_meta.get("tags")
+        if tags:
+            dst.update_tags(**tags)
 
 # %% ————————————————————————————— image quality filters ———————————————
 
@@ -2413,7 +2628,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
                 counts[mode] = counts.get(mode, 0) + 1
 
                 out_path = self._build_preserved_output_path(p, input_root, cfg["output_folder"], "brightness_harmonised")
-                cv2.imwrite(str(out_path), corrected)
+                _save_preserving_tiff(out_path, corrected, _read_tiff_metadata(p), source_path=p)
 
                 if (idx + 1) % 20 == 0 or idx == 0:
                     print(f"  {idx + 1}/{len(images)} | {p.name} | dL={delta:+.1f} -> {mode}")
@@ -2547,7 +2762,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
                     counts["corrected"] += 1
 
                 out_path = self._build_preserved_output_path(p, input_root, cfg["output_folder"], "colour_harmonised")
-                cv2.imwrite(str(out_path), corrected)
+                _save_preserving_tiff(out_path, corrected, _read_tiff_metadata(p), source_path=p)
 
                 if (idx + 1) % 10 == 0 or idx == 0:
                     print(f"  {idx + 1}/{len(images)} | {p.name}")
@@ -2634,6 +2849,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
                 ref_shape = None
                 valid_count = 0
                 skipped_local = 0
+                first_valid_path = None
                 for p in imgs:
                     if self._cancel_requested:
                         self._ui_set_eta("Cancelled")
@@ -2647,6 +2863,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
                         ref_shape = img.shape
                         accum = img.astype(np.float64)
                         valid_count = 1
+                        first_valid_path = p
                     elif img.shape == ref_shape:
                         accum += img.astype(np.float64)
                         valid_count += 1
@@ -2671,9 +2888,11 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
                     out_dir = out_root
 
                 out_dir.mkdir(parents=True, exist_ok=True)
-                out_name = f"{folder_path.name}_average.png"
+                geo_meta = _read_tiff_metadata(first_valid_path) if first_valid_path else None
+                out_ext = ".tif" if geo_meta is not None else ".png"
+                out_name = f"{folder_path.name}_average{out_ext}"
                 out_path = out_dir / out_name
-                cv2.imwrite(str(out_path), avg)
+                _save_preserving_tiff(out_path, avg, geo_meta, source_path=first_valid_path)
                 written_count += 1
                 print(f"  Wrote average for {folder_path}: {out_path.name} ({valid_count} images, {skipped_local} skipped)")
                 self._update_progress(idx, len(jobs), start_time)
@@ -2857,7 +3076,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
 
                 out_path = self._build_preserved_output_path(
                     p, input_root, cfg["output_folder"], "lens_corrected")
-                cv2.imwrite(str(out_path), corrected)
+                _save_preserving_tiff(out_path, corrected, _read_tiff_metadata(p), source_path=p)
                 counts["corrected"] += 1
 
                 if (idx + 1) % 20 == 0 or idx == 0:

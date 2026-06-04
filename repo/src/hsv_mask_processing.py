@@ -1,11 +1,112 @@
 """
-hsv_mask_processing.py
-──────────────────────
-Image loading / display, mask calculation, edge detection,
-ML-mask workflow, batch processing, and shortcut actions.
+hsv_mask_processing.py  —  GeoCamPal Feature Processing Mixin
+==============================================================
 
-This module is a *mixin* — it is meant to be inherited by HSVMaskTool
-together with the UI and editing mixins.
+Purpose
+-------
+Mixin class that provides image loading and display, HSV mask
+computation, boundary and polygon extraction, ML-mask workflows,
+batch processing, and image navigation for the Feature Identifier
+tool.  It is designed to be inherited alongside HSVMaskUIMixin and
+HSVMaskEditingMixin by the FeatureIdentifier class in
+feature_identifier.py.
+
+This module must not be instantiated on its own.  It relies on UI
+widgets and state (sliders, BooleanVars, canvas labels, etc.) that
+are constructed by HSVMaskUIMixin and stored in the shared instance.
+
+Image resolution model
+-----------------------
+Each image is kept at two resolutions simultaneously:
+
+    full_image   — the original image as loaded from disk.  All
+                   exports (masks, GeoJSON, COCO) use full_image
+                   coordinates.
+
+    cv_image     — a downscaled working copy capped at 600 px on
+                   the longer side.  HSV masking, display, and the
+                   initial contour search all operate here for speed.
+
+Contour coordinates found in cv_image space are scaled back to
+full_image space before being stored in self.features or exported.
+
+HSV mask computation
+--------------------
+calculate_mask() produces a binary mask from the following pipeline:
+
+    1. Apply bounding box (if active) to create a spatial ROI.
+    2. Apply CLAHE and optional S/V multipliers when enhancements
+       are enabled.
+    3. cv2.inRange on the configured H/S/V range.  When dual-HSV
+       is active, a second range is OR-ed in to handle features
+       that wrap around the hue axis.
+    4. Morphological close then open (5×5 kernel) to remove noise
+       and fill small gaps.
+    5. AND with the AOI mask (if active) to restrict the result to
+       the user-defined region of interest.
+    6. Optional bitwise NOT when "Invert mask" is checked.
+
+Boundary extraction
+-------------------
+extract_boundary() traces the outer contour of the mask and returns
+a single ordered polyline in full_image coordinates:
+
+    1. Find external contours with findContours.
+    2. Score by arc length; prefer interior contours (border-touch
+       ratio ≤ 5 %) with a 20 % minimum-size guard.
+    3. Simplify with Douglas-Peucker (approxPolyDP).
+    4. Scale to full_image coordinates.
+    5. Optionally close the polyline when it does not touch the
+       image border.
+
+Polygon extraction
+------------------
+extract_polygon() extracts one or more closed polygon features:
+
+    1. Prefers the full-resolution colour-picker mask when available
+       (avoids vertex loss from the cv_image downscale).
+    2. More aggressive morphological cleanup than boundary extraction
+       (11×11 ellipse close).
+    3. Fills interior holes by redrawing external contours as solid.
+    4. Keeps all polygons above 0.1 % of image area, sorted largest
+       first.
+    5. Vertex filter for alpha / AOI boundaries is intentionally
+       skipped for polygons (unlike boundary extraction) so that
+       contours legitimately following the image border are preserved.
+
+Skeleton / ML mask edge extraction
+------------------------------------
+_detect_edge_from_current_mask_robust() produces a single editable
+polyline from a binary mask using skeletonisation:
+
+    1. Skeletonise with skimage.morphology.skeletonize (preferred),
+       cv2.ximgproc.thinning (fallback), or distance-ridge threshold
+       (last resort).
+    2. Build an 8-connected adjacency graph over skeleton pixels.
+    3. Find the graph diameter using two BFS passes (double-sweep)
+       to identify the longest path.
+    4. Return the path as an ordered [x, y] list.
+
+calculate_edge_with_ml_mask() wraps the same skeleton pipeline for
+externally supplied ML prediction masks, handling:
+
+    - Individual mode: single mask file paired with a single image.
+    - Folder (ml) mode: mask files matched to images by filename
+      similarity (SequenceMatcher), with an optional common-prefix
+      length hint.
+
+Batch processing
+----------------
+batch_process() iterates over all images in the loaded folder,
+applies the current pipeline settings to each, and exports the
+results automatically.  The HSV mask, boundary/polygon extraction,
+and export are driven entirely by the saved settings without user
+interaction per image.
+
+Dependencies
+------------
+    numpy, opencv-python (cv2), Pillow, shapely, geopandas, rasterio,
+    scikit-image (optional, for skeletonize), customtkinter, utils
 """
 
 import os
@@ -19,6 +120,10 @@ import geopandas as gpd
 from shapely.geometry import LineString
 import rasterio
 import warnings
+import threading
+import time
+import json
+import shutil
 from rasterio.errors import NotGeoreferencedWarning
 from difflib import SequenceMatcher
 
@@ -430,8 +535,8 @@ class HSVMaskProcessingMixin:
             pass
         self.top_center_frame.bind("<Configure>", self.update_mask_display)
 
-        self._clear_ctk_label(self.edge_label)   # <-- use helper
-        self._clear_ctk_label(self.mask_label)   # <-- use helper
+        self._clear_ctk_label(self.edge_label)
+        self._clear_ctk_label(self.mask_label)
 
         # 2) Check that the label widget still exists
         if hasattr(self, 'edge_label') and self.edge_label.winfo_exists():
@@ -476,8 +581,8 @@ class HSVMaskProcessingMixin:
         if self.mode == "ml" and self.image_files:
             if self.current_index > 0:
                 self.current_index -= 1
-                self._clear_ctk_label(self.mask_label)   # <-- changed
-                self._clear_ctk_label(self.edge_label)   # <-- changed
+                self._clear_ctk_label(self.mask_label)
+                self._clear_ctk_label(self.edge_label)
                 self.load_current_image()
                 self.update_image_display()
                 self.update_mask_display()
@@ -678,6 +783,22 @@ class HSVMaskProcessingMixin:
         h, w = shape_hw
         border_mask = np.zeros((h, w), dtype=np.uint8)
         cv2.rectangle(border_mask, (0, 0), (w - 1, h - 1), 255, thickness=max(1, int(thickness)))
+
+        # Include alpha mask boundary — panoramic/stitched images have non-
+        # rectangular content borders that contours should not "prefer" over.
+        alpha = getattr(self, 'alpha_mask', None)
+        if alpha is not None:
+            alpha_u8 = self._ensure_binary_u8(alpha)
+            if alpha_u8.shape[:2] != (h, w):
+                alpha_u8 = cv2.resize(alpha_u8, (w, h), interpolation=cv2.INTER_NEAREST)
+            # Only add the border when the alpha isn't fully opaque (i.e.
+            # the image actually has transparent regions)
+            if cv2.countNonZero(alpha_u8) < (h * w * 0.98):
+                alpha_border = cv2.morphologyEx(
+                    alpha_u8, cv2.MORPH_GRADIENT,
+                    cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+                )
+                border_mask = cv2.bitwise_or(border_mask, alpha_border)
 
         if getattr(self, 'use_aoi_filter', None) and self.use_aoi_filter.get() \
                 and getattr(self, 'aoi_mask', None) is not None:
@@ -972,22 +1093,29 @@ class HSVMaskProcessingMixin:
         """
         Given a 1-pixel wide skeleton (uint8 {0,255} or {0,1}), return a single
         ordered polyline (list of [x,y] in cv_image coords) along the longest
-        8-connected path. No contours used → no double line.
+        8-connected path.  No contours used → no double line.
+
+        The skeleton may contain multiple disconnected components (e.g. noise
+        blobs plus the main shoreline).  This method first identifies all
+        connected components, selects the one with the most pixels, and then
+        runs the BFS double-sweep diameter search only within that component.
         """
+        from collections import deque
+
         sk = (skel_bin > 0).astype(np.uint8)
         rows, cols = np.where(sk)
         if rows.size == 0:
             return []
 
-        # map pixel -> node id
+        n_nodes = rows.size
         H, W = sk.shape
         idx_map = -np.ones((H, W), dtype=np.int32)
-        idx_map[rows, cols] = np.arange(rows.size, dtype=np.int32)
+        idx_map[rows, cols] = np.arange(n_nodes, dtype=np.int32)
 
         # build adjacency (8-neighbors)
         offsets = [(-1,-1),(-1,0),(-1,1),(0,-1),(0,1),(1,-1),(1,0),(1,1)]
-        adj = [[] for _ in range(rows.size)]
-        deg = np.zeros(rows.size, dtype=np.int32)
+        adj = [[] for _ in range(n_nodes)]
+        deg = np.zeros(n_nodes, dtype=np.int32)
 
         for i, (r, c) in enumerate(zip(rows, cols)):
             for dr, dc in offsets:
@@ -998,23 +1126,50 @@ class HSVMaskProcessingMixin:
                         adj[i].append(int(j))
             deg[i] = len(adj[i])
 
-        # pick start: an endpoint if available (degree 1), else any node
-        endpoints = np.where(deg == 1)[0]
-        start = int(endpoints[0]) if endpoints.size > 0 else 0
-
-        # BFS to farthest node
-        def bfs_far(src):
-            from collections import deque
-            q = deque([src])
-            parent = {src: -1}
+        # ── Find all connected components via BFS ──
+        visited = np.zeros(n_nodes, dtype=bool)
+        components = []  # list of (size, [node_indices])
+        for seed in range(n_nodes):
+            if visited[seed]:
+                continue
+            comp = []
+            q = deque([seed])
+            visited[seed] = True
             while q:
                 u = q.popleft()
+                comp.append(u)
                 for v in adj[u]:
-                    if v not in parent:
+                    if not visited[v]:
+                        visited[v] = True
+                        q.append(v)
+            components.append(comp)
+
+        # Select the largest connected component
+        components.sort(key=len, reverse=True)
+        largest_comp = components[0]
+        comp_set = set(largest_comp)
+
+        print(f"[ML mask → line] {len(components)} region(s) found, "
+              f"using largest ({len(largest_comp)} px "
+              f"of {n_nodes} total)")
+
+        # ── BFS double-sweep within the largest component only ──
+        # Pick start: prefer an endpoint (degree 1) within the component
+        comp_endpoints = [n for n in largest_comp if deg[n] == 1]
+        start = comp_endpoints[0] if comp_endpoints else largest_comp[0]
+
+        def bfs_far(src):
+            q = deque([src])
+            parent = {src: -1}
+            last = src
+            while q:
+                u = q.popleft()
+                last = u
+                for v in adj[u]:
+                    if v not in parent and v in comp_set:
                         parent[v] = u
                         q.append(v)
-            far = u  # last popped is a farthest
-            return far, parent
+            return last, parent
 
         a, _ = bfs_far(start)      # farthest from start
         b, pa = bfs_far(a)         # farthest from a (graph "diameter")
@@ -1030,6 +1185,97 @@ class HSVMaskProcessingMixin:
         poly = [[int(cols[i]), int(rows[i])] for i in path]
         return poly if len(poly) >= 2 else []
 
+
+    def _skeletonize_mask(self, mask_bin, label=""):
+        """
+        Skeletonize a binary mask with progressive gap-bridging.
+
+        ML predicted masks often contain small gaps that fragment the
+        skeleton.  Three strategies are tried in order:
+
+            1. Morphological close (bridges gaps ≤ kernel/2 px)
+            2. Pure dilation (bridges all gaps ≤ kernel px, then
+               re-skeletonize to 1-px width)
+
+        The kernel size scales with image resolution.  If strategy 1
+        still produces > 5 components, strategy 2 is applied with
+        a generously-sized dilation kernel.
+
+        Returns a 1-pixel-wide skeleton, uint8 {0, 255}.
+        """
+        h, w = mask_bin.shape[:2]
+        max_dim = max(h, w)
+
+        # Scale-appropriate kernel: larger images need larger gap-bridging
+        base_k = max(5, min(21, max_dim // 200))
+        base_k = base_k if base_k % 2 == 1 else base_k + 1
+
+        def _do_skeletonize(src):
+            """Run skeletonize with the best available backend."""
+            try:
+                from skimage.morphology import skeletonize as _sk
+                return _sk((src > 0)).astype(np.uint8) * 255
+            except Exception:
+                pass
+            try:
+                import cv2.ximgproc as xip
+                return xip.thinning(src, thinningType=xip.THINNING_ZHANGSUEN)
+            except Exception:
+                pass
+            dt = cv2.distanceTransform(
+                (src > 0).astype(np.uint8), cv2.DIST_L2, 3)
+            dt = cv2.normalize(
+                dt, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+            _, out = cv2.threshold(
+                dt, max(1, int(dt.max() * 0.6)), 255, cv2.THRESH_BINARY)
+            return out
+
+        def _count_components(skel_img):
+            n_labels, _ = cv2.connectedComponents(
+                (skel_img > 0).astype(np.uint8), connectivity=8)
+            return max(1, n_labels - 1)
+
+        # ── Strategy 1: morphological close ──
+        k_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (base_k, base_k))
+        closed = cv2.morphologyEx(mask_bin, cv2.MORPH_CLOSE, k_close)
+        skel = _do_skeletonize(closed)
+
+        # Post-skeleton close (tiny 1-px break repair)
+        ker_post = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        skel = cv2.morphologyEx(skel, cv2.MORPH_CLOSE, ker_post, iterations=1)
+
+        n_comps = _count_components(skel)
+        skel_px = int(np.count_nonzero(skel))
+
+        if n_comps <= 5:
+            if label:
+                print(f"[ML mask → line] {n_comps} segment(s), {skel_px} px")
+            return skel
+
+        # ── Strategy 2: pure dilation (bridges all gaps ≤ kernel px) ──
+        # Close = dilate + erode, so erode undoes bridging for thin masks.
+        # Pure dilation makes the mask wider but skeletonize brings it
+        # back to 1 px.  Use a generous kernel proportional to image size.
+        dilate_k = max(15, max_dim // 100)
+        dilate_k = dilate_k if dilate_k % 2 == 1 else dilate_k + 1
+        if label:
+            print(f"[ML mask → line] mask has gaps — bridging "
+                  f"(close={base_k} gave {n_comps} segments, "
+                  f"trying dilation={dilate_k})")
+
+        k_dil = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dilate_k, dilate_k))
+        dilated = cv2.dilate(mask_bin, k_dil, iterations=1)
+        skel = _do_skeletonize(dilated)
+        skel = cv2.morphologyEx(skel, cv2.MORPH_CLOSE, ker_post, iterations=1)
+
+        n_comps = _count_components(skel)
+        skel_px = int(np.count_nonzero(skel))
+
+        if label:
+            print(f"[ML mask → line] after bridging: "
+                  f"{n_comps} segment(s), {skel_px} px")
+
+        return skel
 
     def _detect_edge_from_current_mask_robust(self):
         """
@@ -1047,22 +1293,8 @@ class HSVMaskProcessingMixin:
             self.update_edge_display()
             return False
 
-        # Skeletonize (prefer skimage; fallback to OpenCV thinning or distance ridge)
-        try:
-            from skimage.morphology import skeletonize
-            skel = skeletonize((mask > 0)).astype(np.uint8) * 255
-        except Exception:
-            try:
-                import cv2.ximgproc as xip
-                skel = xip.thinning(mask, thinningType=xip.THINNING_ZHANGSUEN)
-            except Exception:
-                dt = cv2.distanceTransform((mask > 0).astype(np.uint8), cv2.DIST_L2, 3)
-                dt = cv2.normalize(dt, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-                _, skel = cv2.threshold(dt, max(1, int(dt.max() * 0.6)), 255, cv2.THRESH_BINARY)
-
-        # small close to connect tiny gaps but keep 1-px width
-        ker = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        skel = cv2.morphologyEx(skel, cv2.MORPH_CLOSE, ker, iterations=1)
+        # Skeletonize with gap-bridging
+        skel = self._skeletonize_mask(mask, label="cv")
 
         # === centerline polyline in cv_image coords ===
         pts_cv = self._centerline_polyline_from_skeleton(skel)
@@ -1177,21 +1409,7 @@ class HSVMaskProcessingMixin:
             self.display_mask()
 
         # --- Extract edge from FULL-res mask (avoid thin-line downscale failure) ---
-        # Reuse your robust skeleton approach, but run it in full coords:
-        try:
-            from skimage.morphology import skeletonize
-            skel = skeletonize((m_full > 0)).astype(np.uint8) * 255
-        except Exception:
-            try:
-                import cv2.ximgproc as xip
-                skel = xip.thinning(m_full, thinningType=xip.THINNING_ZHANGSUEN)
-            except Exception:
-                dt = cv2.distanceTransform((m_full > 0).astype(np.uint8), cv2.DIST_L2, 3)
-                dt = cv2.normalize(dt, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-                _, skel = cv2.threshold(dt, max(1, int(dt.max() * 0.6)), 255, cv2.THRESH_BINARY)
-
-        ker = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        skel = cv2.morphologyEx(skel, cv2.MORPH_CLOSE, ker, iterations=1)
+        skel = self._skeletonize_mask(m_full, label="full-res")
 
         pts_full = self._centerline_polyline_from_skeleton(skel)
         if len(pts_full) < 2:
@@ -1623,14 +1841,11 @@ class HSVMaskProcessingMixin:
     # -------------- BATCH PROCESS --------------
 
     def batch_process(self):
-        import warnings
-        from rasterio.errors import NotGeoreferencedWarning
+        """Validate inputs and launch batch processing in a background thread."""
         warnings.filterwarnings("ignore", category=NotGeoreferencedWarning)
         warnings.filterwarnings(
-                                "ignore",
-                                category=UserWarning,
-                                message=".*crs.*was not provided.*"
-                            )
+            "ignore", category=UserWarning, message=".*crs.*was not provided.*"
+        )
 
         if not self.image_files:
             messagebox.showwarning("Warning", "No images loaded for batch.", parent=self)
@@ -1648,55 +1863,226 @@ class HSVMaskProcessingMixin:
             messagebox.showerror("Error", "Please select an export folder.", parent=self)
             return
 
-        # Log active pipeline steps
+        # Prevent double-launch
+        if getattr(self, '_batch_running', False):
+            messagebox.showinfo("Info", "Batch processing is already running.", parent=self)
+            return
+
+        # Snapshot all UI-read settings into plain Python values so the
+        # worker thread never touches tkinter widgets directly.
+        batch_cfg = self._snapshot_batch_config(export_path)
+
+        # Disable run button and mark batch as active
+        self._batch_running = True
+        self._batch_cancel = False
+        for w in self.winfo_children():
+            self._set_button_state(w, "disabled")
+        # Keep the Reset / Cancel button enabled so the user can stop
+        if hasattr(self, '_batch_reset_btn'):
+            try:
+                self._batch_reset_btn.configure(state="normal")
+            except Exception:
+                pass
+
+        # Initialise progress
+        total = len(self.image_files)
+        if hasattr(self, 'batch_progress_bar'):
+            self.batch_progress_bar.set(0)
+        if hasattr(self, 'progress_label'):
+            self.progress_label.configure(text=f"Processing 0 / {total} ...")
+
+        # Log active pipeline
         active_steps = []
-        if getattr(self, 'use_aoi_filter', None) and self.use_aoi_filter.get():
+        if batch_cfg["use_aoi"]:
             active_steps.append("AOI Filter")
-        if getattr(self, 'use_hsv_masking', None) and self.use_hsv_masking.get():
+        if batch_cfg["use_hsv"]:
             active_steps.append("HSV Masking")
-        if getattr(self, 'use_color_picker', None) and self.use_color_picker.get():
+        if batch_cfg["use_cpick"]:
             active_steps.append("Colour Picker")
-        if self.use_ml_pred_mask.get():
+        if batch_cfg["use_ml"]:
             active_steps.append("ML Mask")
-        print(f"Batch process started — active pipeline: {', '.join(active_steps) or 'HSV only'}")
-        geojson_folder = os.path.join(export_path, "geojson")
-        overlay_folder = os.path.join(export_path, "shoreline overlay")
-        os.makedirs(geojson_folder, exist_ok=True)
-        os.makedirs(overlay_folder, exist_ok=True)
+        print(f"Batch process started — active pipeline: "
+              f"{', '.join(active_steps) or 'HSV only'}"
+              f"  |  extraction: {batch_cfg['extraction_mode']}")
 
-        processed_count = 0
+        # Launch worker
+        worker = threading.Thread(
+            target=self._batch_worker, args=(batch_cfg,), daemon=True)
+        worker.start()
 
-        for file_path in self.image_files:
+    # ── helpers for threaded batch ──
+
+    @staticmethod
+    def _set_button_state(widget, state):
+        """Recursively set state on all Button/CTkButton children."""
+        try:
+            if isinstance(widget, (ctk.CTkButton, tk.Button)):
+                widget.configure(state=state)
+        except Exception:
+            pass
+        try:
+            for child in widget.winfo_children():
+                HSVMaskProcessingMixin._set_button_state(child, state)
+        except Exception:
+            pass
+
+    def _snapshot_batch_config(self, export_path):
+        """Read all relevant widget values into a plain dict (main thread)."""
+        cfg = {
+            "export_path": export_path,
+            "image_files": list(self.image_files),
+            "use_aoi": bool(getattr(self, 'use_aoi_filter', None) and self.use_aoi_filter.get()),
+            "aoi_min": 0,
+            "aoi_max": 255,
+            "use_hsv": bool(getattr(self, 'use_hsv_masking', None) and self.use_hsv_masking.get()),
+            "use_cpick": bool(getattr(self, 'use_color_picker', None) and self.use_color_picker.get()),
+            "use_ml": bool(self.use_ml_pred_mask.get()),
+            "ml_folder": self.ml_mask_folder_path.get(),
+            "common_name_len": self.common_name_len_var.get(),
+            "edge_thickness": int(self.edge_thickness_slider.get()) if hasattr(self, 'edge_thickness_slider') else 2,
+            "extraction_mode": self.batch_extraction_mode.get() if hasattr(self, 'batch_extraction_mode') else "boundary",
+        }
+        if cfg["use_aoi"]:
+            try:
+                cfg["aoi_min"] = int(self.aoi_min_entry.get())
+            except Exception:
+                pass
+            try:
+                cfg["aoi_max"] = int(self.aoi_max_entry.get())
+            except Exception:
+                pass
+        return cfg
+
+    def _batch_update_progress(self, idx, total, t_start, basename):
+        """Schedule a progress update on the main thread (called via after())."""
+        try:
+            frac = (idx + 1) / total
+            elapsed = time.time() - t_start
+            rate = (idx + 1) / max(elapsed, 0.001)
+            remaining = (total - idx - 1) / max(rate, 0.001)
+            mins, secs = divmod(int(remaining), 60)
+            eta_str = f"{mins}m {secs}s" if mins else f"{secs}s"
+            if hasattr(self, 'batch_progress_bar') and self.batch_progress_bar.winfo_exists():
+                self.batch_progress_bar.set(frac)
+            if hasattr(self, 'progress_label') and self.progress_label.winfo_exists():
+                self.progress_label.configure(
+                    text=f"Processing {idx + 1} / {total}  —  "
+                         f"{basename}  —  ETA {eta_str}")
+        except Exception:
+            pass
+
+    def _batch_finished(self, processed, skipped, total, export_path,
+                        geojson_folder, overlay_folder):
+        """Finalise batch on the main thread (called via after())."""
+        was_cancelled = getattr(self, '_batch_cancel', False)
+        self._batch_running = False
+        for w in self.winfo_children():
+            self._set_button_state(w, "normal")
+        if hasattr(self, 'batch_progress_bar') and self.batch_progress_bar.winfo_exists():
+            self.batch_progress_bar.set(1.0 if not was_cancelled else 0)
+        if hasattr(self, 'progress_label') and self.progress_label.winfo_exists():
+            if was_cancelled:
+                self.progress_label.configure(
+                    text=f"Cancelled — {processed} of {total} processed before stop.")
+            else:
+                self.progress_label.configure(
+                    text=f"Done — {processed} processed, {skipped} skipped.")
+        print(f"\n[batch] {'Cancelled' if was_cancelled else 'Finished'}: "
+              f"{processed}/{total} images processed.  Outputs in {export_path}")
+        if not was_cancelled:
+            messagebox.showinfo(
+                "Batch Process",
+                f"Processed {processed} of {total} images"
+                f" ({skipped} skipped).\n\n"
+                f"Outputs:\n"
+                f"  geojson/\n"
+                f"  shoreline overlay/\n"
+                f"  images/\n"
+                f"  masks/\n"
+                f"  coco/\n\n"
+                f"All in: {export_path}",
+                parent=self)
+
+    def _batch_worker(self, cfg):
+        """Background worker: processes images without blocking the GUI."""
+        from shapely.geometry import Polygon as ShapelyPolygon
+
+        export_path     = cfg["export_path"]
+        image_files     = cfg["image_files"]
+        total           = len(image_files)
+
+        # Create all output folders
+        geojson_folder  = os.path.join(export_path, "geojson")
+        overlay_folder  = os.path.join(export_path, "shoreline overlay")
+        images_folder   = os.path.join(export_path, "images")
+        masks_folder    = os.path.join(export_path, "masks")
+        coco_folder     = os.path.join(export_path, "coco")
+        for d in (geojson_folder, overlay_folder, images_folder,
+                  masks_folder, coco_folder):
+            os.makedirs(d, exist_ok=True)
+
+        processed = 0
+        skipped   = 0
+        t_start   = time.time()
+
+        for idx, file_path in enumerate(image_files):
+            if getattr(self, '_batch_cancel', False):
+                print("[batch_process] Cancelled by user.")
+                break
+
+            basename = os.path.basename(file_path)
+
+            # ── Update progress on the main thread ──
+            try:
+                self.after(0, self._batch_update_progress,
+                           idx, total, t_start, basename)
+            except Exception:
+                pass
+
+            # ── Load image ──
             original = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
             if original is None:
+                print(f"[batch_process] Skipped (unreadable): {basename}")
+                skipped += 1
                 continue
 
             self.full_image = original.copy()
             self.compute_full_masks(original)
-            self.cv_image, self.alpha_mask, self.scale = self.prepare_cv_image_for_batch(original)
+            self.cv_image, self.alpha_mask, self.scale = \
+                self.prepare_cv_image_for_batch(original)
 
-            # Build AOI mask per-image if AOI filter is active
-            if getattr(self, 'use_aoi_filter', None) and self.use_aoi_filter.get():
+            # ── AOI mask ──
+            if cfg["use_aoi"]:
                 try:
-                    aoi_min = int(self.aoi_min_entry.get())
-                    aoi_max = int(self.aoi_max_entry.get())
-                    gray_full = cv2.cvtColor(original, cv2.COLOR_BGR2GRAY) if original.ndim == 3 else original
-                    self.aoi_mask = cv2.inRange(gray_full, aoi_min, aoi_max)
+                    gray_full = (cv2.cvtColor(original, cv2.COLOR_BGR2GRAY)
+                                 if original.ndim == 3 else original)
+                    self.aoi_mask = cv2.inRange(
+                        gray_full, cfg["aoi_min"], cfg["aoi_max"])
                 except Exception:
                     self.aoi_mask = None
 
-            # If user opted to use ML masks, try loading; otherwise use HSV pipeline
-            if self.use_ml_pred_mask.get() and self.ml_mask_folder_path.get():
-                # derive mask for current file
-                base = os.path.splitext(os.path.basename(file_path))[0]
-                best_mask = self._best_match_in_folder(base, self.ml_mask_folder_path.get(),
-                                                       self.common_name_len_var.get())
+            # ── ML mask or HSV pipeline ──
+            ml_full_mask = None
+            if cfg["use_ml"] and cfg["ml_folder"]:
+                stem = os.path.splitext(basename)[0]
+                best_mask = self._best_match_in_folder(
+                    stem, cfg["ml_folder"], cfg["common_name_len"])
                 if best_mask is not None:
                     m = self._read_mask_image(best_mask)
                     if m is not None:
-                        m = cv2.resize(m, (self.cv_image.shape[1], self.cv_image.shape[0]),
-                                       interpolation=cv2.INTER_NEAREST)
-                        self.current_mask = m
+                        # Full-resolution mask for skeleton extraction
+                        Hf, Wf = self.full_image.shape[:2]
+                        ml_full_mask = self._ensure_binary_u8(m)
+                        if ml_full_mask.shape[:2] != (Hf, Wf):
+                            ml_full_mask = cv2.resize(
+                                ml_full_mask, (Wf, Hf),
+                                interpolation=cv2.INTER_NEAREST)
+                        # Also set cv_image-sized mask for colour picker / display
+                        m_cv = cv2.resize(
+                            ml_full_mask,
+                            (self.cv_image.shape[1], self.cv_image.shape[0]),
+                            interpolation=cv2.INTER_NEAREST)
+                        self.current_mask = self._ensure_binary_u8(m_cv)
                     else:
                         self.calculate_mask()
                 else:
@@ -1704,56 +2090,154 @@ class HSVMaskProcessingMixin:
             else:
                 self.calculate_mask()
 
-            if getattr(self, 'use_color_picker', None) and self.use_color_picker.get():
-                ok = self._color_pick_detect(quiet=True)
-                if not ok:
-                    print(f"[batch_process] Colour selection skipped for {os.path.basename(file_path)}")
+            # ── Colour picker ──
+            if cfg["use_cpick"]:
+                try:
+                    ok = self._color_pick_detect(quiet=True)
+                    if not ok:
+                        print(f"  Colour selection skipped for {basename}")
+                except Exception:
+                    pass
 
-            self.extract_boundary()
+            # ── Extract features (boundary or polygon) ──
+            if ml_full_mask is not None and cfg["extraction_mode"] == "boundary":
+                # Use the same full-res skeleton pipeline as interactive mode
+                skel = self._skeletonize_mask(ml_full_mask, label="batch")
+                pts_full = self._centerline_polyline_from_skeleton(skel)
+                if len(pts_full) >= 3:
+                    cnt = np.array(pts_full, dtype=np.int32).reshape((-1, 1, 2))
+                    epsilon = max(0.3, 0.001 * cv2.arcLength(cnt, False))
+                    approx = cv2.approxPolyDP(cnt, epsilon, False)
+                    pts_full = [[int(pt[0][0]), int(pt[0][1])] for pt in approx]
+                self.edge_points = pts_full
+                self.features = [("polyline", pts_full.copy())] if len(pts_full) >= 2 else []
+            elif cfg["extraction_mode"] == "polygon":
+                self.extract_polygon()
+            else:
+                self.extract_boundary()
 
-            base = os.path.splitext(os.path.basename(file_path))[0]
-            out_geo = os.path.join(geojson_folder, base + ".geojson")
-            out_ovl = os.path.join(overlay_folder, base + "_overlay.png")
+            stem = os.path.splitext(basename)[0]
 
-            # Try to read georef
+            # Collect all feature points from self.features
+            all_features = getattr(self, 'features', [])
+            # Flatten to primary points for backward-compat exports
+            primary_pts = self.edge_points if self.edge_points else []
+            is_polygon = cfg["extraction_mode"] == "polygon"
+
+            # ── GeoJSON export ──
             try:
                 with rasterio.open(file_path) as src:
                     transform = src.transform
                     crs       = src.crs
-            except:
+            except Exception:
                 transform = None
                 crs       = None
 
-            if crs is not None:
-                world_coords = [(transform * (x, y))[0:2] for x, y in self.edge_points]
-                geom = LineString(world_coords)
+            out_geo = os.path.join(geojson_folder, stem + ".geojson")
+            if all_features:
+                from shapely.geometry import Polygon as ShapelyPolygon
+                shapes = []
+                for feat_type, pts in all_features:
+                    if len(pts) < 2:
+                        continue
+                    if crs is not None:
+                        coords = [(transform * (x, y))[0:2] for x, y in pts]
+                    else:
+                        coords = [(x, y) for x, y in pts]
+                    if feat_type == "polygon":
+                        shapes.append(ShapelyPolygon(coords))
+                    else:
+                        shapes.append(LineString(coords))
+                if shapes:
+                    gdf = gpd.GeoDataFrame(geometry=shapes, crs=crs)
+                    gdf.to_file(out_geo, driver="GeoJSON")
+            elif primary_pts and len(primary_pts) >= 2:
+                if crs is not None:
+                    coords = [(transform * (x, y))[0:2] for x, y in primary_pts]
+                else:
+                    coords = [(x, y) for x, y in primary_pts]
+                gdf = gpd.GeoDataFrame(geometry=[LineString(coords)], crs=crs)
+                gdf.to_file(out_geo, driver="GeoJSON")
             else:
-                # pixel coords
-                geom = LineString(self.edge_points)
-                print(f"[batch_process] No georeference for {file_path}, writing pixel‐coordinate GeoJSON to console.")
+                print(f"  No feature found for {basename}")
 
-            gdf = gpd.GeoDataFrame(geometry=[geom], crs=crs)
-            gdf.to_file(out_geo, driver="GeoJSON")
-
-            # Write overlay PNG (use confirmed-polyline teal to match the
-            # on-screen overlay colour scheme).
+            # ── Overlay PNG ──
+            out_ovl = os.path.join(overlay_folder, stem + "_overlay.png")
             overlay = self.full_image.copy()
-            if self.edge_points:
-                pts = np.array(self.edge_points, dtype=np.int32).reshape((-1, 1, 2))
-                thickness = int(self.edge_thickness_slider.get()) if hasattr(self, 'edge_thickness_slider') else 2
-                cv2.polylines(overlay, [pts], False, (170, 136, 0), thickness)
+            for feat_type, pts in all_features:
+                if len(pts) < 2:
+                    continue
+                pts_np = np.array(pts, dtype=np.int32).reshape((-1, 1, 2))
+                if feat_type == "polygon":
+                    cv2.polylines(overlay, [pts_np], True,
+                                  (0, 85, 204), cfg["edge_thickness"])
+                else:
+                    cv2.polylines(overlay, [pts_np], False,
+                                  (170, 136, 0), cfg["edge_thickness"])
             cv2.imwrite(out_ovl, overlay)
 
-            processed_count += 1
+            # ── Copy original image ──
+            out_img = os.path.join(images_folder, basename)
+            try:
+                shutil.copy2(file_path, out_img)
+            except Exception:
+                pass
 
-        print(f"[batch_process] Processed {processed_count} images. GeoJSONs in {geojson_folder}, overlays in {overlay_folder}")
-        messagebox.showinfo(
-            "Batch Process",
-            f"Processed {processed_count} images.\n"
-            f"GeoJSON => {geojson_folder}\n"
-            f"Overlay => {overlay_folder}",
-            parent=self
-        )
+            # ── Mask PNG ──
+            out_mask = os.path.join(masks_folder, stem + "_mask.png")
+            height, width = self.full_image.shape[:2]
+            mask_img = np.zeros((height, width), dtype=np.uint8)
+            for feat_type, pts in all_features:
+                if len(pts) < 2:
+                    continue
+                pts_np = np.array(pts, dtype=np.int32).reshape((-1, 1, 2))
+                if feat_type == "polygon":
+                    cv2.fillPoly(mask_img, [pts_np], 255)
+                else:
+                    cv2.polylines(mask_img, [pts_np], False, 255,
+                                  cfg["edge_thickness"])
+            cv2.imwrite(out_mask, mask_img)
+
+            # ── COCO JSON ──
+            out_coco = os.path.join(coco_folder, stem + "_coco.json")
+            coco_annotations = []
+            for ann_idx, (feat_type, pts) in enumerate(all_features, start=1):
+                if len(pts) < 2:
+                    continue
+                seg = [coord for p in pts for coord in p]
+                xs = [p[0] for p in pts]
+                ys = [p[1] for p in pts]
+                bbox = [min(xs), min(ys),
+                        max(xs) - min(xs), max(ys) - min(ys)]
+                coco_annotations.append({
+                    "id": ann_idx,
+                    "image_id": 1,
+                    "category_id": 1,
+                    "segmentation": [seg],
+                    "area": bbox[2] * bbox[3],
+                    "bbox": bbox,
+                    "iscrowd": 0,
+                })
+            if coco_annotations:
+                coco_data = {
+                    "images": [{"id": 1, "file_name": basename,
+                                "width": width, "height": height}],
+                    "annotations": coco_annotations,
+                    "categories": [{"id": 1, "name": "feature"}],
+                }
+                with open(out_coco, 'w') as f:
+                    json.dump(coco_data, f, indent=2)
+
+            processed += 1
+            print(f"  [{processed}/{total}] {basename}")
+
+        # ── Signal completion on the main thread ──
+        try:
+            self.after(0, self._batch_finished,
+                       processed, skipped, total, export_path,
+                       geojson_folder, overlay_folder)
+        except Exception:
+            pass
 
     def prepare_cv_image_for_batch(self, original_image):
         if original_image.ndim == 3 and original_image.shape[2] == 4:

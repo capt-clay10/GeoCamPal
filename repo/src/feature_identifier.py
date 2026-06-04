@@ -1,19 +1,104 @@
 """
-feature_identifier.py
-─────────────────────
-Orchestrator module for the Feature Identifier tool (formerly HSV Mask Tool).
+feature_identifier.py  —  GeoCamPal Feature Identifier
+=======================================================
 
-The class is composed from three mixin modules:
+Purpose
+-------
+Interactive tool for detecting, delineating, and exporting coastal
+features (waterlines, shorelines, swash edges, sand/water boundaries)
+from georeferenced or plain camera images.  Detection combines HSV
+colour masking, AOI / profile-based spatial filtering, and a
+multi-sample colour-class picker.  Detected boundaries are editable
+as polylines or polygons before export.
 
-  • hsv_mask_ui.py          – UI construction, control panel, settings, toggles
-  • hsv_mask_processing.py  – Image I/O, mask calculation, edge detection, batch
-  • hsv_mask_editing.py     – Feature editing, canvas interaction, zoom/pan, export
+This module is the orchestrator.  All behaviour is composed from three
+mixin classes imported at runtime:
 
-Detection workflow:
-  AOI / Profile-based region filtering
-  HSV colour masking
-  Multi-sample colour class selection
-  Boundary / polygon extraction and manual editing
+    hsv_mask_ui.py          — UI construction, control panel, HSV
+                              sliders, dropdown sections, settings
+                              save/load, toggle logic.
+    hsv_mask_processing.py  — Image I/O, HSV mask computation, edge
+                              detection, enhancement pipeline, batch
+                              processing, georeferenced TIFF output.
+    hsv_mask_editing.py     — Feature editing canvas, zoom/pan,
+                              vertex drag, undo/redo, polyline and
+                              polygon creation, export to GeoJSON /
+                              COCO / PNG mask / CSV.
+
+The class inherits from all three mixins via Python MRO so each mixin
+can call methods from the others without circular imports.
+
+Operating modes
+---------------
+Three modes are selected at construction time via the `mode` argument:
+
+    individual  — Single-image workflow.  Opens a configuration window
+                  (controls) alongside a separate image-display window
+                  (original | mask | overlay).  Keyboard shortcuts are
+                  active.  The primary interactive mode.
+
+    ml          — Folder-based workflow for processing sequences of
+                  images, optionally guided by a pre-computed ML
+                  prediction mask.  Same windows as individual mode.
+
+    batch       — Applies a saved settings file (JSON) to an entire
+                  image folder without UI interaction.  Requires a
+                  settings file created in individual or ml mode.
+                  Displays a progress bar and console only.
+
+Detection pipeline (individual / ml)
+-------------------------------------
+    1. AOI / Profile filter (optional)
+       Restricts detection to a rectangular bounding box, a drawn
+       polygon, or a cross-shore profile band.  Pixels outside the
+       AOI are excluded before any masking.
+
+    2. HSV colour masking (optional, default on)
+       Applies a user-configured hue / saturation / value range to
+       produce a binary mask.  Dual-range HSV is supported for
+       features that wrap around the hue axis (e.g. reds).
+
+    3. Colour class picker (optional)
+       The user clicks sample pixels labelled as class A ("remove")
+       or class B ("keep").  A colour-distance or nearest-class rule
+       refines the mask to separate the two classes.
+
+    4. ML prediction mask (optional)
+       A pre-computed binary mask (from an external ML model) can be
+       loaded and combined with the HSV result to constrain detection
+       to the ML-predicted region.
+
+    5. Boundary / polygon extraction
+       The combined mask is thinned or contoured to produce an ordered
+       polyline or polygon.  The result is shown in the overlay panel
+       and can be edited interactively before export.
+
+Keyboard shortcuts (individual / ml mode)
+------------------------------------------
+    Left / Right    — previous / next image in a folder
+    E               — extract boundary (polyline)
+    P               — extract polygon
+    R               — cut / refine detected feature
+    Enter           — export training data
+
+Export formats
+--------------
+    GeoJSON         — LineString or Polygon with optional CRS when the
+                      source image carries georeferencing information.
+    COCO JSON       — Segmentation annotation for ML training pipelines.
+    PNG mask        — Binary 8-bit mask (255 = feature, 0 = background).
+    CSV             — Pixel coordinate table.
+
+Backward compatibility
+----------------------
+The class is also importable as ``HSVMaskTool`` (an alias defined at
+the bottom of this file) to support code written against the older name.
+
+Dependencies
+------------
+    numpy, opencv-python (cv2), Pillow, customtkinter,
+    utils, hsv_mask_ui, hsv_mask_processing, hsv_mask_editing,
+    profile_tool (optional; inline fallback provided)
 """
 
 import os
@@ -404,7 +489,7 @@ class FeatureIdentifier(HSVMaskEditingMixin, HSVMaskProcessingMixin, HSVMaskUIMi
             batch_action_bar.pack(side="bottom", fill="x", padx=5, pady=2)
 
             ctk.CTkButton(
-                batch_action_bar, text="⚙ Load Settings File",
+                batch_action_bar, text="Load Settings File",
                 command=self.load_settings,
                 fg_color="#1a6b3c", hover_color="#258c50",
                 font=("Arial", 13, "bold"), height=35, width=200
@@ -423,6 +508,17 @@ class FeatureIdentifier(HSVMaskEditingMixin, HSVMaskProcessingMixin, HSVMaskUIMi
                 font=("Arial", 12), height=35
             ).pack(side="left", padx=5, pady=5)
 
+            # Extraction mode selector
+            ctk.CTkLabel(batch_action_bar, text="Extract:",
+                         font=("Arial", 10, "bold")).pack(side="left", padx=(15, 3))
+            self.batch_extraction_mode = tk.StringVar(master=self, value="boundary")
+            self._batch_mode_menu = ctk.CTkSegmentedButton(
+                batch_action_bar,
+                values=["boundary", "polygon"],
+                variable=self.batch_extraction_mode,
+                font=("Arial", 11), height=30)
+            self._batch_mode_menu.pack(side="left", padx=5, pady=5)
+
             ctk.CTkButton(
                 batch_action_bar, text="Run Batch Process",
                 command=self.batch_process,
@@ -430,12 +526,13 @@ class FeatureIdentifier(HSVMaskEditingMixin, HSVMaskProcessingMixin, HSVMaskUIMi
                 font=("Arial", 13, "bold"), height=35, width=180
             ).pack(side="left", padx=10, pady=5)
 
-            ctk.CTkButton(
-                batch_action_bar, text="Reset",
+            self._batch_reset_btn = ctk.CTkButton(
+                batch_action_bar, text="Reset / Cancel",
                 command=self.reset_session,
                 fg_color="#8B0000", hover_color="#A52A2A",
-                height=35, width=80
-            ).pack(side="right", padx=10, pady=5)
+                height=35, width=120
+            )
+            self._batch_reset_btn.pack(side="right", padx=10, pady=5)
 
             # ── Folder path labels (always visible below buttons) ──
             batch_path_bar = ctk.CTkFrame(main_frame)
@@ -480,6 +577,10 @@ class FeatureIdentifier(HSVMaskEditingMixin, HSVMaskProcessingMixin, HSVMaskUIMi
         self.image_path = None
         self.image_files = []
         self.current_index = 0
+        self._batch_running = False
+        self._batch_cancel = False
+        if not hasattr(self, 'batch_extraction_mode'):
+            self.batch_extraction_mode = tk.StringVar(master=self, value="boundary")
 
         # Single "edge points" from a direct detection:
         self.edge_points = []
@@ -607,6 +708,10 @@ class FeatureIdentifier(HSVMaskEditingMixin, HSVMaskProcessingMixin, HSVMaskUIMi
 
     def reset_session(self):
         """Reset all state to initial — clears image, masks, features, AOI, color picker."""
+        # Cancel any running batch thread
+        self._batch_running = False
+        self._batch_cancel = True
+
         # Clear overlay zoom
         self._overlay_zoom = 1.0
         if hasattr(self, '_overlay_zoom_label'):
@@ -706,6 +811,13 @@ class FeatureIdentifier(HSVMaskEditingMixin, HSVMaskProcessingMixin, HSVMaskUIMi
             self._batch_input_label.configure(text="No folder selected", text_color="gray")
         if hasattr(self, '_batch_output_label'):
             self._batch_output_label.configure(text="No folder selected", text_color="gray")
+        if hasattr(self, 'batch_progress_bar') and self.batch_progress_bar.winfo_exists():
+            self.batch_progress_bar.set(0)
+        if hasattr(self, 'progress_label') and self.progress_label.winfo_exists():
+            self.progress_label.configure(text="Ready for batch processing.")
+        # Re-enable buttons in case a batch was cancelled
+        for w in self.winfo_children():
+            self._set_button_state(w, "normal")
 
         print("Session reset.\n================================")
 

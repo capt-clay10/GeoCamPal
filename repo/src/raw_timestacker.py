@@ -1,3 +1,82 @@
+"""
+raw_timestacker.py  —  GeoCamPal Raw Timestack Tool
+====================================================
+
+Purpose
+-------
+Builds a raw timestack image from a folder of coastal camera frames.
+Each row in the output PNG corresponds to one time step; each column
+corresponds to one pixel position along the selected cross-shore or
+alongshore transect (or averaged across a bounding-box ROI).  The
+resulting image is the primary input for the Wave Run-Up Calculator.
+
+A timestack compresses a time series of images into a single 2-D image
+where time runs vertically (newest row at the top) and distance runs
+horizontally.  Swash excursion, wave run-up limits, and shoreline
+variability are all visible directly from the pixel pattern.
+
+ROI / transect selection
+------------------------
+Three selection modes are available, drawn interactively on a reference
+image in the ScrollZoomSelector widget:
+
+    bbox      — Bounding box (x, y, width, height).  All rows within the
+                box are averaged vertically to produce one colour pixel
+                per column per time step.  Best for ROIs that span a
+                cross-shore swath.
+
+    line      — Straight two-point line.  Pixel values are sampled along
+                the line at unit spacing, optionally averaged over a
+                perpendicular band of configurable width.
+
+    freehand  — Multi-vertex polyline.  Segments are sampled and
+                concatenated, with duplicate junction pixels removed.
+                Useful for curved shorelines or oblique camera views.
+
+Gap filling
+-----------
+When "Fill gaps" is enabled, images are mapped onto a regular time grid
+at the configured frequency (Hz) and duration (seconds).  Gaps in the
+grid (missing images) are filled by cubic interpolation between
+neighbouring frames, with nearest-neighbour extrapolation at the edges.
+Tail gaps longer than 5 frames are left as NaN (written as black) rather
+than extrapolated.
+
+When "Fill gaps" is disabled, images are stacked in sorted order without
+any temporal regularisation.
+
+Timestamp parsing
+-----------------
+Datetimes are extracted from filenames using a set of common coastal
+camera naming patterns.  If filename parsing fails, EXIF/TIFF DateTime
+tags are tried.  As a last resort, the file modification time (mtime)
+is used.  Files for which no datetime can be determined are skipped with
+a warning.
+
+Batch mode
+----------
+Batch process iterates over all immediate sub-folders of a chosen parent
+folder.  Each sub-folder is treated as an independent image set.  Output
+filenames are derived from the first image timestamp in each sub-folder.
+Sub-folders whose expected output file already exists are skipped.
+Processing runs in a ThreadPoolExecutor (up to 4 workers).
+
+Output
+------
+    <timestamp>_raw_timestack.png  — RGB PNG, rows = time steps (newest
+                                     at top), columns = transect pixels.
+                                     PNG metadata (pixel_resolution,
+                                     selector_mode, bounding_box or
+                                     selector_points_px) is embedded as
+                                     tEXt chunks for downstream tools.
+
+Dependencies
+------------
+    numpy, opencv-python (cv2), Pillow, tifffile, rasterio,
+    scipy, customtkinter, utils
+"""
+
+
 import json
 import os
 import glob
@@ -553,7 +632,7 @@ class ScrollZoomSelector(tk.Frame):
             return
         self.cv_image = cv2.imread(file_path)
         if self.cv_image is None:
-            messagebox.showerror("Error", "Failed to load image.")
+            messagebox.showerror("Error", "Failed to load image.", parent=self)
             return
         cv_rgb = cv2.cvtColor(self.cv_image, cv2.COLOR_BGR2RGB)
         self.pil_image = Image.fromarray(cv_rgb)

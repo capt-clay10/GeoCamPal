@@ -1,20 +1,74 @@
 """
-Profile & Hovmöller Tool
+profile_tool.py  —  GeoCamPal Profile & Hovmöller Tool
+=======================================================
 
-Extract pixel profiles along a user‑defined line across a folder of images,
-then visualise them as:
-  1. **RGB Hovmöller** — actual pixel colours stacked in time (feature tracking)
-  2. **Intensity Hovmöller** — grayscale heatmap for quantitative analysis
-  3. **Profile overlay** — all individual profiles plotted on one axis
+Purpose
+-------
+Extracts a pixel-intensity profile along a user-defined line from
+every image in a folder, then stacks the profiles in time to produce
+Hovmöller diagrams.  The tool is aimed at coastal and environmental
+monitoring applications where recurring spatial features (wave runup,
+waterlines, dune crests) need to be tracked through time.
 
-The user draws a profile line interactively (click start + end on a sample
-image) or enters pixel coordinates manually.  Profile width (perpendicular
-averaging) is configurable.
+Profile extraction
+------------------
+The profile line is defined by two pixel coordinates (x1, y1) and
+(x2, y2) in the image frame.  For each image, pixel values are sampled
+at equal-spaced points along the line using bilinear indexing.  An
+averaging width (in pixels) controls how many parallel rows are
+averaged perpendicular to the line, reducing noise from a single-pixel
+sample.  Both an RGB colour profile and a grayscale intensity profile
+are extracted from every image in one pass.
 
-Outputs:
-  • hovmuller_rgb.png / hovmuller_intensity.png
-  • profile_overlay.png
-  • profiles.txt  — tab‑separated, one column per image
+Diagrams
+--------
+Three outputs are produced:
+
+    RGB Hovmöller      — Each row is one profile rendered in its actual
+                         pixel colours.  Rows are stacked in time (oldest
+                         at the top).  Useful for visually tracking
+                         colour-contrasted features such as waterlines or
+                         swash tongues against sand.
+
+    Intensity Hovmöller — Same structure but each row is the grayscale
+                          intensity profile, displayed as a heatmap.
+                          Suited for quantitative cross-shore analysis.
+
+    Profile overlay    — All individual grayscale profiles plotted on
+                         one axis, coloured by image index (viridis).
+                         Useful for checking consistency and identifying
+                         outlier images.
+
+Timestamp parsing
+-----------------
+Images are sorted by the datetime extracted from their filenames.  A
+set of common coastal camera naming conventions is tried automatically;
+a custom strftime format string can be provided when auto-detection
+fails.  Images without a parseable timestamp are silently skipped.
+Timestamp parsing is duplicated from exploration.py so this module
+remains standalone.
+
+Inputs
+------
+    Image folder       — JPEG, PNG, BMP, TIFF (optionally recursive)
+    Sample image       — any single image from the folder, used to
+                         define the profile line interactively
+    Profile line       — two clicks on the sample image, or manual
+                         pixel coordinate entry
+    Averaging width    — perpendicular band width in pixels (default 5)
+    Mode               — RGB or Intensity
+
+Outputs  (saved to the user-selected output folder)
+-------
+    hovmuller_rgb.png       — RGB Hovmöller figure
+    hovmuller_intensity.png — Intensity Hovmöller figure (Intensity mode)
+    profile_overlay.png     — all profiles overlaid on one axis
+    profiles.txt            — tab-separated: distance_px, then one
+                               column per image (grayscale intensity)
+
+Dependencies
+------------
+    numpy, opencv-python (cv2), matplotlib, customtkinter
 """
 
 # %% ————————————————————————————— imports —————————————————————————————
@@ -520,7 +574,7 @@ class ProfileHovmullerWindow(ctk.CTkToplevel):
             return
         img = cv2.imread(p)
         if img is None:
-            messagebox.showerror("Error", f"Cannot read: {p}")
+            messagebox.showerror("Error", f"Cannot read: {p}", parent=self)
             return
         self.sample_path = p
         self.sample_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)

@@ -1,8 +1,71 @@
 """
-GeoCamPal — Create DEMs from shoreline GeoJSON files and water-level CSV.
+dem_generator.py  —  GeoCamPal DEM Generator
+=============================================
 
-Uses PCA-aligned cross-shore transect interpolation (waterline method)
-to avoid Delaunay triangulation artefacts.
+Purpose
+-------
+Builds gridded Digital Elevation Models (DEMs) of intertidal beach
+surfaces from two inputs: a folder of georeferenced shoreline contours
+(GeoJSON) and a water-level timeseries (CSV).  Each shoreline is
+treated as an elevation contour at the water level recorded at its
+timestamp.  Cross-shore elevation profiles are reconstructed by
+casting transects perpendicular to the shoreline and interpolating
+between contours — the waterline method.
+
+The interpolated surface is saved as a georeferenced GeoTIFF.  An
+optional XYZ point cloud CSV is also available for each DEM.
+
+Interpolation method
+--------------------
+Transects are oriented using Principal Component Analysis (PCA) of
+the full shoreline dataset, which aligns the cross-shore axis with
+the actual orientation of the beach regardless of its compass bearing.
+Two modes are available:
+
+    Straight  — One global PCA direction is applied to all transects.
+                Fast and suitable for beaches with a consistent trend.
+
+    Curved    — A moving-window PCA re-estimates the local orientation
+                at each along-shore step, so transect direction bends
+                with the shoreline.  Better for bays and curved coasts
+                but slower.
+
+A water-level binning step collapses near-duplicate elevation values
+from the rising and falling limbs of a tidal cycle into a single
+representative cross-shore position, which removes zigzag artefacts
+in the interpolated profile.
+
+DEM modes
+---------
+    Daily      — One DEM per calendar day, using only the shorelines
+                 captured on that day.
+
+    Composite  — A single DEM built from all shorelines across the
+                 full dataset, maximising tidal coverage and
+                 producing a time-averaged beach surface.
+
+Inputs
+------
+    Water-level CSV    — Two columns: 'time' (parseable datetime)
+                         and 'wl' (water level in metres).
+                         Resampled internally to 1-minute intervals.
+
+    GeoJSON folder     — Shoreline contours as individual .geojson
+                         files.  Filenames must contain date and time
+                         fields that match the user-supplied regex
+                         pattern (named groups: year, month, day,
+                         hour1, min1, hour2, min2).
+
+Outputs  (saved to the user-selected output folder)
+-------
+    DEM_<date>_transect.tif            — georeferenced GeoTIFF per day
+    DEM_composite_<date>_to_<date>.tif — composite GeoTIFF (if used)
+    shoreline_xyz_<date>.csv           — raw XYZ points (optional)
+
+Dependencies
+------------
+    numpy, scipy, pandas, geopandas, rasterio, shapely,
+    matplotlib, customtkinter
 """
 
 # %% ————————————————————————————— imports —————————————————————————————
@@ -442,7 +505,7 @@ class CreateDemWindow(ctk.CTkToplevel):
         # water-level CSV
         csv_path = self.wl_csv_var.get().strip()
         if not csv_path or not os.path.isfile(csv_path):
-            messagebox.showerror("Error", "Please specify a valid water-level CSV.")
+            messagebox.showerror("Error", "Please specify a valid water-level CSV.",parent=self)
             raise ValueError("No CSV")
 
         df = pd.read_csv(csv_path)
@@ -454,13 +517,13 @@ class CreateDemWindow(ctk.CTkToplevel):
         # GeoJSON folder
         folder = self.geojson_dir_var.get().strip()
         if not folder or not os.path.isdir(folder):
-            messagebox.showerror("Error", "Please specify a valid GeoJSON folder.")
+            messagebox.showerror("Error", "Please specify a valid GeoJSON folder.",parent=self)
             raise ValueError("No folder")
 
         try:
             pattern = re.compile(self.regex_var.get().strip())
         except re.error as err:
-            messagebox.showerror("Regex error", f"Invalid filename pattern:\n{err}")
+            messagebox.showerror("Regex error", f"Invalid filename pattern:\n{err}",parent=self)
             raise
 
         shore_gdfs = []
@@ -487,7 +550,7 @@ class CreateDemWindow(ctk.CTkToplevel):
             shore_gdfs.append(gdf)
 
         if not shore_gdfs:
-            messagebox.showwarning("Warning", "No GeoJSONs matched the pattern.")
+            messagebox.showwarning("Warning", "No GeoJSONs matched the pattern.",parent=self)
             raise ValueError("No geojson data")
 
         combined = gpd.GeoDataFrame(pd.concat(shore_gdfs, ignore_index=True),
@@ -977,7 +1040,7 @@ class CreateDemWindow(ctk.CTkToplevel):
     def create_dem_for_day(self, date_val):
         out_dir = self.out_dir_var.get().strip()
         if not out_dir:
-            messagebox.showerror("Error", "Please specify an output directory.")
+            messagebox.showerror("Error", "Please specify an output directory.",parent=self)
             return None
 
         gdf_day = self.shorelines_gdf[self.shorelines_gdf["date"] == date_val].copy()
@@ -1087,7 +1150,7 @@ class CreateDemWindow(ctk.CTkToplevel):
         """
         out_dir = self.out_dir_var.get().strip()
         if not out_dir:
-            messagebox.showerror("Error", "Please specify an output directory.")
+            messagebox.showerror("Error", "Please specify an output directory.",parent=self)
             return None
 
         gdf = self.shorelines_gdf.copy()
@@ -1209,7 +1272,7 @@ class CreateDemWindow(ctk.CTkToplevel):
 
         total = len(self.daily_dates)
         if self.current_day_index >= total:
-            messagebox.showinfo("Done", "No more days left to process.")
+            messagebox.showinfo("Done", "No more days left to process.",parent=self)
             return
         date_val = self.daily_dates[self.current_day_index]
         self.gen_eta_label.configure(
@@ -1228,7 +1291,7 @@ class CreateDemWindow(ctk.CTkToplevel):
             return
         out_dir = self.out_dir_var.get().strip()
         if not out_dir:
-            messagebox.showerror("Error", "Please specify output folder.")
+            messagebox.showerror("Error", "Please specify output folder.",parent=self)
             return
 
         if self.dem_mode_var.get() == "Composite":
@@ -1236,7 +1299,7 @@ class CreateDemWindow(ctk.CTkToplevel):
             dem = self.create_composite_dem()
             self.plot_dem(dem)
             if dem is not None:
-                messagebox.showinfo("Done", "Composite DEM created.")
+                messagebox.showinfo("Done", "Composite DEM created.",parent=self)
             return
 
         self._cancel_flag = False

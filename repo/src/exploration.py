@@ -1,24 +1,68 @@
 """
- Data Exploration: Multi-Time-Series Image Selector
+exploration.py  —  GeoCamPal Multi-Time-Series Image Selector
+==============================================================
 
-Matches images to one or more hydrodynamic time series
-(water level, waves, wind, currents, …) based on timestamps
-extracted from filenames.
+Purpose
+-------
+Selects camera images whose timestamps coincide with specific
+hydrodynamic conditions in one or more time series (water level,
+wave height, wind speed, currents, etc.).  Up to five time series
+can be loaded simultaneously; an image is selected only if it passes
+the criterion set for every active series (AND logic).
 
-Per-series criteria (combined with AND logic):
-  • Peaks (Maxima)          — images closest to local maxima
-  • Troughs (Minima)        — images closest to local minima
-  • Above Threshold         — value at image time ≥ threshold
-  • Below Threshold         — value at image time ≤ threshold
-  • Near Target Value       — value at image time ≈ target ± tolerance
-  • Spring Tide Peaks       — images near spring high-water events
-  • Neap Tide Peaks         — images near neap high-water events
-  • No Filter               — always passes (records value only)
+Selection criteria  (assigned independently per series)
+-----------------------
+    Peaks (Maxima)       — image falls within the search buffer of a
+                           detected local maximum in the series.
+    Troughs (Minima)     — as above but for local minima.
+    Above Threshold      — series value at image time >= threshold.
+    Below Threshold      — series value at image time <= threshold.
+    Near Target Value    — series value at image time within ± tolerance
+                           of a user-specified target.
+    Spring Tide Peaks    — image near a high-water event classified as
+                           spring tide (above-median tidal range).
+    Neap Tide Peaks      — as above but for neap (below-median range).
+    No Filter            — no condition; series value is recorded only.
 
-Outputs:
-  • A tab-separated .txt file with matched images and values
-    from every loaded time series.
-  • Optionally copies selected images to a user-defined output folder.
+Peak detection
+--------------
+Peaks and troughs are detected with scipy.signal.find_peaks.  The
+default prominence is auto-scaled to each series on load (≈0.15 × std)
+so it behaves consistently whether values are in metres, centimetres,
+m/s, or any other unit.  A health check warns when a disproportionate
+fraction of detected extrema land on the wrong side of the series
+median, which is the usual symptom of a prominence that is too small
+for the data's scale.
+
+Timestamp parsing
+-----------------
+Image timestamps are extracted from filenames.  A set of common
+coastal camera naming conventions is tried automatically; a custom
+strftime format string can be provided if auto-detection fails.
+
+No-data handling
+----------------
+Common sentinel values (-9999, 9999, -999, etc.) are auto-detected
+and removed from the time series before analysis.  A specific value
+can be given explicitly to override auto-detection.
+
+Inputs
+------
+    Image folder       — any folder of images with timestamps in filenames
+    Time series CSVs   — one CSV per series, two columns: datetime + value
+                         (delimiter auto-detected)
+
+Outputs  (saved to the user-selected output folder)
+-------
+    matched_images_<label>.txt  — tab-separated: filename, image time,
+                                   per-series value, criterion, offset (min)
+    images_<label>/             — optional copy of all matched images,
+                                   with spring/ and neap/ sub-folders when
+                                   tidal classification is active
+
+Dependencies
+------------
+    numpy, pandas, scipy, matplotlib, customtkinter
 """
 
 # %% ————————————————————————————— imports —————————————————————————————
@@ -332,6 +376,111 @@ def find_extrema(wl_df, kind="max", min_sep_hours=5.0, min_prominence=0.2):
         values, distance=distance, prominence=min_prominence)
 
     return wl_df.iloc[peak_idx].reset_index(drop=True)
+
+
+def suggest_prominence(series_df, fraction=0.15):
+    """
+    Suggest a sensible find_peaks() prominence scaled to the data itself.
+
+    The prominence passed to scipy.signal.find_peaks is in the SAME units
+    as the series values, so a single hardcoded default (e.g. 0.2) only
+    works for one unit scale.  For a series in metres a default of 0.2 is
+    fine, but the same 0.2 applied to centimetres (values ~100x larger) is
+    effectively zero, so find_peaks stops filtering and returns spurious
+    local maxima sitting down near the troughs.
+
+    Scaling the default to a fraction of the series' standard deviation
+    makes it unit-agnostic: ~0.15 x std reproduces clean tidal high-water
+    peaks whether the data is in m, cm or mm.
+
+    Parameters
+    ----------
+    series_df : DataFrame or array-like
+        Series with a 'value' column, or a raw numeric array.
+    fraction : float
+        Fraction of the spread to use as the prominence (default 0.15).
+
+    Returns
+    -------
+    float
+        Suggested prominence (always > 0).  Falls back to 0.2 when the
+        data is unusable (empty / constant / non-finite).
+    """
+    if series_df is None:
+        return 0.2
+    if hasattr(series_df, "columns") and "value" in getattr(
+            series_df, "columns", []):
+        vals = series_df["value"].to_numpy(dtype=float)
+    else:
+        vals = np.asarray(series_df, dtype=float)
+    vals = vals[np.isfinite(vals)]
+    if vals.size < 2:
+        return 0.2
+
+    spread = float(np.nanstd(vals))
+    if not np.isfinite(spread) or spread <= 0:
+        # constant series — fall back to the value range
+        rng = float(np.nanmax(vals) - np.nanmin(vals))
+        spread = rng if (np.isfinite(rng) and rng > 0) else 1.0
+
+    prom = fraction * spread
+    if prom <= 0 or not np.isfinite(prom):
+        return 0.2
+
+    # round to ~2 significant figures for a tidy default in the UI
+    import math
+    digits = -int(math.floor(math.log10(abs(prom)))) + 1
+    prom = round(prom, max(0, digits))
+    return prom if prom > 0 else 0.2
+
+
+def extrema_health_warning(events_df, series_df, kind):
+    """
+    Detect the classic unit/prominence mismatch after peak detection.
+
+    When the prominence is far too small for the data's units, find_peaks
+    no longer filters and returns 'maxima' that actually sit below the
+    series median (or 'minima' that sit above it).  This checks the
+    detected events against the series median and returns a human-readable
+    warning string when a meaningful fraction land on the wrong side.
+
+    Parameters
+    ----------
+    events_df : DataFrame
+        Detected events with a 'value' column.
+    series_df : DataFrame
+        The full series with a 'value' column.
+    kind : str
+        'max' for peaks, 'min' for troughs.
+
+    Returns
+    -------
+    str or None
+        Warning message, or None if the detection looks healthy.
+    """
+    if events_df is None or events_df.empty:
+        return None
+    ev = events_df["value"].to_numpy(dtype=float)
+    ev = ev[np.isfinite(ev)]
+    if ev.size == 0:
+        return None
+    med = float(np.nanmedian(series_df["value"].to_numpy(dtype=float)))
+
+    if kind == "max":
+        wrong = float(np.mean(ev < med))
+        side = "below"
+        wanted = "maxima"
+    else:
+        wrong = float(np.mean(ev > med))
+        side = "above"
+        wanted = "minima"
+
+    if wrong > 0.15:
+        return (f"WARNING: {wrong * 100:.0f}% of detected {wanted} fall "
+                f"{side} the series median — this usually means the "
+                f"Prominence is too small for the data's units. "
+                f"Try ~{suggest_prominence(series_df)} (≈0.15 x std).")
+    return None
 
 
 def find_threshold_events(wl_df, threshold, direction="above"):
@@ -683,9 +832,17 @@ def run_multi_series_analysis(series_configs, image_list,
         if crit == "Peaks (Maxima)" and "events_max" in pc:
             n = len(pc["events_max"])
             print_fn(f"  [{label}] Detected {n} peak events.")
+            warn = extrema_health_warning(
+                pc["events_max"], sc["df"], "max")
+            if warn:
+                print_fn(f"  [{label}] {warn}")
         elif crit == "Troughs (Minima)" and "events_min" in pc:
             n = len(pc["events_min"])
             print_fn(f"  [{label}] Detected {n} trough events.")
+            warn = extrema_health_warning(
+                pc["events_min"], sc["df"], "min")
+            if warn:
+                print_fn(f"  [{label}] {warn}")
         elif crit in ("Spring Tide Peaks", "Neap Tide Peaks"):
             tdf = pc.get("tidal_classification", pd.DataFrame())
             if not tdf.empty:
@@ -750,7 +907,7 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
         self.title("Multi-Time-Series Image Explorer")
         fit_geometry(self, 1400, 900, resizable=True)
         try:
-            self.after(200, lambda: self.iconphoto(False, tk.PhotoImage(file=resource_path("launch_logo.png"))))
+            self.iconbitmap(resource_path("launch_logo.ico"))
         except Exception:
             pass
 
@@ -776,6 +933,7 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
                 "csv_path": None,
                 "df": None,
                 "nodata_report": "",
+                "prom_auto": True,  # prominence still at auto-suggested value
             })
 
         # ——— main layout (3 rows) ———
@@ -998,6 +1156,15 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
             placeholder_text="auto")
         w["nodata_entry"].grid(row=0, column=6, padx=3, pady=2)
 
+        ctk.CTkLabel(data_frame, text="Unit:"
+                     ).grid(row=0, column=7, padx=(10, 3), pady=2)
+        w["unit_entry"] = ctk.CTkEntry(
+            data_frame, width=70,
+            placeholder_text="e.g. m")
+        w["unit_entry"].grid(row=0, column=8, padx=3, pady=2)
+        w["unit_entry"].bind(
+            "<KeyRelease>", lambda e, i=idx: self._refresh_unit_labels(i))
+
         # ── Criterion row (in criterion_container) ──
         crit_frame = ctk.CTkFrame(self.criterion_container)
         crit_frame.pack(fill="x", padx=2, pady=3)
@@ -1039,9 +1206,11 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
 
         w["prom_label"] = ctk.CTkLabel(crit_frame, text="Prominence:")
         w["prom_label"].grid(row=0, column=9, padx=3, pady=2)
-        w["prom_entry"] = ctk.CTkEntry(crit_frame, width=50)
+        w["prom_entry"] = ctk.CTkEntry(crit_frame, width=60)
         w["prom_entry"].insert(0, "0.2")
         w["prom_entry"].grid(row=0, column=10, padx=3, pady=2)
+        w["prom_entry"].bind(
+            "<KeyRelease>", lambda e, i=idx: self._mark_prom_edited(i))
 
         self.series_panels.append(data_frame)
         self.criterion_panels.append(crit_frame)
@@ -1081,8 +1250,14 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
             "Peak detection parameters (per series):\n"
             "  Peak sep. (hrs) — min hours between consecutive peaks\n"
             "    Tides: 5–6 hrs.  Wind gusts: 1–2 hrs.\n"
-            "  Prominence — min rise above surrounding baseline\n"
-            "    Tides: 0.2–0.5 m.  Increase if too many false peaks.\n"
+            "  Prominence — min rise above surrounding baseline.\n"
+            "    Auto-scaled to each series on load (≈0.15 x std), so the\n"
+            "    default works in any unit (m, cm, m/s, …).  Type your own\n"
+            "    value to override; increase it if you get too many peaks.\n"
+            "\n"
+            "Unit (per series, optional):\n"
+            "  Enter the value unit (e.g. m, cm, m/s) to label the plot\n"
+            "  axes and the threshold / prominence fields.\n"
             "\n"
             "No-data handling:\n"
             "  Leave the no-data field as 'auto' to auto-detect common\n"
@@ -1145,6 +1320,63 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
         else:
             w["tol_label"].grid_remove()
             w["tol_entry"].grid_remove()
+
+        # append the per-series unit to the parameter labels
+        self._update_param_labels(idx)
+
+    def _unit_for(self, idx):
+        """Return the trimmed unit string for a series ('' if unset)."""
+        w = self.series_widgets[idx]
+        if "unit_entry" not in w:
+            return ""
+        return w["unit_entry"].get().strip()
+
+    def _update_param_labels(self, idx):
+        """Suffix the threshold / target / tolerance / prominence labels
+        with the series unit so the user can see what scale they are
+        typing in (e.g. 'Prominence (cm):')."""
+        w = self.series_widgets[idx]
+        unit = self._unit_for(idx)
+        suf = f" ({unit})" if unit else ""
+        crit = w["criterion_var"].get()
+        if crit in ("Above Threshold", "Below Threshold"):
+            w["thresh_label"].configure(text=f"Threshold{suf}:")
+        elif crit == "Near Target Value":
+            w["thresh_label"].configure(text=f"Target value{suf}:")
+        w["tol_label"].configure(text=f"Tolerance{suf}:")
+        w["prom_label"].configure(text=f"Prominence{suf}:")
+
+    def _refresh_unit_labels(self, idx):
+        """Called when the user edits the unit field."""
+        self._update_param_labels(idx)
+
+    def _mark_prom_edited(self, idx):
+        """User typed into the prominence field — stop auto-suggesting."""
+        self.series_state[idx]["prom_auto"] = False
+
+    def _apply_auto_prominence(self, idx, announce=True):
+        """If the prominence field is still auto-managed, replace it with a
+        value scaled to this series' data so the default works regardless
+        of units (m, cm, m/s, …).  Does nothing if the user has typed a
+        custom prominence."""
+        if not self.series_state[idx].get("prom_auto", True):
+            return None
+        df = self.series_state[idx].get("df")
+        if df is None or df.empty:
+            return None
+        prom = suggest_prominence(df)
+        w = self.series_widgets[idx]
+        w["prom_entry"].delete(0, tk.END)
+        w["prom_entry"].insert(0, str(prom))
+        # stays auto: programmatic insert does not fire <KeyRelease>
+        if announce:
+            unit = self._unit_for(idx)
+            usuf = f" {unit}" if unit else ""
+            label = (w["label_entry"].get().strip()
+                     or f"Series_{idx + 1}")
+            print(f"  [{label}] Auto prominence: {prom}{usuf} "
+                  f"(≈0.15 x std; edit to override).")
+        return prom
 
 #
     # BROWSE CALLBACKS
@@ -1246,9 +1478,15 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
                   f"{os.path.basename(csv_path)}")
             print(f"  Range: {df['datetime'].min()} → "
                   f"{df['datetime'].max()}")
+            unit = self._unit_for(idx)
+            usuf = f" {unit}" if unit else ""
             print(f"  Value range: {df['value'].min():.3f} – "
-                  f"{df['value'].max():.3f}")
+                  f"{df['value'].max():.3f}{usuf}")
             print(f"  {nodata_report}")
+
+            # scale the default prominence to this series' own data
+            # (unit-agnostic) unless the user has overridden it
+            self._apply_auto_prominence(idx, announce=True)
 
             self._refresh_plot(results=[])
 
@@ -1354,7 +1592,10 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
                 ax.plot(df["datetime"], df["value"],
                         color=color, linewidth=0.5, alpha=0.6,
                         label=label)
-                ax.set_ylabel(label, fontsize=9, color="white")
+                unit = widgets["unit_entry"].get().strip() \
+                    if "unit_entry" in widgets else ""
+                ylab = f"{label} ({unit})" if unit else label
+                ax.set_ylabel(ylab, fontsize=9, color="white")
                 ax.grid(True, alpha=0.3, color="#555555")
 
                 # ── green dots: ALL images (preview) ──
@@ -1562,9 +1803,11 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
 
         for idx in range(MAX_SERIES):
             self.series_state[idx] = {
-                "csv_path": None, "df": None, "nodata_report": ""}
+                "csv_path": None, "df": None, "nodata_report": "",
+                "prom_auto": True}
             w = self.series_widgets[idx]
             w["file_label"].configure(text="No file")
+            w["unit_entry"].delete(0, tk.END)
             w["criterion_var"].set("No Filter")
             self._on_criterion_change(idx, "No Filter")
             w["thresh_entry"].delete(0, tk.END)
@@ -1592,6 +1835,7 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
             series_data.append({
                 "csv_path": self.series_state[idx].get("csv_path") or "",
                 "label": w["label_entry"].get().strip(),
+                "unit": w["unit_entry"].get().strip(),
                 "criterion": w["criterion_var"].get(),
                 "threshold": w["thresh_entry"].get().strip(),
                 "tolerance": w["tol_entry"].get().strip(),
@@ -1666,6 +1910,18 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
                 if idx >= MAX_SERIES:
                     break
                 w = self.series_widgets[idx]
+
+                # restore unit first so load printouts / labels use it
+                w["unit_entry"].delete(0, tk.END)
+                if sd.get("unit"):
+                    w["unit_entry"].insert(0, sd["unit"])
+
+                # a saved prominence is an explicit user choice — do not
+                # let the auto-scaler overwrite it when the CSV reloads
+                saved_prom = sd.get("prominence", "")
+                self.series_state[idx]["prom_auto"] = (
+                    saved_prom in ("", None))
+
                 csv_path = sd.get("csv_path", "")
                 if csv_path:
                     self.series_state[idx]["csv_path"] = csv_path
@@ -1687,8 +1943,15 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
                 w["tol_entry"].insert(0, sd.get("tolerance", "0.5"))
                 w["sep_entry"].delete(0, tk.END)
                 w["sep_entry"].insert(0, sd.get("peak_sep", "5"))
+
+                # prominence: use the saved value if present, otherwise
+                # keep the data-scaled auto value applied during load
                 w["prom_entry"].delete(0, tk.END)
-                w["prom_entry"].insert(0, sd.get("prominence", "0.2"))
+                if saved_prom not in ("", None):
+                    w["prom_entry"].insert(0, str(saved_prom))
+                elif self._apply_auto_prominence(idx, announce=False) is None:
+                    w["prom_entry"].insert(0, "0.2")
+
                 w["nodata_entry"].delete(0, tk.END)
                 if sd.get("nodata"):
                     w["nodata_entry"].insert(0, sd["nodata"])
@@ -1731,6 +1994,7 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
             series_inputs.append({
                 "idx": idx,
                 "label": w["label_entry"].get().strip() or f"Series_{idx + 1}",
+                "unit": w["unit_entry"].get().strip(),
                 "criterion": w["criterion_var"].get(),
                 "thresh": w["thresh_entry"].get().strip(),
                 "tol": w["tol_entry"].get().strip(),
@@ -1764,9 +2028,9 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
         if err:
             kind, title, msg = err
             if kind == "warning":
-                messagebox.showwarning(title, msg)
+                messagebox.showwarning(title, msg, parent =self)
             else:
-                messagebox.showerror(title, msg)
+                messagebox.showerror(title, msg, parent =self)
             return
         self._cancel_flag = False
         self._set_eta_safe("Running…")
@@ -1813,6 +2077,7 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
                 series_configs.append({
                     "df": df,
                     "label": sin["label"],
+                    "unit": sin.get("unit", ""),
                     "criterion": criterion,
                     "params": params,
                 })
@@ -1822,25 +2087,27 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
                 label = sc['label']
                 crit = sc['criterion']
                 params = sc.get('params', {})
+                unit = sc.get('unit', '')
+                u = f" {unit}" if unit else ""
                 desc = f"[{label}: {crit}"
                 if crit in ("Above Threshold", "Below Threshold"):
                     thresh = params.get("threshold")
                     if thresh is not None:
-                        desc += f" = {thresh}"
+                        desc += f" = {thresh}{u}"
                 elif crit == "Near Target Value":
                     target = params.get("target")
                     tol = params.get("tolerance")
                     if target is not None:
-                        desc += f" = {target}"
+                        desc += f" = {target}{u}"
                     if tol is not None:
-                        desc += f" ± {tol}"
+                        desc += f" ± {tol}{u}"
                 elif crit in ("Peaks (Maxima)", "Troughs (Minima)",
                               "Spring Tide Peaks", "Neap Tide Peaks"):
                     prom = params.get("min_prominence")
                     sep = params.get("min_sep_hours")
                     parts = []
                     if prom is not None:
-                        parts.append(f"prom={prom}")
+                        parts.append(f"prom={prom}{u}")
                     if sep is not None:
                         parts.append(f"sep={sep}h")
                     if parts:

@@ -1,13 +1,91 @@
 """
-Field of View (FOV) Generator
+fov_generator.py  —  GeoCamPal Field-of-View Generator
+=======================================================
 
-Visualises single‑ or multi‑camera FOV footprints on an optional basemap
-and/or DEM.  When a DEM is supplied the tool performs a line‑of‑sight
-viewshed so that terrain obstructions mask the FOV correctly.
+Purpose
+-------
+Plots the ground footprint of one or more cameras on a map, computes
+depth-of-field zones, and optionally calculates a line-of-sight
+viewshed against a Digital Elevation Model.  Designed for coastal
+camera network planning and documentation.
 
-Basemap priority:
-  1. User‑supplied GeoTIFF            → rendered behind FOV
-  2. Distance rings + coordinate grid  → clean standalone plot (no internet)
+Camera optics model
+-------------------
+Each camera is defined by focal length, sensor dimensions, aperture,
+depression angle, heading, and mounting height.  From these parameters
+the tool derives:
+
+    FOV wedge       — perspective trapezoid projected onto the ground
+                      plane at the camera mounting height.  Near and far
+                      edges are clipped by the depression angle and
+                      vertical field of view.
+
+    Depth-of-field  — computed from the hyperfocal distance formula.
+                      The full DoF zone (near–far ring) and a tighter
+                      "best focus band" (centred on the focus distance
+                      with a configurable half-width) are both shown.
+
+    HFOV / VFOV     — derived from sensor size and focal length:
+                      FOV = 2 × arctan(sensor / (2 × focal)).
+
+Multi-camera support
+--------------------
+Up to three cameras can be configured simultaneously.  When the
+"Compute headings for overlap" option is active, headings are
+automatically spread so that adjacent camera FOVs share a specified
+percentage of horizontal overlap at the focus distance.
+
+Viewshed (terrain-aware FOV)
+-----------------------------
+When a DEM GeoTIFF is provided the tool computes a line-of-sight
+viewshed over the output grid using vectorised ray marching:
+
+    For each grid pixel, N rays are cast from the camera position at
+    fractional steps along the line to the target.  At each step the
+    terrain elevation (bilinear-interpolated from the DEM) is compared
+    against the expected line-of-sight height.  Pixels where the terrain
+    rises above the LOS at any step are marked as blocked.
+
+    Resolution scales automatically to the DEM native cell size.
+    A separate viewshed panel is shown alongside the FOV plot when
+    a DEM is loaded.
+
+Coordinate system
+-----------------
+Camera position is entered as WGS-84 longitude / latitude.  The tool
+auto-detects the appropriate UTM zone and works in metric UTM
+coordinates internally so that distances, widths, and areas are in
+metres throughout.  All outputs are in the same UTM CRS.
+
+Basemap rendering
+-----------------
+Three background options are tried in priority order:
+
+    1. User-supplied GeoTIFF orthoimage  — rendered at 80 % opacity
+       behind the FOV.  Any CRS is accepted; reprojection is handled
+       by rasterio.
+
+    2. DEM hillshade (when no orthoimage is loaded)  — a coastal
+       terrain colourmap (navy–cyan for bathymetry, beige–brown–white
+       for land) blended with a Lambertian hillshade.  A diverging
+       norm centred at 0 m (sea level) is used when the DEM spans
+       both positive and negative elevations.
+
+    3. Distance rings + coordinate grid  — a clean standalone plot
+       with no external data required.
+
+Outputs  (saved to the user-selected output folder)
+-------
+    fov_map.png          — FOV footprint map (PNG, 200 dpi) with legend
+    fov_report.txt       — text summary: camera parameters, HFOV/VFOV,
+                           DoF limits, overlap angles, GSD estimate
+    viewshed_mask.tif    — GeoTIFF viewshed mask when a DEM is loaded
+                           (1 = visible, 0 = blocked, 255 = outside FOV)
+
+Dependencies
+------------
+    numpy, matplotlib, shapely, pyproj, geopandas, customtkinter,
+    rasterio (optional, required for GeoTIFF basemap and viewshed)
 """
 
 # %% ————————————————————————————— imports —————————————————————————————

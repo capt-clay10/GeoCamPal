@@ -1,17 +1,94 @@
 """
-georef.py — GeoCamPal Unified Georeferencing Module
+georef.py  —  GeoCamPal Unified Georeferencing Module
+======================================================
 
-Workflow:
-  1. Choose image
-  2. Choose method (Homography / Camera Projection / TPS / Poly1 / Poly2)
-  3. Load required inputs (varies by method)
-  4. Choose corner preset + crop values (all methods)
-  5. Initial Georeferencing → preview
-  6. Select AOI (interactive box or manual pixel coords)
-  7. Compute Accuracy (LOO cross-validation per GCP)
-  8. Optimise GCPs (SA) or manually exclude bad ones
-  9. Secondary Georeferencing (refined GCPs + scale)
-  10. Batch process (single folder or subfolders) with validation
+Purpose
+-------
+Transforms oblique or near-nadir coastal camera images into
+georeferenced GeoTIFFs aligned to a real-world coordinate system.
+Five transformation methods are available; the appropriate choice
+depends on what calibration data is on hand and the geometry of the
+scene.
+
+Transformation methods
+----------------------
+    Homography          — 3×3 perspective warp from a pre-computed or
+                          externally supplied homography matrix (.txt).
+                          Fast and suitable when the matrix is already
+                          known (e.g. from the dedicated Homography tool).
+
+    Camera Projection   — Full CIRN-style camera model using intrinsic
+                          parameters (camera matrix K, distortion) from
+                          a lens-calibration pickle and a GCP CSV.
+                          Back-projects each output pixel to the ground
+                          plane at a given elevation using solvePnP.
+
+    Thin Plate Spline   — GDAL-based rubber-sheet warp driven by GCPs.
+                          Handles non-linear distortions that a
+                          homography cannot model.
+
+    Polynomial Ord-1    — First-order (affine) polynomial warp via GDAL.
+                          Requires a minimum of 3 GCPs.
+
+    Polynomial Ord-2    — Second-order polynomial warp via GDAL.
+                          Requires a minimum of 6 GCPs.
+
+Workflow (single image)
+-----------------------
+    1. Browse image and choose transformation method.
+    2. Load the required inputs for the chosen method.
+    3. Set the corner preset and optional edge-crop fractions.
+    4. Click Initial Georeferencing to generate a preview.
+    5. Optionally draw or type an AOI to crop the preview region.
+    6. Click Compute Accuracy to run leave-one-out cross-validation
+       and inspect per-GCP residuals.
+    7. Optionally run Optimise GCPs (simulated annealing) to find
+       the subset of GCPs that minimises mean LOO error, or exclude
+       individual GCPs manually.
+    8. Click Secondary Georeferencing to apply the refined settings
+       and generate the final preview.
+    9. Set input/output folders and click Process All for batch export.
+
+Accuracy assessment
+-------------------
+Leave-one-out (LOO) cross-validation is available for all methods.
+Each GCP is held out in turn; the remaining GCPs define the transform,
+and the held-out point is reprojected to measure its residual error in
+map units (metres).  Mean and RMS errors are printed to the console.
+
+GCP optimisation
+----------------
+Simulated annealing (SA) searches the space of possible GCP subsets to
+find the combination that minimises the mean LOO error.  The result is
+written back to the Exclude GCPs field so the user can review it before
+running the secondary georeferencing.
+
+Batch processing
+----------------
+Process All applies the current settings to every image in the input
+folder (optionally including sub-folders, preserving the relative
+directory structure in the output).  Each output GeoTIFF is validated
+after writing; files that fail the size or GDAL check are automatically
+retried up to MAX_RETRIES times.
+
+Inputs
+------
+    Image file(s)         — JPEG, PNG, BMP, TIFF
+    Homography file       — plain-text 3×3 matrix, optional EPSG comment
+    GCP CSV               — columns Pixel_X, Pixel_Y, Real_X, Real_Y,
+                             Real_Z, GCP_ID, EPSG (see csv_utils.py)
+    Calibration pickle    — dict with camera_matrix, dist_coeff,
+                             image_size (from lens_correction.py)
+
+Outputs
+-------
+    <image_name>.tif      — DEFLATE-compressed GeoTIFF with alpha channel,
+                             CRS set from EPSG, pixel size from GSD estimate
+
+Dependencies
+------------
+    numpy, opencv-python (cv2), gdal (osgeo), pandas, Pillow,
+    customtkinter, scipy (for TPS LOO), utils, csv_utils
 """
 
 import os, sys, time, glob, re, pickle, threading, concurrent.futures, random

@@ -1,3 +1,98 @@
+"""
+wave_runup.py  —  GeoCamPal Wave Run-Up Calculator
+===================================================
+
+Purpose
+-------
+Extracts a wave run-up time series from a raw timestack image and an
+annotation marking the swash edge, then analyses the signal in the
+frequency domain and optionally compares it against the Stockdon et al.
+(2006) empirical 2 % exceedance run-up formula.
+
+The tool accepts timestack images produced by the Raw Timestack Tool
+(raw_timestacker.py).  Pixel resolution and time interval are read from
+PNG metadata embedded by that tool; they can be overridden manually
+when processing images from other sources.
+
+Annotation formats
+------------------
+Three annotation formats are accepted for defining the swash edge
+contour:
+
+    PNG mask    — binary greyscale image (pixel > 128 = swash).  One
+                  representative column is taken per row: the rightmost
+                  (or leftmost when "Land on left" is checked).
+                  Legacy format; one point per time row only.
+
+    GeoJSON     — LineString or Polygon exported from a GIS or the
+                  Feature Identifier tool.  Exact hand-picked coordinates
+                  are preserved at full resolution.
+
+    COCO JSON   — Segmentation polygon from a COCO-format annotation
+                  file.  Image dimensions are read from the JSON header.
+                  Exact polygon coordinates are used.
+
+Format is detected automatically from the file extension and content.
+
+Signal extraction
+-----------------
+Each annotation point is converted from pixel coordinates to physical
+units using the pixel resolution (m/px) and time interval (s/row).
+Time origin is at the bottom row (t = 0); the top row corresponds to
+the end of the recording.
+
+An optional beach slope (degrees) converts horizontal swash excursion
+to a vertical run-up signal:  z = d × tan(slope).
+
+Spectral analysis
+-----------------
+A Welch power spectral density estimate is computed from the detrended
+run-up signal.  The spectrum is partitioned at a configurable
+infragravity (IG) cutoff frequency (default 0.05 Hz) to report the
+percentage of total energy in the IG and incident wave bands.
+
+Stockdon et al. (2006) comparison
+----------------------------------
+When enabled, the empirical 2 % exceedance run-up R₂% is computed from
+three user-supplied parameters:
+
+    slope (β)  — foreshore beach slope in degrees, converted to
+                 tan(slope) internally.  Use 0° for dissipative beaches.
+    H₀ (m)     — deep-water significant wave height
+    T₀ (s)     — peak wave period
+
+    Intermediate / reflective formula:
+        η̄ = 0.35 β √(H₀L₀)
+        S  = √(H₀L₀ (0.563 β² + 0.004))
+        R₂% = 1.1 (η̄ + S/2)
+
+    Dissipative simplification (β = 0):
+        R₂% = 0.043 √(H₀L₀)
+
+    where L₀ = g T₀² / 2π.
+
+Batch mode
+----------
+Batch process pairs every raw timestack in one folder with the
+correspondingly named annotation in another folder (matched by shared
+filename stem).  Per-pair results are exported as CSV files; a
+stockdon_comparison.txt summary is produced when the Stockdon option
+is active.
+
+Outputs  (saved to the user-selected output folder)
+-------
+    runup_<name>.csv            — columns: time, horizontal_distance,
+                                   horizontal_distance_detrended,
+                                   vertical_distance,
+                                   vertical_distance_detrended
+    stockdon_comparison.txt     — Stockdon R₂% vs observed R₂% per image
+                                   (batch mode only)
+
+Dependencies
+------------
+    numpy, Pillow, matplotlib, scipy, customtkinter, utils
+"""
+
 import tkinter as tk
 from tkinter import filedialog, messagebox
 from PIL import Image, ImageTk, ImageDraw
@@ -389,7 +484,6 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         self.btn_load_raw = ctk.CTkButton(self.controls_panel, text="Load Raw Time-Stack Image", command=self.load_raw_image)
         self.btn_load_raw.grid(row=0, column=0, padx=5, pady=5)
         
-        # UPDATED: New button text and functionality
         self.btn_load_mask = ctk.CTkButton(
             self.controls_panel, 
             text="Load Runup (Mask/GeoJSON/COCO)", 
@@ -768,7 +862,7 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         elif self.annotation_format == 'coco_json':
             self._load_coco_annotation(file_path)
         else:
-            messagebox.showerror("Error", f"Unknown annotation format: {file_path}")
+            messagebox.showerror("Error", f"Unknown annotation format: {file_path}", parent=self)
             return
     
     def _load_mask_annotation(self, file_path):
@@ -794,7 +888,7 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
                     break
             
             if coords is None:
-                messagebox.showerror("Error", "No LineString or Polygon found in GeoJSON")
+                messagebox.showerror("Error", "No LineString or Polygon found in GeoJSON", parent=self)
                 return
             
             self.annotation_coords = np.array(coords)  # [x, y] = [col, row]
@@ -810,7 +904,7 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
                 print("Load raw image to see annotation overlay")
                 
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to load GeoJSON: {e}")
+            messagebox.showerror("Error", f"Failed to load GeoJSON: {e}", parent=self)
     
     def _load_coco_annotation(self, file_path):
         """Load COCO JSON annotation with exact coordinates."""
@@ -828,12 +922,12 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
             # Get segmentation
             annotations = data.get('annotations', [])
             if not annotations:
-                messagebox.showerror("Error", "No annotations found in COCO JSON")
+                messagebox.showerror("Error", "No annotations found in COCO JSON", parent=self)
                 return
             
             seg = annotations[0].get('segmentation', [[]])[0]
             if not seg:
-                messagebox.showerror("Error", "No segmentation polygon found")
+                messagebox.showerror("Error", "No segmentation polygon found", parent=self)
                 return
             
             # Convert [x1,y1,x2,y2,...] to [[x1,y1], [x2,y2], ...]
@@ -852,7 +946,7 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
                 self._display_annotation_overlay()
                 
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to load COCO JSON: {e}")
+            messagebox.showerror("Error", f"Failed to load COCO JSON: {e}", parent=self)
     
     def _display_annotation_overlay(self):
         """Display raw image with annotation overlay."""
@@ -930,11 +1024,11 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
             slope_deg = float(slope_str)
         except (TypeError, ValueError):
             messagebox.showerror("Error",
-                                 "Beach Slope must be a valid number in degrees.")
+                                 "Beach Slope must be a valid number in degrees.", parent=self)
             return None
         if slope_deg <= 0 or slope_deg >= 90:
             messagebox.showerror("Error",
-                                 "Beach Slope must be between 0° and 90° (exclusive).")
+                                 "Beach Slope must be between 0° and 90° (exclusive).", parent=self)
             return None
         return np.radians(slope_deg)
 
@@ -943,11 +1037,11 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         try:
             ig_threshold_hz = float(self.ig_threshold_entry.get())
         except Exception:
-            messagebox.showerror("Error", "IG threshold must be a valid number in Hz.")
+            messagebox.showerror("Error", "IG threshold must be a valid number in Hz.", parent=self)
             return None
 
         if ig_threshold_hz <= 0:
-            messagebox.showerror("Error", "IG threshold must be greater than 0 Hz.")
+            messagebox.showerror("Error", "IG threshold must be greater than 0 Hz.", parent=self)
             return None
 
         return ig_threshold_hz
@@ -997,7 +1091,7 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
 
     def calculate_runup(self):
         if not self.raw_image_path or not self.mask_image_path:
-            messagebox.showerror("Error", "Load both raw image and annotation first.")
+            messagebox.showerror("Error", "Load both raw image and annotation first.", parent=self)
             return
 
         ig_threshold_hz = self._get_ig_threshold()
@@ -1043,7 +1137,7 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
             )
         
         if t_arr.size == 0:
-            messagebox.showerror("Error", "Annotation contains no runup data.")
+            messagebox.showerror("Error", "Annotation contains no runup data.", parent=self)
             return
 
         print(f"Extracted {len(t_arr)} runup points")
@@ -1162,16 +1256,16 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
 
     def export_runup(self):
         if self.runup_time is None or self.runup_distance is None:
-            messagebox.showerror("Error", "No runup data to export.")
+            messagebox.showerror("Error", "No runup data to export.", parent=self)
             return
         if not self.output_folder:
-            messagebox.showerror("Error", "Select an output folder.")
+            messagebox.showerror("Error", "Select an output folder.", parent=self)
             return
 
         base_name = os.path.basename(self.raw_image_path)
         match = re.search(r"(\d{4})[-_](\d{2})[-_](\d{2})[-_](\d{2})[-_](\d{2})", base_name)
         if not match:
-            messagebox.showerror("Error", "Could not extract date.")
+            messagebox.showerror("Error", "Could not extract date.", parent=self)
             return
         year, month, day, hour, minute = map(int, match.groups())
         base_dt = datetime.datetime(year, month, day, hour, minute)
@@ -1225,7 +1319,7 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         # ── Export clean plot PNG (legends below each subplot) ───
         self._export_clean_plot(out_name)
 
-        messagebox.showinfo("Export Runup", f"Exported to:\n{self.output_folder}")
+        messagebox.showinfo("Export Runup", f"Exported to:\n{self.output_folder}", parent=self)
 
         # Write Stockdon comparison text file if available
         sk = self._stockdon_result
@@ -1356,7 +1450,7 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
     def run_batch_process(self):
         # 1) Validate folders
         if not self.batch_raw_folder or not self.batch_mask_folder:
-            messagebox.showerror("Error", "Please select both batch raw and batch annotation folders.")
+            messagebox.showerror("Error", "Please select both batch raw and batch annotation folders.", parent=self)
             return
 
         ig_threshold_hz = self._get_ig_threshold()
@@ -1407,7 +1501,7 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         
         total_pairs = len(valid_pairs)
         if total_pairs == 0:
-            messagebox.showerror("Error", "No valid pairs found for batch processing.")
+            messagebox.showerror("Error", "No valid pairs found for batch processing.", parent=self)
             return
 
         print(f"Found {total_pairs} raw/annotation pairs")

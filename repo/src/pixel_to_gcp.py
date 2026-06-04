@@ -1,3 +1,78 @@
+"""
+pixel_to_gcp.py  —  GeoCamPal Pixel-to-GCP Tool
+=================================================
+
+Purpose
+-------
+Produces a GCP CSV ready for the Georeferencing module by letting the
+user click the exact pixel location of each Ground Control Point (GCP)
+in a series of close-up GCP photographs.  Each image is assumed to show
+one GCP; the tool steps through the images in GCP-number order, records
+one click per image, then writes the full coordinate table on completion.
+
+Workflow
+--------
+    1. Browse to a folder of GCP photographs.
+       Filenames must contain a GCP number recognisable by the pattern
+       GCP_N, GCPN, or GCP-N (e.g. GCP_01.jpg, mysite_GCP_7_cam1.png).
+    2. Load a GCP ID file (CSV) with the real-world coordinates.
+       Column names are normalised automatically; accepted variants
+       include lat/latitude, lon/longitude/lng, GCP_ID/id/gcp_id,
+       and elevation/elev/height/z/alt.
+    3. Optionally enter GCP numbers to skip (Bad GCPs field).
+    4. Click Start Process — the tool opens each image in turn.
+    5. Left-click the precise pixel location of the GCP target.
+    6. Press Enter to advance to the next image.
+    7. After the last image the output CSV is saved automatically.
+
+GCP ID file format
+------------------
+A CSV (any delimiter) with at minimum:
+
+    GCP_ID      — identifier matching the number in the image filenames
+    latitude    — WGS-84 latitude in decimal degrees
+    longitude   — WGS-84 longitude in decimal degrees
+
+Optional columns:
+    elevation / elev / height / z / alt  — written to Real_Z (default 0)
+    EPSG                                  — overrides auto-detected CRS
+
+When "Convert to UTM" is checked (default), lat/lon are converted to
+the appropriate UTM zone and the EPSG code is auto-detected.  When
+unchecked, longitude is written as Real_X and latitude as Real_Y with
+EPSG = 0.
+
+Image viewer
+------------
+The main panel renders only the visible viewport of the image, cropped
+from the original and rescaled at the current zoom level.  This allows
+full-resolution navigation of very large images without loading the
+entire scaled image into memory.
+
+    Zoom        — mouse wheel, or + / - keys
+    Scroll      — mouse wheel (vertical), Shift + wheel (horizontal)
+    Next image  — Enter key
+    Select GCP  — left-click
+
+The overview panel in the top-right shows a thumbnail of the full image
+with a red rectangle indicating the current viewport and a yellow dot
+marking any selected pixel.
+
+Output
+------
+    <name>.csv  — one row per GCP, columns:
+                    Image_name, Pixel_X, Pixel_Y, GCP_ID, camera,
+                    Real_X, Real_Y, Real_Z, EPSG
+
+    camera      — extracted from the filename if present
+                  (e.g. cam1 from GCP_3_cam1.jpg), else "0"
+
+Dependencies
+------------
+    numpy, pandas, Pillow, utm, customtkinter, utils, csv_utils
+"""
+
+
 import os
 import re
 import sys
@@ -432,13 +507,13 @@ class PixelToGCPWindow(ctk.CTkToplevel):
             try:
                 self.bad_gcp_list = [int(x.strip()) for x in bad_str.split(",") if x.strip() != ""]
             except Exception as e:
-                messagebox.showerror("Error", f"Invalid bad GCPs: {e}")
+                messagebox.showerror("Error", f"Invalid bad GCPs: {e}", parent=self)
                 return
         else:
             self.bad_gcp_list = []
 
         if not self.image_folder:
-            messagebox.showerror("Error", "No image folder selected.")
+            messagebox.showerror("Error", "No image folder selected.", parent=self)
             return
 
         # Build image_list from folder using robust GCP parsing
@@ -461,7 +536,7 @@ class PixelToGCPWindow(ctk.CTkToplevel):
         )
 
         if not self.image_list:
-            messagebox.showerror("Error", "No valid images found after filtering.")
+            messagebox.showerror("Error", "No valid images found after filtering.", parent=self)
             return
 
         self.current_index = 0
@@ -482,6 +557,7 @@ class PixelToGCPWindow(ctk.CTkToplevel):
                         f"GCP file missing columns: {missing}\n\n"
                         f"Found columns: {list(df.columns)}\n\n"
                         f"Accepted names include: lat/latitude, lon/longitude/lng, GCP_ID/id/gcp_id",
+                         parent=self
                     )
                     return
 
@@ -491,7 +567,7 @@ class PixelToGCPWindow(ctk.CTkToplevel):
                 df = df[~df["gcp_number"].isin(self.bad_gcp_list)].copy()
 
                 if df.empty:
-                    messagebox.showerror("Error", "No usable GCP rows remained after filtering.")
+                    messagebox.showerror("Error", "No usable GCP rows remained after filtering.", parent=self)
                     return
 
                 if self.convert_to_utm_var.get():
@@ -525,7 +601,7 @@ class PixelToGCPWindow(ctk.CTkToplevel):
             with Image.open(path) as pil_img:
                 self.current_pil_img = pil_img.copy()
         except Exception as e:
-            messagebox.showerror("Error", f"Cannot open image: {path}\n{e}")
+            messagebox.showerror("Error", f"Cannot open image: {path}\n{e}", parent=self)
             return
 
         self.current_filename = filename
@@ -870,11 +946,11 @@ class PixelToGCPWindow(ctk.CTkToplevel):
     # ---------------
     def save_output_csv(self):
         if not self.output_folder:
-            messagebox.showerror("Error", "No output folder selected.")
+            messagebox.showerror("Error", "No output folder selected.", parent=self)
             return False
 
         if self.gcp_df is None:
-            messagebox.showerror("Error", "No valid GCP file is loaded.")
+            messagebox.showerror("Error", "No valid GCP file is loaded.", parent=self)
             return False
 
         filename = self.entry_output_filename.get().strip()
@@ -927,7 +1003,7 @@ class PixelToGCPWindow(ctk.CTkToplevel):
         if not rows:
             messagebox.showerror(
                 "Error",
-                "No rows could be written. Check that your image filenames and GCP_ID values share matching GCP numbers.",
+                "No rows could be written. Check that your image filenames and GCP_ID values share matching GCP numbers.", parent=self
             )
             return False
 
@@ -956,7 +1032,7 @@ class PixelToGCPWindow(ctk.CTkToplevel):
                 )
             return True
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to save CSV: {e}")
+            messagebox.showerror("Error", f"Failed to save CSV: {e}", parent=self)
             return False
 
 

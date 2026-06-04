@@ -1,11 +1,89 @@
 """
-hsv_mask_ui.py
-──────────────
-UI construction, control panel, settings I/O, toggle helpers,
-and standalone helper classes (BBoxSelectorWindow, StdoutRedirector).
+hsv_mask_ui.py  —  GeoCamPal Feature Identifier UI Mixin
+=========================================================
 
-This module is a *mixin* — it is meant to be inherited by HSVMaskTool
-together with the processing and editing mixins.
+Purpose
+-------
+Mixin class that constructs all UI controls, manages collapsible
+dropdown sections, handles settings save/load, and provides toggle
+callbacks for the Feature Identifier tool.  It is designed to be
+inherited alongside HSVMaskProcessingMixin and HSVMaskEditingMixin by
+the FeatureIdentifier class in feature_identifier.py.
+
+This module must not be instantiated on its own.  It expects the
+full FeatureIdentifier state (mode, BooleanVars, image data, etc.)
+to be present via the MRO at runtime.
+
+Control panel structure
+-----------------------
+setup_controls() builds the entire control panel in this order.
+All sections except Import are collapsible:
+
+    Import row
+        Load Image / Load Folder button, bounding-box entry and
+        selector, inner-mask checkbox.
+
+    ML predicted mask row (optional, hidden until checked)
+        individual mode: browse a single mask file.
+        ml mode:         browse a mask folder + common-prefix length
+                         entry for filename matching.
+
+    Dropdown 1  —  AOI / Profile Filter
+        Profile start/end coordinates + width (drawn or typed).
+        Polygon AOI entry for free-form spatial masking.
+        Method selector (Threshold / Variance / Otsu) + min/max
+        thresholds for intensity-based AOI generation.
+        Preview Profile and Apply AOI buttons.
+
+    Dropdown 2  —  HSV Colour Masking
+        Saturation and Value multipliers + CLAHE enhancement toggle.
+        Primary H/S/V lower and upper sliders.
+        Dual HSV range (second H/S/V pair) for hue-wrapping features.
+        Invert mask toggle.
+        Calculate Mask button.
+
+    Dropdown 3  —  Multi-sample Colour Selection
+        Method selector (Color Distance / GrabCut).
+        Output mode (Remove selection / Keep selection only).
+        Patch radius entry.
+        Add Remove Samples / Add Keep Samples buttons.
+        Class name entries (written to CSV exports).
+        Apply Colour Picker button.
+
+    Boundary / Polygon extraction row
+        Extract Boundary, Extract Polygon, Extract Boundary with
+        Mask, Extract Polygon with Mask buttons.
+        Advanced settings toggle (min/max contour size, edge
+        thickness).
+
+    Export row
+        Feature ID and Image ID entries.
+        Export path browser.
+        Export Training Data, Export Mask, Export as Test Data,
+        Export as Overlay buttons.
+
+    Settings row
+        Save Settings and Load Settings buttons.
+
+Settings schema
+---------------
+Settings are persisted as a JSON file via utils.save_settings_json /
+load_settings_json.  The saved keys cover all slider positions, entry
+values, checkbox states, dropdown selections, and file paths needed
+to reproduce a detection configuration across sessions.
+
+Standalone helper class
+-----------------------
+BBoxSelectorWindow  — a tk.Toplevel window that lets the user drag a
+    rectangle over a loaded image to define a bounding box in original
+    image pixel coordinates.  Supports zoom in/out.  Returns the box
+    via a callback as (x, y, w, h) in original (unscaled) coordinates.
+
+Dependencies
+------------
+    numpy, opencv-python (cv2), Pillow, customtkinter,
+    utils (fit_geometry, StdoutRedirector, save/load_settings_json,
+    make_selector_payload, describe_saved_path, bring_child_to_front)
 """
 
 import os
@@ -1538,6 +1616,12 @@ class HSVMaskUIMixin:
             "color_pick_class_b_name": self.color_pick_class_b_name.get(),
             # ── bbox_text kept for backward compat ──
             "bbox_text": self.bbox_entry.get(),
+            # ── export identifiers ──
+            "feature_id": self.feature_id_entry.get() if hasattr(self, 'feature_id_entry') else "",
+            "image_id": self.image_id_entry.get() if hasattr(self, 'image_id_entry') else "1",
+            "category_id": self.category_id_entry.get() if hasattr(self, 'category_id_entry') else "1",
+            # ── batch extraction mode ──
+            "batch_extraction_mode": self.batch_extraction_mode.get() if hasattr(self, 'batch_extraction_mode') else "boundary",
         }
 
         try:
@@ -1585,6 +1669,41 @@ class HSVMaskUIMixin:
             if isinstance(ep, dict) and ep.get("path"):
                 self.export_path_entry.delete(0, "end")
                 self.export_path_entry.insert(0, ep["path"])
+                # Update batch output label if in batch mode
+                if hasattr(self, '_batch_output_label'):
+                    self._batch_output_label.configure(
+                        text=ep["path"], text_color="white")
+
+            # Restore image folder — auto-load images if directory exists
+            img_folder = paths.get("image_folder", {})
+            if isinstance(img_folder, dict) and img_folder.get("path"):
+                folder_path = img_folder["path"]
+                if os.path.isdir(folder_path):
+                    exts = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff")
+                    files = sorted(
+                        os.path.join(folder_path, f)
+                        for f in os.listdir(folder_path)
+                        if f.lower().endswith(exts)
+                    )
+                    if files:
+                        self.image_files = files
+                        self._current_input_folder = folder_path
+                        self.current_index = 0
+                        if self.mode == "batch":
+                            self.filename_label.configure(
+                                text=f"Loaded {len(files)} images for batch")
+                        else:
+                            # Schedule image load after settings are fully
+                            # applied so sliders/checkboxes are in place
+                            self.after(200, self.load_current_image)
+                        if hasattr(self, '_batch_input_label'):
+                            self._batch_input_label.configure(
+                                text=folder_path, text_color="white")
+                        print(f"Input folder restored from settings: "
+                              f"{folder_path}  ({len(files)} images)")
+                else:
+                    print(f"[load_settings] Saved image folder not found: "
+                          f"{folder_path}")
 
         # ── Restore selector geometry if present ──
         selector = data.get("selector", {})
@@ -1637,6 +1756,12 @@ class HSVMaskUIMixin:
 
         self.export_path_entry.delete(0, "end")
         self.export_path_entry.insert(0, data.get("export_path", ""))
+        # Update batch output label from flat key too (backward compat)
+        if hasattr(self, '_batch_output_label'):
+            _ep = self.export_path_entry.get().strip()
+            if _ep:
+                self._batch_output_label.configure(
+                    text=_ep, text_color="white")
 
         self.do_invert_mask.set(data.get("do_invert_mask", False))
         self.toggle_dual_sliders()
@@ -1738,6 +1863,22 @@ class HSVMaskUIMixin:
         self.color_pick_class_a_name.set(data.get("color_pick_class_a_name", "water"))
         self.color_pick_class_b_name.set(data.get("color_pick_class_b_name", "sand"))
 
+        # Restore export identifiers
+        if hasattr(self, 'feature_id_entry'):
+            self.feature_id_entry.delete(0, "end")
+            self.feature_id_entry.insert(0, data.get("feature_id", ""))
+        if hasattr(self, 'image_id_entry'):
+            self.image_id_entry.delete(0, "end")
+            self.image_id_entry.insert(0, data.get("image_id", "1"))
+        if hasattr(self, 'category_id_entry'):
+            self.category_id_entry.delete(0, "end")
+            self.category_id_entry.insert(0, data.get("category_id", "1"))
+
+        # Restore batch extraction mode
+        if hasattr(self, 'batch_extraction_mode'):
+            self.batch_extraction_mode.set(
+                data.get("batch_extraction_mode", "boundary"))
+
         # Mark settings as loaded (important for batch mode)
         self._batch_settings_loaded = True
         if hasattr(self, 'settings_summary_label') and self.mode == "batch":
@@ -1778,7 +1919,9 @@ class HSVMaskUIMixin:
             lines.append("  ✗ Multi-sample Colour Selection: disabled")
         if data.get("use_ml_pred_mask", False):
             lines.append(f"  ✓ ML Mask: folder={data.get('ml_mask_folder_path','?')}")
-        lines.append("  ✓ Boundary extraction: automatic — no manual editing in batch")
+        ext_mode = data.get("batch_extraction_mode", "boundary")
+        lines.append(f"  ✓ Extraction mode: {ext_mode}")
+        lines.append(f"  ✓ Feature ID: {data.get('feature_id', '—')}")
         try:
             self.settings_summary_label.configure(text="\n".join(lines))
         except Exception:

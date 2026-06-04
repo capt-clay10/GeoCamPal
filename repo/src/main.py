@@ -1,6 +1,88 @@
-import sys
+"""
+main.py  —  GeoCamPal Application Entry Point
+==============================================
 
-# Windows DPI awareness — must be set before any GUI imports
+Purpose
+-------
+Launches the GeoCamPal desktop application.  Displays a brief splash
+screen, then opens the main launcher window from which every tool
+in the toolbox can be opened.
+
+Launcher structure
+------------------
+The launcher groups tools into five labelled sections:
+
+    Pre-prep Tools
+        FOV Generator       — camera field-of-view footprint planner
+        Lens Correction     — intrinsic camera calibration from
+                              checkerboard images
+        Harmonise Images    — bad-image filtering, brightness and
+                              colour harmonisation, lens undistortion
+
+    Data Exploration
+        Time Series Analysis — multi-series hydrodynamic image selector
+        Color Space Explorer — color distribution analysis across an
+                               image folder
+
+    Georeferencing
+        Pixel to GCP        — interactive pixel-coordinate picker for
+                              GCP photographs
+        Homography          — compute a homography matrix from GCPs
+        Georef Images       — unified georeferencing tool (homography,
+                              camera projection, TPS, polynomial)
+
+    Feature Identifier Tool
+        Single Image        — interactive HSV masking and boundary
+                              editing for one image at a time
+        Folder Processing   — batch-guided workflow with optional ML
+                              prediction masks
+        Batch Process       — fully automated processing driven by a
+                              saved settings file
+
+    DEM Generator
+        Create DEM          — waterline-method DEM from shoreline
+                              GeoJSON files and a water-level CSV
+
+    Time-stacking
+        Profile & Hovmöller — pixel-profile extraction and Hovmöller
+                              diagram generation
+        Raw Timestack Image — builds a raw timestack PNG from a folder
+                              of coastal camera images
+        Wave Run Up         — extracts wave run-up from a timestack and
+                              an annotation file
+
+One-tool-at-a-time guard
+------------------------
+Only one tool window may be open at a time.  This prevents the
+sys.stdout redirection used by each tool's console from interfering
+with other tools.  Attempting to open a second tool while one is
+already open raises an informational dialog instead.
+
+Splash screen
+-------------
+A 1-second splash screen is shown on startup.  It attempts to load
+splash_image.png from the package resources; if the file is missing
+it falls back to a plain "Loading..." label.  The splash uses a
+manual event loop rather than mainloop() to avoid tearing down the
+Tk interpreter before the launcher opens.
+
+Platform notes
+--------------
+On Windows, SetProcessDpiAwareness(1) is called at import time to
+enable system-level DPI scaling.  Window icons are set via
+iconbitmap() (.ico) on Windows and iconphoto() (.png) on Linux and
+macOS, since Tk on non-Windows platforms does not support .ico via
+iconbitmap().
+
+Dependencies
+------------
+    customtkinter, Pillow, and all GeoCamPal tool modules
+"""
+
+# xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx #
+# 1) Import packages 
+
+import sys
 if sys.platform == "win32":
     try:
         import ctypes
@@ -11,6 +93,8 @@ if sys.platform == "win32":
 import customtkinter as ctk
 from PIL import Image
 
+# Import all sub modules
+
 from pixel_to_gcp import PixelToGCPWindow
 from feature_identifier import FeatureIdentifier
 from dem_generator import CreateDemWindow
@@ -18,15 +102,12 @@ from georef import GeoReferenceModule
 from homography import CreateHomographyMatrixWindow
 from raw_timestacker import TimestackTool
 from wave_runup import WaveRunUpCalculator
-
 from fov_generator import FOVGeneratorWindow
 from lens_correction import LensCorrectionWindow
 from harmonise_images import HarmoniseImagesWindow
-
 from exploration import TimeSeriesExplorerWindow
 from profile_tool import ProfileHovmullerWindow
 from colour_explorer import ColorSpaceExplorerWindow
-
 from utils import fit_geometry, resource_path
 
 
@@ -51,8 +132,9 @@ def set_window_icon(window):
     except Exception:
         pass  # Missing icon asset — not fatal
 
-
+# xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx #
 # 2) Optional splash screen
+
 def show_splash(duration_ms=1000):
     splash = ctk.CTk()
     set_window_icon(splash)
@@ -87,11 +169,15 @@ def show_splash(duration_ms=1000):
     except Exception:
         pass  # Window was destroyed — expected exit path
 
+# xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx #
 # 3) Set CustomTkinter appearance globally
+
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("green")
 
+# xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx #
 # 4) Launcher window
+
 def launcher_window():
     # ── Single-tool guard ──────────────────────────────────────────
     # Only one tool window may be open at a time.  This avoids the
@@ -197,7 +283,15 @@ def launcher_window():
     ctk.CTkButton(prep_frame, text="Lens Correction",  command=open_lens).pack(side="left", padx=5)
     ctk.CTkButton(prep_frame, text="Harmonise Images", command=open_harmonise).pack(side="left", padx=5)
 
-    # (B) Georeferencing
+    # (B) Data Exploration
+    ctk.CTkLabel(frame, text="Data Exploration", font=("Serif", 14, "bold")) \
+        .pack(anchor="w", pady=(10,0))
+    exp_frame = ctk.CTkFrame(frame, fg_color="transparent")
+    exp_frame.pack(fill="x", pady=5)
+    ctk.CTkButton(exp_frame, text="Time Series Analysis", command=open_timeseries).pack(side="left", padx=5)
+    ctk.CTkButton(exp_frame, text="Color Space Explorer", command=open_color_explorer).pack(side="left", padx=5)
+
+    # (C) Georeferencing
     ctk.CTkLabel(frame, text="Georeferencing", font=("Serif", 14, "bold")) \
         .pack(anchor="w", pady=(10,0))
     geo_frame = ctk.CTkFrame(frame, fg_color="transparent")
@@ -206,7 +300,7 @@ def launcher_window():
     ctk.CTkButton(geo_frame, text="Homography", command=open_homography).pack(side="left", padx=5)
     ctk.CTkButton(geo_frame, text="Georef Images", command=open_georef).pack(side="left", padx=5)
 
-    # (C) Feature Identifier Tool
+    # (D) Feature Identifier Tool
     ctk.CTkLabel(frame, text="Feature Identifier Tool", font=("Serif", 14, "bold")) \
         .pack(anchor="w", pady=(10,0))
     fi_frame = ctk.CTkFrame(frame, fg_color="transparent")
@@ -215,16 +309,7 @@ def launcher_window():
     ctk.CTkButton(fi_frame, text="Folder Processing",  command=open_feature_ml).pack(side="left", padx=5)
     ctk.CTkButton(fi_frame, text="Batch Process",      command=open_feature_batch).pack(side="left", padx=5)
 
-    # (F) Data Exploration
-    ctk.CTkLabel(frame, text="Data Exploration", font=("Serif", 14, "bold")) \
-        .pack(anchor="w", pady=(10,0))
-    exp_frame = ctk.CTkFrame(frame, fg_color="transparent")
-    exp_frame.pack(fill="x", pady=5)
-    ctk.CTkButton(exp_frame, text="Time Series Analysis", command=open_timeseries).pack(side="left", padx=5)
-    ctk.CTkButton(exp_frame, text="Color Space Explorer", command=open_color_explorer).pack(side="left", padx=5)
-
-
-    # (D) DEM Generator
+    # (E) DEM Generator
     ctk.CTkLabel(frame, text="DEM Generator", font=("Serif", 14, "bold")) \
         .pack(anchor="w", pady=(10,0))
     dem_frame = ctk.CTkFrame(frame, fg_color="transparent")
@@ -232,7 +317,7 @@ def launcher_window():
     ctk.CTkButton(dem_frame, text="Create DEM", command=open_dem) \
         .pack(side="left", padx=5)
 
-    # (E) Time-stacking
+    # (F) Time-stacking
     ctk.CTkLabel(frame, text="Time-stacking", font=("Serif", 14, "bold")) \
         .pack(anchor="w", pady=(10,0))
     ts_frame = ctk.CTkFrame(frame, fg_color="transparent")
@@ -260,6 +345,8 @@ def launcher_window():
     footer.pack(side="bottom", anchor="w", fill="x", pady=(10,0))
 
     dialog.mainloop()
+
+# xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx #
 
 # 5) MAIN
 if __name__ == "__main__":

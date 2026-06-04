@@ -1,20 +1,73 @@
 """
-Intrinsic lens correction
+lens_correction.py  —  GeoCamPal Intrinsic Lens Calibration
+============================================================
 
-Uses OpenCV checkerboard detection across multiple images to compute
-camera intrinsic parameters (camera matrix + distortion coefficients).
-Outputs a .pkl file compatible with the rest of the GeoCamPal pipeline.
+Purpose
+-------
+Estimates camera intrinsic parameters (camera matrix K and distortion
+coefficients D) from a set of checkerboard calibration images using
+OpenCV's camera calibration pipeline.  The result is saved as a Python
+pickle file that is consumed by the Georeferencing module (Camera
+Projection method) and the Harmonise Images lens-correction sub-task.
 
-Supports rectangular checkerboards where the square/cell width and
-height may differ (e.g. 30 mm × 25 mm cells).
+Method
+------
+For each image in the input folder, OpenCV's findChessboardCorners
+locates the inner corner grid of the checkerboard.  Corners are refined
+to sub-pixel accuracy with cornerSubPix.  The full set of detected
+corner configurations is then passed to calibrateCamera, which solves
+for K (3×3 camera matrix: fx, fy, cx, cy) and D (distortion vector:
+k1, k2, p1, p2, k3) by minimising the total reprojection error across
+all images.
 
-Expected workflow:
-  1. Browse to a folder containing checkerboard calibration images.
-  2. Enter the number of SQUARES (cols × rows) and cell width & height.
-     The tool subtracts 1 internally to get inner corners for OpenCV.
-  3. Click "Generate Lens Correction File".
-  4. Review detected corners and undistorted preview in the top panel.
-  5. .pkl is saved alongside a summary .txt report.
+A minimum of 3 images with successfully detected corners is required
+for a reliable calibration.  More images with diverse checkerboard
+poses (different angles, distances, positions in the frame) give a
+more robust result.
+
+Checkerboard input convention
+------------------------------
+The user enters the number of SQUARES (not inner corners) in each
+direction.  The tool subtracts 1 internally before passing to OpenCV,
+which expects the number of inner corner intersections.
+
+    Example: a board with 10 columns × 7 rows of squares
+             → 9 × 6 inner corners passed to findChessboardCorners
+
+Rectangular cells are supported: cell width and height can differ
+(e.g. 30 mm × 25 mm).  Object point coordinates are scaled accordingly
+before calibration.  Square cells are the common case; set both
+dimensions to the same value.
+
+Outputs  (saved to the user-selected output folder)
+-------
+    lens_calibration.pkl     — Python pickle with the following keys:
+                                 camera_matrix   — 3×3 float64 ndarray
+                                 dist_coeff      — distortion vector
+                                 rms_error       — RMS reprojection error (px)
+                                 image_size      — (W, H) in pixels
+                                 n_images_used   — images with corners found
+                                 pattern_size    — (n_cols, n_rows) inner corners
+                                 board_squares   — (sq_cols, sq_rows) as entered
+                                 cell_width_m    — cell width in metres
+                                 cell_height_m   — cell height in metres
+                                 square_size_m   — alias for cell_width_m
+
+    calibration_report.txt   — human-readable summary: board dimensions,
+                                 RMS error, K matrix, focal length, principal
+                                 point, distortion coefficients, and per-image
+                                 reprojection errors
+
+Preview
+-------
+After calibration the top panel displays two plots: the first image
+where corners were successfully detected (with the detected corner
+overlay drawn by drawChessboardCorners) alongside the same image after
+undistortion, so the user can visually judge correction quality.
+
+Dependencies
+------------
+    numpy, opencv-python (cv2), matplotlib, customtkinter, Pillow
 """
 
 # %% ————————————————————————————— imports —————————————————————————————

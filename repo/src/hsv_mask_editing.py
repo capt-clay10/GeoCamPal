@@ -1,12 +1,90 @@
 """
-hsv_mask_editing.py
-───────────────────
-Feature editing (cut/create/confirm), canvas interaction (drag, click,
-double-click, freehand), zoom & pan, non-destructive preview adjustments,
-and all export methods.
+hsv_mask_editing.py  —  GeoCamPal Feature Editing Mixin
+========================================================
 
-This module is a *mixin* — it is meant to be inherited by HSVMaskTool
-together with the UI and processing mixins.
+Purpose
+-------
+Mixin class that adds interactive feature editing, canvas rendering,
+zoom/pan, non-destructive image adjustments, and all export methods
+to the Feature Identifier tool.  It is designed to be inherited
+alongside HSVMaskUIMixin and HSVMaskProcessingMixin by the
+FeatureIdentifier class in feature_identifier.py.
+
+This module must not be instantiated on its own.  It expects the
+full FeatureIdentifier state (cv_image, full_image, features, etc.)
+to be present via the MRO at runtime.
+
+Edit session model
+------------------
+When the user opens the edit canvas (cut_detected_feature), all
+confirmed features are loaded into an edit session:
+
+    edited_edge_points  — the currently active polyline or polygon,
+                          shown on the canvas with draggable vertices.
+    _edit_session_features — all other features in the session, shown
+                             as green reference lines.  New shapes
+                             created during editing also go here.
+
+Nothing is committed back to self.features until "Confirm Feature"
+is pressed.  This allows the user to create, review, and discard
+shapes without affecting the confirmed set.
+
+Large-image proxy
+-----------------
+Images wider or taller than 2000 px are downscaled to a working proxy
+before the edit canvas opens.  Vertex coordinates are scaled
+proportionally.  On confirm, coordinates are scaled back to the
+original full-image resolution so exports are always at full precision.
+
+Canvas rendering
+----------------
+The edit canvas uses a viewport-only rendering strategy: only the
+currently visible region of the image (plus a small margin) is
+rendered at the current zoom level.  This keeps memory usage and
+redraw time bounded regardless of image size or zoom factor.
+
+Slider adjustments (saturation, exposure, highlights) apply to the
+proxy image and are debounced to ~30 fps during drag, with a
+higher-quality pass on mouse release.
+
+Undo / Redo
+-----------
+Every vertex add, delete, move, freehand stroke, and polygon close
+pushes a snapshot to edit_history (capped at 50 entries).  Any new
+action clears the redo stack.  Keyboard shortcuts: U = undo, R = redo.
+
+Keyboard shortcuts (edit canvas)
+---------------------------------
+    d   — delete-vertex mode
+    m   — add/move-vertex mode
+    f   — freehand drawing
+    e   — create new polyline
+    p   — create new polygon
+    c   — continue existing line
+    U   — undo
+    R   — redo
+    Enter — confirm feature
+
+Export formats
+--------------
+    training dataset/
+        images/          — copy of the source image (with feature suffix)
+        masks/           — binary PNG mask (255 = feature, 0 = background)
+        overlays/        — source image with feature drawn on top
+        geojson/         — GeoJSON LineString or Polygon; CRS from source
+                           TIFF when available, pixel coords otherwise
+        coco/            — COCO JSON with segmentation polygon, bbox,
+                           image dimensions, category and annotation IDs
+        class_points/    — CSV of colour-picker sample pixels with RGB,
+                           HSV, intensity, class label, and detection
+                           settings per point
+
+    test dataset/        — plain copy of the source image (no annotation)
+
+Dependencies
+------------
+    numpy, opencv-python (cv2), Pillow, shapely, geopandas, rasterio,
+    customtkinter
 """
 
 import os
