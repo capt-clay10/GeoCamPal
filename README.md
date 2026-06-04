@@ -6,16 +6,16 @@
 </p>
 
 <p align="center">
-  <strong>A modular GUI-driven toolbox for geospatial image processing, camera pre-processing, georeferencing, DEM generation, time-stacking, and wave run-up analysis.</strong>
+  <strong>A modular GUI-driven toolbox for geospatial image processing, camera pre-processing, georeferencing, Feature labeling, semi-automatic feature detection, DEM generation, time-stacking, and wave run-up analysis.</strong>
 </p>
 
 ---
 
 ## Overview
 
-**GeoCamPal** is a modular, GUI-driven Python toolbox for geospatial image-processing workflows. It brings together camera pre-processing, lens correction, image harmonisation, ground-control-point preparation, georeferencing, feature identification, exploratory image analysis, DEM generation, timestack generation, and wave run-up analysis in a single application.
+**GeoCamPal** is a modular, GUI-driven Python toolbox for geospatial image-processing workflows. It brings together camera pre-processing, lens correction, image harmonisation, Ground control point-to-pixel coordinate conversion, georeferencing, feature identification, exploratory image analysis, DEM generation, timestack generation, and wave run-up analysis in a single application.
 
-The software is designed for practical fixed-camera and coastal image-analysis workflows, while remaining useful for broader time-lapse, geospatial image-processing, and image-classification tasks.
+The software is designed for practical fixed-camera and coastal image-analysis workflows, while remaining useful for broader time-lapse, geospatial image processing, and image classification tasks.
 
 <p align="center">
   <img src="https://github.com/user-attachments/assets/42b56fee-4534-447f-a951-31bb52b7f51c" width="55%" alt="GeoCamPal launcher">
