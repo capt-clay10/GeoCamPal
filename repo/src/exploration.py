@@ -906,10 +906,8 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
         super().__init__(master=master, **kw)
         self.title("Multi-Time-Series Image Explorer")
         fit_geometry(self, 1400, 900, resizable=True)
-        try:
-            self.iconbitmap(resource_path("launch_logo.ico"))
-        except Exception:
-            pass
+        self.after(200, lambda: self.iconphoto(
+            False, tk.PhotoImage(file=resource_path("launch_logo.png"))))
 
         # ——— close handler ———
         self.protocol("WM_DELETE_WINDOW", self._on_close)
