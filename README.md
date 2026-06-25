@@ -85,12 +85,6 @@ pip install -r requirements.txt
 python main.py
 ```
 
-On Windows PowerShell, activate the environment with:
-
-```powershell
-.venv\Scripts\Activate.ps1
-```
-
 GeoCamPal targets **Python 3.8 or newer**.
 
 ---
