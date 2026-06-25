@@ -1,0 +1,47 @@
+{
+  "module": "raw_timestacker",
+  "settings_version": 1,
+  "paths": {
+    "input_folder": "U:/coast01/active/00_AG_share/Clayton/GeoCamPal/12_raw_timestack_image/input/burst_georef_images",
+    "output_folder": "U:/coast01/active/00_AG_share/Clayton/GeoCamPal/12_raw_timestack_image/expected_outputs",
+    "batch_folder": ""
+  },
+  "ui_state": {
+    "add_selector_text": false,
+    "selector_text": "line:269,31;563,288;width=1",
+    "selector_mode": "line",
+    "line_width": "1",
+    "identified_resolution": "0.500 m",
+    "add_resolution_manual": false,
+    "manual_resolution": "",
+    "fill_gaps": true,
+    "freq_hz": 1.0,
+    "duration_s": 600.0
+  },
+  "selectors": {
+    "primary": {
+      "mode": "line",
+      "points_px": [
+        [
+          269.0,
+          31.0
+        ],
+        [
+          563.0,
+          288.0
+        ]
+      ],
+      "crs": "EPSG:25832",
+      "points_world": [
+        [
+          453725.5,
+          6071894.0
+        ],
+        [
+          453872.5,
+          6071765.5
+        ]
+      ]
+    }
+  }
+}

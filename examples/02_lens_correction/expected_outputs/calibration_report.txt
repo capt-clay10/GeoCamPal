@@ -1,0 +1,43 @@
+=== Lens Calibration Report ===
+
+Input folder: U:/coast01/active/00_AG_share/Clayton/GeoCamPal/02_lens_correction/input/checkerboard_images
+Images found: 18
+Images with corners: 18
+Board: 19 × 17 squares
+Inner corners: 18 × 16
+Cell size: 27.55 mm (square)
+
+RMS reprojection error: 1.6484 px
+
+Camera matrix:
+[[6.70842148e+03 0.00000000e+00 1.68594391e+03]
+ [0.00000000e+00 6.74133071e+03 1.34418933e+03]
+ [0.00000000e+00 0.00000000e+00 1.00000000e+00]]
+
+Focal length: fx=6708.42 px, fy=6741.33 px
+Principal point: cx=1685.94 px, cy=1344.19 px
+Image size: 3088 × 2064 px
+
+Distortion coefficients:
+[ 1.04731836e-01 -2.27135510e+00  1.44043937e-02  4.90130204e-03
+  1.68952818e+01]
+
+Per-image reprojection errors:
+  Image 1: 0.0890 px
+  Image 2: 0.0883 px
+  Image 3: 0.0882 px
+  Image 4: 0.0899 px
+  Image 5: 0.0930 px
+  Image 6: 0.0942 px
+  Image 7: 0.0929 px
+  Image 8: 0.0963 px
+  Image 9: 0.0912 px
+  Image 10: 0.0852 px
+  Image 11: 0.0873 px
+  Image 12: 0.0883 px
+  Image 13: 0.0905 px
+  Image 14: 0.0887 px
+  Image 15: 0.1064 px
+  Image 16: 0.1185 px
+  Image 17: 0.1164 px
+  Image 18: 0.1299 px

@@ -1,0 +1,14 @@
+{
+  "module": "lens_correction",
+  "settings_version": 1,
+  "paths": {
+    "input_folder": "U:/coast01/active/00_AG_share/Clayton/GeoCamPal/02_lens_correction/input/checkerboard_images",
+    "output_folder": "U:/coast01/active/00_AG_share/Clayton/GeoCamPal/02_lens_correction/expected_outputs"
+  },
+  "ui_state": {
+    "sq_cols": "19",
+    "sq_rows": "17",
+    "cell_w_mm": "27.55",
+    "cell_h_mm": "27.55"
+  }
+}

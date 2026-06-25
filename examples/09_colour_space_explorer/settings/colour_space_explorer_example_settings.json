@@ -1,0 +1,43 @@
+{
+  "paths": {
+    "input_folder": "U:/coast01/active/00_AG_share/Clayton/GeoCamPal/09_colour_space_explorer/input/images",
+    "output_folder": "U:/coast01/active/00_AG_share/Clayton/GeoCamPal/09_colour_space_explorer/expected_outputs"
+  },
+  "ui_state": {
+    "recursive": false,
+    "color_space": "RGB",
+    "scatter_x": "Ch 0",
+    "scatter_y": "Ch 1",
+    "sky_pct": "0",
+    "ground_pct": "0",
+    "pixels_per_image": "2000",
+    "sigma": "2.5",
+    "timeline_stat": "median",
+    "timestamp_format": "",
+    "feature_class": "beach"
+  },
+  "selectors": {
+    "aoi_polygon_pts": [
+      [
+        1889,
+        383
+      ],
+      [
+        4206,
+        1644
+      ],
+      [
+        4673,
+        1283
+      ],
+      [
+        2594,
+        216
+      ],
+      [
+        2611,
+        216
+      ]
+    ]
+  }
+}

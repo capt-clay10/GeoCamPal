@@ -158,7 +158,7 @@ def extract_camera_part(name: str) -> str:
 class PixelToGCPWindow(ctk.CTkToplevel):
     def __init__(self, master=None):
         super().__init__(master)
-        self.title("Pixel to GCP Tool")
+        self.title("Pixel to GCP Module")
         fit_geometry(self, 1200, 800, resizable=True)
 
         try:

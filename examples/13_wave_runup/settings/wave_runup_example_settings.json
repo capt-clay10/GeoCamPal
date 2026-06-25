@@ -1,0 +1,22 @@
+{
+  "module": "wave_runup",
+  "settings_version": 1,
+  "paths": {
+    "raw_image": "U:/coast01/active/00_AG_share/Clayton/GeoCamPal/13_wave_runup/input/2025_10_04_08_19_raw_timestack_runup.png",
+    "annotation": "U:/coast01/active/00_AG_share/Clayton/GeoCamPal/13_wave_runup/input/2025_10_04_08_19_raw_timestack_runup_mask.png",
+    "output_folder": "U:/coast01/active/00_AG_share/Clayton/GeoCamPal/13_wave_runup/expected_outputs",
+    "batch_raw_folder": "",
+    "batch_mask_folder": ""
+  },
+  "ui_state": {
+    "land_left": false,
+    "manual_resolution": false,
+    "manual_resolution_value": "",
+    "ig_threshold_hz": "0.05",
+    "beach_slope_deg": "10",
+    "stockdon_enabled": true,
+    "stockdon_slope_deg": "10",
+    "stockdon_H0": "2",
+    "stockdon_T0": "5"
+  }
+}

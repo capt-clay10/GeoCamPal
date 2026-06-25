@@ -1,0 +1,31 @@
+=== Camera FOV Report ===
+Location: 53.781891°N, 7.710327°E
+UTM CRS: EPSG:32632
+Camera height above ground: 11.0 m
+DEM ground elevation: -3.08 m
+Camera absolute elevation: 7.92 m
+
+--- Cam 1 ---
+Heading: 67.95°  |  Depression: 3.00°
+HFOV: 25.94°  |  VFOV: 17.48°
+Hyperfocal: 266.68 m
+DoF near: 141.18 m  |  DoF far: ∞
+Ground DoF radii: r0=140.76 m, r1=2000.00 m
+
+--- Cam 2 ---
+Heading: 90.00°  |  Depression: 3.00°
+HFOV: 25.94°  |  VFOV: 17.48°
+Hyperfocal: 266.68 m
+DoF near: 141.18 m  |  DoF far: ∞
+Ground DoF radii: r0=140.76 m, r1=2000.00 m
+
+--- Cam 3 ---
+Heading: 112.05°  |  Depression: 3.00°
+HFOV: 25.94°  |  VFOV: 17.48°
+Hyperfocal: 266.68 m
+DoF near: 141.18 m  |  DoF far: ∞
+Ground DoF radii: r0=140.76 m, r1=2000.00 m
+
+=== Adjacent Overlap ===
+Cam 1 ↔ Cam 2: overlap≈3.89° | sep≈22.05°
+Cam 2 ↔ Cam 3: overlap≈3.89° | sep≈22.05°

@@ -574,7 +574,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
 
     def __init__(self, master=None, **kw):
         super().__init__(master=master, **kw)
-        self.title("Georeferencing Tool")
+        self.title("Georeferencing Module")
         fit_geometry(self, 1250, 900, resizable=True)
         try: self.after(200, lambda: self.iconphoto(False, tk.PhotoImage(file=resource_path("launch_logo.png"))))
         except: pass

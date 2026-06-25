@@ -1,0 +1,25 @@
+{
+  "paths": {
+    "image_folder": "D:/DynaDeep/Camera_Data/test/05",
+    "output_folder": "D:/DynaDeep/Camera_Data/test/result_test"
+  },
+  "global": {
+    "num_series": 1,
+    "buffer_min": "30",
+    "filename_format": "",
+    "recursive": true,
+    "copy_images": true
+  },
+  "series": [
+    {
+      "csv_path": "C:/02_Camera/02_Data/Water_level/wangeooge_wl_UTC.csv",
+      "label": "Water_Level",
+      "criterion": "Troughs (Minima)",
+      "threshold": "",
+      "tolerance": "0.5",
+      "peak_sep": "5",
+      "prominence": "0.2",
+      "nodata": ""
+    }
+  ]
+}

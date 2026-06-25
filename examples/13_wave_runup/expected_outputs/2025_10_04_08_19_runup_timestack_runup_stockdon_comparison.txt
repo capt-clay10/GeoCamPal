@@ -1,0 +1,20 @@
+Stockdon et al. (2006) R₂% Comparison
+==================================================
+
+Regime: intermediate
+
+Input parameters
+  Foreshore slope : 10.0°
+  β = tan(slope)  : 0.1763
+  H₀              : 2.00 m
+  T₀              : 5.0 s
+  L₀ (computed)   : 39.03 m
+
+Intermediate quantities
+  Setup η̄         : 0.5453 m
+  Swash S          : 1.2957 m
+
+Results
+  Stockdon R₂%     : 1.3124 m
+  Observed R₂%     : 1.9445 m  (98th percentile of detrended swash)
+  Difference       : +0.6321 m  (observed − predicted)

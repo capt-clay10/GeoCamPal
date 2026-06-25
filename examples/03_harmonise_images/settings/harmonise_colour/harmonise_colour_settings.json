@@ -1,0 +1,51 @@
+{
+  "module": "harmonise_images",
+  "settings_version": 1,
+  "paths": {
+    "input_folder": "U:/coast01/active/00_AG_share/Clayton/GeoCamPal/03_harmonise_images/input/raw_images/harmonise_colour",
+    "output_folder": "U:/coast01/active/00_AG_share/Clayton/GeoCamPal/03_harmonise_images/expected_outputs/colour_harmonised",
+    "ref_colour_path": "U:/coast01/active/00_AG_share/Clayton/GeoCamPal/03_harmonise_images/input/raw_images/harmonise_colour/2026_01_02_12_05-12_15_camPANO_v2_HDR.tif",
+    "loaded_bad_json_path": "",
+    "lens_calib_path": ""
+  },
+  "ui_state": {
+    "recursive": false,
+    "run_filter": false,
+    "run_lens": false,
+    "run_brightness": false,
+    "run_colour": true,
+    "run_average": false,
+    "exclude_bad_brightness": true,
+    "exclude_bad_colour": true,
+    "exclude_bad_avg": false,
+    "exclude_bad_lens": true,
+    "lens_crop_to_valid": true,
+    "export_filtered_good": false,
+    "tol": "5",
+    "sky_pct": "0",
+    "colour_algorithm": "Histogram Match (LAB)",
+    "filters_enabled": {
+      "Blur": true,
+      "Overexposure": true,
+      "Underexposure": true,
+      "Darkness": true,
+      "Low information": true,
+      "Lens droplets": true,
+      "Obstruction": true,
+      "Failed images": true
+    },
+    "filter_values": {
+      "Blur threshold": "20",
+      "Local blur fraction": "0.40",
+      "Clip overexp fraction": "0.15",
+      "Overexp pixel value": "254",
+      "Dark pixel value": "20",
+      "Under-exp fraction": "0.25",
+      "Dark max threshold": "25",
+      "Entropy threshold": "5.0",
+      "Droplet fraction": "0.08",
+      "Obstruction fraction": "0.35",
+      "Failed min size pct": "10"
+    }
+  }
+}

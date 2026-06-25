@@ -1,0 +1,31 @@
+{
+  "module": "fov_generator",
+  "settings_version": 1,
+  "paths": {
+    "basemap_path": "U:/coast01/active/00_AG_share/Clayton/GeoCamPal/01_fov_generator/input/example_basemap.tif",
+    "dem_path": "U:/coast01/active/00_AG_share/Clayton/GeoCamPal/01_fov_generator/input/example_DEM.tif",
+    "output_folder": "U:/coast01/active/00_AG_share/Clayton/GeoCamPal/01_fov_generator/expected_outputs"
+  },
+  "ui_state": {
+    "location": {
+      "Latitude": "53.78189093745898",
+      "Longitude": "7.710326978487411",
+      "Height above ground (m)": "11",
+      "Heading (° from N)": "90",
+      "Depression angle (°)": "3"
+    },
+    "range": {
+      "Focus distance (m)": "300",
+      "Max display range (m)": "2000"
+    },
+    "sensor": {
+      "Focal length (mm)": "16",
+      "Aperture (f-number)": "4",
+      "Sensor width (mm)": "7.37",
+      "Sensor height (mm)": "4.92"
+    },
+    "num_cameras": "3",
+    "overlap_pct": "15",
+    "viewshed_px": "auto"
+  }
+}

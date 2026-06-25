@@ -1,0 +1,16 @@
+{
+  "input_file": "U:/coast01/active/00_AG_share/Clayton/GeoCamPal/05_homography/input/gcp_to_pixel_coordinates.csv",
+  "output_folder": "U:/coast01/active/00_AG_share/Clayton/GeoCamPal/05_homography/expected_outputs",
+  "output_name": "example_homography_correction_matrix",
+  "exclude_enabled": true,
+  "exclude_text": "5,6,7,8,27,28,29,41,42,43,44,59,60,61,62,63,73,74,75,76,77,78,79,82,83,86,87,88,,89,90,104,105,106,109,110,111,112,113,114,118,119,120,121,124,128,129,137,140,141,143,149,151,158,159,162,165,166,167,171,173,174,175,180",
+  "advanced_enabled": false,
+  "advanced_values": {
+    "Number of GCPs": "90",
+    "Max iterations": "300000",
+    "Initial temperature": "100000.0",
+    "Cooling rate": "0.99995",
+    "Number of swaps": "1",
+    "RANSAC threshold": "0.7"
+  }
+}

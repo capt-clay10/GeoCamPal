@@ -1,0 +1,17 @@
+{
+  "paths": {
+    "wl_csv": "U:/coast01/active/00_AG_share/Clayton/GeoCamPal/10_dem_generator/input/waterlevel_UTM.csv",
+    "geojson_dir": "U:/coast01/active/00_AG_share/Clayton/GeoCamPal/10_dem_generator/input/shoreline_positions",
+    "output_dir": "U:/coast01/active/00_AG_share/Clayton/GeoCamPal/10_dem_generator/expected_outputs"
+  },
+  "parameters": {
+    "resolution": "1",
+    "vertex_spacing": "1",
+    "smoothing_sigma": "1.5",
+    "beach_shape": "Straight",
+    "dem_mode": "Daily",
+    "wl_bin": "0.02",
+    "filename_pattern": "(?P<year>\\d{4})_(?P<month>\\d{2})_(?P<day>\\d{2})_(?P<hour1>\\d{2})_(?P<min1>\\d{2})-(?P<hour2>\\d{2})_(?P<min2>\\d{2})_cam[A-Za-z0-9]+_v\\d+_HDR\\.geojson",
+    "export_xyz": true
+  }
+}

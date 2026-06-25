@@ -1,0 +1,65 @@
+{
+  "paths": {
+    "image_path": {
+      "path": "U:/coast01/active/00_AG_share/Clayton/GeoCamPal/07_feature_identifier/input/georeferenced_images/example_image.tif",
+      "exists": true
+    },
+    "image_folder": {
+      "path": "",
+      "exists": false
+    },
+    "export_path": {
+      "path": "U:/coast01/active/00_AG_share/Clayton/GeoCamPal/07_feature_identifier/expected_outputs",
+      "exists": true
+    }
+  },
+  "selector": {
+    "mode": "Threshold"
+  },
+  "enable_enhancements": true,
+  "s_multiplier": 100,
+  "v_multiplier": 100,
+  "h_low": 0,
+  "s_low": 0,
+  "v_low": 0,
+  "h_high": 255,
+  "s_high": 255,
+  "v_high": 255,
+  "use_dual_hsv": false,
+  "h2_low": 0,
+  "s2_low": 0,
+  "v2_low": 0,
+  "h2_high": 255,
+  "s2_high": 255,
+  "v2_high": 255,
+  "edge_thickness": 2,
+  "export_path": "U:/coast01/active/00_AG_share/Clayton/GeoCamPal/07_feature_identifier/expected_outputs",
+  "do_invert_mask": false,
+  "advanced_settings_enabled": false,
+  "min_contour_size": "",
+  "max_contour_size": "",
+  "use_ml_pred_mask": false,
+  "ml_mask_file_path": "",
+  "ml_mask_folder_path": "",
+  "common_name_length": "",
+  "use_aoi_filter": false,
+  "aoi_method": "Threshold",
+  "aoi_x1": "",
+  "aoi_y1": "",
+  "aoi_x2": "",
+  "aoi_y2": "",
+  "aoi_width": "5",
+  "aoi_min": "0",
+  "aoi_max": "255",
+  "aoi_polygon": "",
+  "use_hsv_masking": false,
+  "use_color_picker": false,
+  "color_pick_method": "Color Distance",
+  "color_pick_output_mode": "Remove selection",
+  "color_pick_patch_radius": "7",
+  "color_pick_remove_points": [],
+  "color_pick_keep_points": [],
+  "color_pick_class_a_name": "water",
+  "color_pick_class_b_name": "sand",
+  "bbox_text": "(460, 302, 2761, 1782)"
+}

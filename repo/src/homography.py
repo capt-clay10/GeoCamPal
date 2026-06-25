@@ -104,7 +104,7 @@ ctk.set_default_color_theme("green")
 class CreateHomographyMatrixWindow(ctk.CTkToplevel):
     def __init__(self, master=None, *args, **kwargs):
         super().__init__(master=master, *args, **kwargs)
-        self.title("Create Homography Matrix")
+        self.title("Homography Matrix Generator")
         #self.geometry("850x800")
         fit_geometry(self, 850, 800, resizable=True)
 

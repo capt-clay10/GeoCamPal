@@ -1,0 +1,25 @@
+{
+  "paths": {
+    "image_path": "U:/coast01/active/00_AG_share/Clayton/GeoCamPal/06_georef_images/input/oblique_images/example_oblique.tif",
+    "input_folder": "U:/coast01/active/00_AG_share/Clayton/GeoCamPal/06_georef_images/input/oblique_images",
+    "output_folder": "U:/coast01/active/00_AG_share/Clayton/GeoCamPal/06_georef_images/expected_outputs/georeferenced_geotiffs/using_homography_matrix",
+    "homography_path": "U:/coast01/active/00_AG_share/Clayton/GeoCamPal/06_georef_images/input/example_homography_correction_matrix.txt",
+    "gcp_path": "",
+    "calibration_path": ""
+  },
+  "method": "Homography",
+  "corner": "Bottom Left",
+  "manual_corners": "",
+  "crop": {
+    "S": "0",
+    "N": "6",
+    "E": "0",
+    "W": "1"
+  },
+  "scale": "4",
+  "epsg": "25832",
+  "elevation": "",
+  "excluded_gcps": "",
+  "aoi_manual": "",
+  "include_subfolders": false
+}

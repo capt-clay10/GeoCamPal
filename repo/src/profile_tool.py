@@ -240,7 +240,7 @@ class ProfileHovmullerWindow(ctk.CTkToplevel):
 
     def __init__(self, master=None, **kw):
         super().__init__(master=master, **kw)
-        self.title("Profile & Hovmöller Tool")
+        self.title("Profile & Hovmöller Module")
         #self.geometry("1400x950")
         fit_geometry(self, 1400, 850, resizable=True)
         try:

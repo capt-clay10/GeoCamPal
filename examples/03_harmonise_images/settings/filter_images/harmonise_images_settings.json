@@ -1,0 +1,43 @@
+{
+  "module": "harmonise_images",
+  "settings_version": 1,
+  "paths": {
+    "input_folder": "U:/coast01/active/00_AG_share/Anthony/Camera_filtered_images_2023",
+    "output_folder": "U:/coast01/active/00_AG_share/Anthony/test",
+    "ref_colour_path": ""
+  },
+  "ui_state": {
+    "recursive": false,
+    "run_filter": true,
+    "run_brightness": false,
+    "run_colour": false,
+    "run_average": false,
+    "exclude_bad_brightness": true,
+    "exclude_bad_colour": true,
+    "export_filtered_good": true,
+    "tol": "5",
+    "sky_pct": "0",
+    "colour_algorithm": "Iterative Transfer (best)",
+    "filters_enabled": {
+      "Blur": true,
+      "Overexposure": true,
+      "Underexposure": true,
+      "Darkness": true,
+      "Low information": true,
+      "Lens droplets": true,
+      "Obstruction": true
+    },
+    "filter_values": {
+      "Blur threshold": "20",
+      "Local blur fraction": "0.40",
+      "Clip overexp fraction": "0.05",
+      "Overexp pixel value": "250",
+      "Dark pixel value": "20",
+      "Under-exp fraction": "0.25",
+      "Dark max threshold": "25",
+      "Entropy threshold": "6",
+      "Droplet fraction": "0.08",
+      "Obstruction fraction": "0.15"
+    }
+  }
+}

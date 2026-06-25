@@ -297,7 +297,7 @@ def launcher_window():
     geo_frame = ctk.CTkFrame(frame, fg_color="transparent")
     geo_frame.pack(fill="x", pady=5)
     ctk.CTkButton(geo_frame, text="Pixel to GCP", command=open_pixel_to_gcp).pack(side="left", padx=5)
-    ctk.CTkButton(geo_frame, text="Homography generator", command=open_homography).pack(side="left", padx=5)
+    ctk.CTkButton(geo_frame, text="Homography Generator", command=open_homography).pack(side="left", padx=5)
     ctk.CTkButton(geo_frame, text="Georef Images", command=open_georef).pack(side="left", padx=5)
 
     # (D) Feature Identifier Tool
