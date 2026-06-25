@@ -766,7 +766,7 @@ class ScrollZoomSelector(tk.Frame):
 class TimestackTool(ctk.CTkToplevel):
     def __init__(self, master=None):
         super().__init__(master)
-        self.title("Time-stacking Tool")
+        self.title("Burst Images Time-stacker module")
         fit_geometry(self, 1200, 800, resizable=True)
         try:
             self.after(200, lambda: self.iconphoto(False, tk.PhotoImage(file=resource_path("launch_logo.png"))))

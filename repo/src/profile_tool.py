@@ -244,7 +244,7 @@ class ProfileHovmullerWindow(ctk.CTkToplevel):
         #self.geometry("1400x950")
         fit_geometry(self, 1400, 850, resizable=True)
         try:
-            self.iconbitmap(resource_path("launch_logo.ico"))
+            self.after(200, lambda: self.iconphoto(False, tk.PhotoImage(file=resource_path("launch_logo.png"))))
         except Exception:
             pass
 

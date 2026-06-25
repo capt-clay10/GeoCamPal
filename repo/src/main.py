@@ -19,19 +19,19 @@ The launcher groups tools into five labelled sections:
         Harmonise Images    — bad-image filtering, brightness and
                               colour harmonisation, lens undistortion
 
-    Data Exploration
+    Data Exploration Tools
         Time Series Analysis — multi-series hydrodynamic image selector
         Color Space Explorer — color distribution analysis across an
                                image folder
 
-    Georeferencing
+    Georeferencing Tools
         Pixel to GCP        — interactive pixel-coordinate picker for
                               GCP photographs
         Homography          — compute a homography matrix from GCPs
         Georef Images       — unified georeferencing tool (homography,
                               camera projection, TPS, polynomial)
 
-    Feature Identifier Tool
+    Feature Identifier Tools
         Single Image        — interactive HSV masking and boundary
                               editing for one image at a time
         Folder Processing   — batch-guided workflow with optional ML
@@ -39,11 +39,11 @@ The launcher groups tools into five labelled sections:
         Batch Process       — fully automated processing driven by a
                               saved settings file
 
-    DEM Generator
+    DEM Generator Tools
         Create DEM          — waterline-method DEM from shoreline
                               GeoJSON files and a water-level CSV
 
-    Time-stacking
+    Time-stacking Tools
         Profile & Hovmöller — pixel-profile extraction and Hovmöller
                               diagram generation
         Raw Timestack Image — builds a raw timestack PNG from a folder
@@ -51,7 +51,7 @@ The launcher groups tools into five labelled sections:
         Wave Run Up         — extracts wave run-up from a timestack and
                               an annotation file
 
-One-tool-at-a-time guard
+One-module-at-a-time guard
 ------------------------
 Only one tool window may be open at a time.  This prevents the
 sys.stdout redirection used by each tool's console from interfering
@@ -275,7 +275,7 @@ def launcher_window():
         .pack(pady=(0,15))
 
     # (A) Pre-prep Tools
-    ctk.CTkLabel(frame, text="Pre-prep Tools", font=("Serif", 14, "bold")) \
+    ctk.CTkLabel(frame, text="Pre-analysis Tools", font=("Serif", 14, "bold")) \
         .pack(anchor="w")
     prep_frame = ctk.CTkFrame(frame, fg_color="transparent")
     prep_frame.pack(fill="x", pady=5)
@@ -284,7 +284,7 @@ def launcher_window():
     ctk.CTkButton(prep_frame, text="Harmonise Images", command=open_harmonise).pack(side="left", padx=5)
 
     # (B) Data Exploration
-    ctk.CTkLabel(frame, text="Data Exploration", font=("Serif", 14, "bold")) \
+    ctk.CTkLabel(frame, text="Data Exploration Tools", font=("Serif", 14, "bold")) \
         .pack(anchor="w", pady=(10,0))
     exp_frame = ctk.CTkFrame(frame, fg_color="transparent")
     exp_frame.pack(fill="x", pady=5)
@@ -292,25 +292,25 @@ def launcher_window():
     ctk.CTkButton(exp_frame, text="Color Space Explorer", command=open_color_explorer).pack(side="left", padx=5)
 
     # (C) Georeferencing
-    ctk.CTkLabel(frame, text="Georeferencing", font=("Serif", 14, "bold")) \
+    ctk.CTkLabel(frame, text="Georeferencing Tools", font=("Serif", 14, "bold")) \
         .pack(anchor="w", pady=(10,0))
     geo_frame = ctk.CTkFrame(frame, fg_color="transparent")
     geo_frame.pack(fill="x", pady=5)
     ctk.CTkButton(geo_frame, text="Pixel to GCP", command=open_pixel_to_gcp).pack(side="left", padx=5)
-    ctk.CTkButton(geo_frame, text="Homography", command=open_homography).pack(side="left", padx=5)
+    ctk.CTkButton(geo_frame, text="Homography generator", command=open_homography).pack(side="left", padx=5)
     ctk.CTkButton(geo_frame, text="Georef Images", command=open_georef).pack(side="left", padx=5)
 
     # (D) Feature Identifier Tool
-    ctk.CTkLabel(frame, text="Feature Identifier Tool", font=("Serif", 14, "bold")) \
+    ctk.CTkLabel(frame, text="Feature Identification and Labelling Tools", font=("Serif", 14, "bold")) \
         .pack(anchor="w", pady=(10,0))
     fi_frame = ctk.CTkFrame(frame, fg_color="transparent")
     fi_frame.pack(fill="x", pady=5)
     ctk.CTkButton(fi_frame, text="Single Image",       command=open_feature_individual).pack(side="left", padx=5)
     ctk.CTkButton(fi_frame, text="Folder Processing",  command=open_feature_ml).pack(side="left", padx=5)
-    ctk.CTkButton(fi_frame, text="Batch Process",      command=open_feature_batch).pack(side="left", padx=5)
+    ctk.CTkButton(fi_frame, text="Batch Processing",      command=open_feature_batch).pack(side="left", padx=5)
 
     # (E) DEM Generator
-    ctk.CTkLabel(frame, text="DEM Generator", font=("Serif", 14, "bold")) \
+    ctk.CTkLabel(frame, text="DEM Generator Tools", font=("Serif", 14, "bold")) \
         .pack(anchor="w", pady=(10,0))
     dem_frame = ctk.CTkFrame(frame, fg_color="transparent")
     dem_frame.pack(fill="x", pady=5)
@@ -318,12 +318,12 @@ def launcher_window():
         .pack(side="left", padx=5)
 
     # (F) Time-stacking
-    ctk.CTkLabel(frame, text="Time-stacking", font=("Serif", 14, "bold")) \
+    ctk.CTkLabel(frame, text="Time-stacking Tools", font=("Serif", 14, "bold")) \
         .pack(anchor="w", pady=(10,0))
     ts_frame = ctk.CTkFrame(frame, fg_color="transparent")
     ts_frame.pack(fill="x", pady=5)
     ctk.CTkButton(ts_frame, text="Profile & Hovmöller",  command=open_profile).pack(side="left", padx=5)
-    ctk.CTkButton(ts_frame, text="Raw Timestack Image", command=open_timestack).pack(side="left", padx=5)
+    ctk.CTkButton(ts_frame, text="Burst Images Time-stacker", command=open_timestack).pack(side="left", padx=5)
     ctk.CTkButton(ts_frame, text="Wave Run Up",          command=open_wave_run).pack(side="left", padx=5)
 
 
