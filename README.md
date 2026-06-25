@@ -18,7 +18,7 @@
 The software is designed for practical fixed-camera and coastal image-analysis workflows, while remaining useful for broader time-lapse, geospatial image processing, and image classification tasks.
 
 <p align="center">
-  <img width="587" height="723" alt="image" src="https://github.com/user-attachments/assets/7c59f591-b459-42ae-9be8-f4fe5e5ed0a6" />
+  <img width="593" height="722" alt="image" src="https://github.com/user-attachments/assets/13934128-30ac-4277-abc1-26c4acebbb6c" />
 </p>
 
 <p align="center">
@@ -32,14 +32,14 @@ The software is designed for practical fixed-camera and coastal image-analysis w
 - [Overview](#overview)
 - [Main Capabilities](#main-capabilities)
 - [Installation](#installation)
-- [Modules](#modules)
+- [Tools](#modules)
   - [Launcher](#launcher)
   - [Pre-processing Tools](#pre-processing-tools)
-  - [Georeferencing](#georeferencing)
-  - [Feature Identifier](#feature-identifier)
-  - [Data Exploration](#data-exploration)
-  - [DEM Generator](#dem-generator)
-  - [Time-stacking and Run-up Analysis](#time-stacking-and-run-up-analysis)
+  - [Data Exploration Tools](#data-exploration-tools)
+  - [Georeferencing Tools](#georeferencing-tools)
+  - [Feature Identification and Labelling Tools](#feature-identification-and-labelling-tools)
+  - [DEM Generator Tools](#dem-generator-tools)
+  - [Time-stacking Tools](#time-stacking-tools)
 - [Typical Outputs](#typical-outputs)
 - [Dependencies](#dependencies)
 - [Contributing](#contributing)
@@ -51,7 +51,7 @@ The software is designed for practical fixed-camera and coastal image-analysis w
 
 ## Main Capabilities
 
-| Category | Modules |
+| Tools | Modules |
 |---|---|
 | **Pre-processing** | Field-of-view generation, lens calibration, bad-image filtering, brightness harmonisation, colour harmonisation |
 | **Georeferencing** | Pixel-to-GCP conversion, homography matrix creation, image rectification using several supported methods |
@@ -102,11 +102,11 @@ GeoCamPal targets **Python 3.8 or newer**.
 The launcher is the central hub for GeoCamPal. It groups the available tools into the following sections:
 
 - Pre-processing Tools
-- Data Exploration
-- Georeferencing
-- Feature Identifier Tool
-- DEM Generator
-- Time-stacking
+- Data Exploration Tools
+- Georeferencing Tools
+- Feature Identification and Labelling Tools
+- DEM Generator Tools
+- Time-stacking Tools
 
 Only one tool window is opened at a time to keep console output and GUI state manageable.
 
@@ -248,176 +248,7 @@ Both brightness and colour harmonisation include a preview-first workflow. A ran
 
 ---
 
-## Georeferencing
-
-### Pixel-to-GCP Converter
-
-The **Pixel-to-GCP Converter** allows users to select image pixel coordinates corresponding to known ground-control points. The tool supports flexible GCP CSV column names and optional conversion from latitude/longitude to UTM coordinates.
-
-**Typical inputs**
-
-- Folder containing GCP images
-- GCP coordinate CSV file
-- Optional bad-GCP exclusion list
-- Output folder
-- Output CSV filename
-
-**Typical outputs**
-
-A CSV containing pixel-to-world mappings, including fields such as:
-
-- `Image_name`
-- `Pixel_X`
-- `Pixel_Y`
-- `GCP_ID`
-- `camera`
-- `Real_X`
-- `Real_Y`
-- `Real_Z`
-- `EPSG`
-
-<p align="center">
-  <img src="https://github.com/user-attachments/assets/39c81770-5f93-44e7-beac-b7ee3bc098b8" width="90%" alt="Pixel to GCP Converter">
-</p>
-
-<p align="center">
-  <em>Interactive selection of image pixel coordinates for ground-control points.</em>
-</p>
-
----
-
-### Homography Matrix Creator
-
-The **Homography Matrix Creator** computes 3 × 3 homography matrices from pixel-to-world GCP mappings.
-
-It supports:
-
-- RANSAC-based homography estimation
-- Accuracy computation
-- Manual GCP exclusion
-- Advanced simulated-annealing search for GCP subset selection
-
-**Typical inputs**
-
-- GCP CSV file containing at least `GCP_ID`, `Pixel_X`, `Pixel_Y`, `Real_X`, and `Real_Y`
-- Optional list of GCPs to exclude
-- Output folder
-- Output filename
-
-**Typical outputs**
-
-- `<output_name>.txt`
-- `<output_name>_bestsubset.txt`, when using the advanced subset-optimisation workflow
-
-<p align="center">
-  <img src="https://github.com/user-attachments/assets/496d569a-39f1-47ba-bf09-69bbf9f3be83" width="90%" alt="Homography Matrix Creator">
-</p>
-
-<p align="center">
-  <em>Homography matrix creation and GCP subset optimisation.</em>
-</p>
-
----
-
-### Georeferencing Tool
-
-The **Georeferencing Tool** rectifies oblique images into a spatial reference system. It supports several georeferencing methods, not only homography.
-
-Supported methods include:
-
-- Homography
-- Camera Projection
-- Thin Plate Spline
-- Polynomial Order 1
-- Polynomial Order 2
-
-The required inputs depend on the selected method. Homography uses a precomputed matrix, while camera projection and GCP-based methods require appropriate GCP and calibration information.
-
-**Typical inputs**
-
-- Input image or image folder
-- Selected georeferencing method
-- Homography matrix or GCP CSV, depending on method
-- Optional lens calibration file for camera projection workflows
-- EPSG/spatial reference information
-- Corner preset and crop values
-- Optional AOI selection
-- Output folder
-- Batch-processing settings
-
-**Typical outputs**
-
-- Georeferenced `.tif` files
-- Batch outputs for single folders or subfolders
-- Preview outputs inside the GUI before final processing
-
-<p align="center">
-  <img src="https://github.com/user-attachments/assets/831781be-02f3-41cd-ac7d-2aa79cd95650" width="90%" alt="Georeferencing Tool">
-</p>
-
-<p align="center">
-  <em>Georeferencing workflow with preview and batch-processing support.</em>
-</p>
-
----
-
-## Feature Identifier
-
-The **Feature Identifier** combines automatic HSV colour masking with AOI/profile filtering, colour-picker classification, and manual feature editing. It is designed for extracting visible features such as shorelines, waterlines, swash fronts, masks, polygons, and polylines from imagery.
-
-The tool is organised into three modes:
-
-| Mode | Purpose |
-|---|---|
-| **Single Image** | Tune detection settings and export features from one image. |
-| **Folder Processing** | Step through an image folder, refine features, and export training-style outputs. |
-| **Batch Processing** | Apply saved or predefined detection settings across a folder. |
-
-Feature identification tools include:
-
-- HSV colour masking
-- Optional dual-HSV masking
-- AOI/profile-based filtering
-- ML-predicted mask support
-- Multi-sample colour picker
-- Boundary extraction
-- Polygon extraction
-- Freehand, vertex, polyline, and polygon editing
-- Undo/redo during editing
-- Georeferenced export where spatial information is available
-
-**Typical inputs**
-
-- Image or image folder
-- Optional associated mask file or mask folder
-- HSV settings
-- AOI/profile settings
-- Colour-picker samples
-- Optional georeferencing information
-- Export/output folder
-
-**Typical outputs**
-
-For single-image and folder-processing workflows, exports may include structured folders such as:
-
-- `images/`
-- `masks/`
-- `overlays/`
-- `geojson/`
-- `coco/`
-- Optional class-point CSV outputs
-
-For batch workflows, outputs commonly include:
-
-- GeoJSON feature files
-- Overlay PNG files
-
-<img width="1055" height="1491" alt="GUI_screenshot_feature_identifier" src="https://github.com/user-attachments/assets/07a5d38b-6aa7-4293-96e2-6ea2f9268ba2" />
-
-
----
-
-## Data Exploration
+## Data Exploration Tools
 
 ### Time Series Explorer
 
@@ -500,7 +331,175 @@ Available analyses include:
 
 ---
 
-## DEM Generator
+## Georeferencing Tools
+
+### Pixel-to-GCP Converter
+
+The **Pixel-to-GCP Converter** allows users to select image pixel coordinates corresponding to known ground-control points. The tool supports flexible GCP CSV column names and optional conversion from latitude/longitude to UTM coordinates.
+
+**Typical inputs**
+
+- Folder containing GCP images
+- GCP coordinate CSV file
+- Optional bad-GCP exclusion list
+- Output folder
+- Output CSV filename
+
+**Typical outputs**
+
+A CSV containing pixel-to-world mappings, including fields such as:
+
+- `Image_name`
+- `Pixel_X`
+- `Pixel_Y`
+- `GCP_ID`
+- `camera`
+- `Real_X`
+- `Real_Y`
+- `Real_Z`
+- `EPSG`
+
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/39c81770-5f93-44e7-beac-b7ee3bc098b8" width="90%" alt="Pixel to GCP Converter">
+</p>
+
+<p align="center">
+  <em>Interactive selection of image pixel coordinates for ground-control points.</em>
+</p>
+
+---
+
+### Homography Generator
+
+The **Homography Matrix Creator** computes 3 × 3 homography matrices from pixel-to-world GCP mappings.
+
+It supports:
+
+- RANSAC-based homography estimation
+- Accuracy computation
+- Manual GCP exclusion
+- Advanced simulated-annealing search for GCP subset selection
+
+**Typical inputs**
+
+- GCP CSV file containing at least `GCP_ID`, `Pixel_X`, `Pixel_Y`, `Real_X`, and `Real_Y`
+- Optional list of GCPs to exclude
+- Output folder
+- Output filename
+
+**Typical outputs**
+
+- `<output_name>.txt`
+- `<output_name>_bestsubset.txt`, when using the advanced subset-optimisation workflow
+
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/496d569a-39f1-47ba-bf09-69bbf9f3be83" width="90%" alt="Homography Matrix Creator">
+</p>
+
+<p align="center">
+  <em>Homography matrix creation and GCP subset optimisation.</em>
+</p>
+
+---
+
+### Georeferencing 
+
+The **Georeferencing Tool** rectifies oblique images into a spatial reference system. It supports several georeferencing methods, not only homography.
+
+Supported methods include:
+
+- Homography
+- Camera Projection
+- Thin Plate Spline
+- Polynomial Order 1
+- Polynomial Order 2
+
+The required inputs depend on the selected method. Homography uses a precomputed matrix, while camera projection and GCP-based methods require appropriate GCP and calibration information.
+
+**Typical inputs**
+
+- Input image or image folder
+- Selected georeferencing method
+- Homography matrix or GCP CSV, depending on method
+- Optional lens calibration file for camera projection workflows
+- EPSG/spatial reference information
+- Corner preset and crop values
+- Optional AOI selection
+- Output folder
+- Batch-processing settings
+
+**Typical outputs**
+
+- Georeferenced `.tif` files
+- Batch outputs for single folders or subfolders
+- Preview outputs inside the GUI before final processing
+
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/831781be-02f3-41cd-ac7d-2aa79cd95650" width="90%" alt="Georeferencing Tool">
+</p>
+
+<p align="center">
+  <em>Georeferencing workflow with preview and batch-processing support.</em>
+</p>
+
+---
+
+## Feature Identification and Labelling Tools
+
+The **Feature Identification and Labelling Tools** combine automatic HSV colour masking with AOI/profile filtering, colour-picker classification, and manual feature editing. It is designed for extracting visible features such as shorelines, waterlines, swash fronts, masks, polygons, and polylines from imagery.
+
+The tool is organised into three modes:
+
+| Mode | Purpose |
+|---|---|
+| **Single Image** | Tune detection settings and export features from one image. |
+| **Folder Processing** | Step through an image folder, refine features, and export training-style outputs. |
+| **Batch Processing** | Apply saved or predefined detection settings across a folder. |
+
+Feature identification tools include:
+
+- HSV colour masking
+- Optional dual-HSV masking
+- AOI/profile-based filtering
+- ML-predicted mask support
+- Multi-sample colour picker
+- Boundary extraction
+- Polygon extraction
+- Freehand, vertex, polyline, and polygon editing
+- Undo/redo during editing
+- Georeferenced export where spatial information is available
+
+**Typical inputs**
+
+- Image or image folder
+- Optional associated mask file or mask folder
+- HSV settings
+- AOI/profile settings
+- Colour-picker samples
+- Optional georeferencing information
+- Export/output folder
+
+**Typical outputs**
+
+For single-image and folder-processing workflows, exports may include structured folders such as:
+
+- `images/`
+- `masks/`
+- `overlays/`
+- `geojson/`
+- `coco/`
+- Optional class-point CSV outputs
+
+For batch workflows, outputs commonly include:
+
+- GeoJSON feature files
+- Overlay PNG files
+
+<img width="1055" height="1491" alt="GUI_screenshot_feature_identifier" src="https://github.com/user-attachments/assets/07a5d38b-6aa7-4293-96e2-6ea2f9268ba2" />
+
+---
+
+## DEM Generator Tools
 
 The **DEM Generator** creates digital elevation models from shoreline GeoJSON files and water-level data.
 
@@ -541,9 +540,9 @@ For composite DEM mode:
 
 ---
 
-## Time-stacking and Run-up Analysis
+## Time-stacking Tools
 
-### Profile and Hovmöller Tool
+### Profile and Hovmöller 
 
 The **Profile and Hovmöller Tool** extracts pixel profiles along a user-defined line across a folder of images. Users can draw a profile line interactively or enter pixel coordinates manually.
 
@@ -567,7 +566,7 @@ The tool can generate either an RGB Hovmöller diagram or an intensity Hovmölle
 
 ---
 
-### Raw Timestacker
+### Burst Images Time-stacker
 
 The **Raw Timestacker** creates calibrated timestack images from image sequences. It supports timestamp parsing from filenames, EXIF/TIFF metadata, and file modification time as a fallback.
 
