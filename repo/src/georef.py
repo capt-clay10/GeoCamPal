@@ -106,7 +106,7 @@ gdal.PushErrorHandler('CPLQuietErrorHandler')   # suppress non-fatal TIFF warnin
 from utils import fit_geometry, resource_path, setup_console, restore_console, save_settings_json, load_settings_json
 
 try:
-    from csv_utils import read_gcp_csv, normalise_columns
+    from csv_utils import read_gcp_csv, normalise_columns, exclude_gcps_by_number, gcp_numeric_suffix
 except ImportError:
     def read_gcp_csv(p, verbose=True):
         df = pd.read_csv(p, sep=None, engine="python", encoding="utf-8-sig")
@@ -115,6 +115,14 @@ except ImportError:
         if "EPSG" not in df.columns: df["EPSG"] = 0
         return df
     def normalise_columns(df, verbose=True): return df
+    def gcp_numeric_suffix(value):
+        m = re.search(r"(\d+)\s*$", str(value).strip())
+        return int(m.group(1)) if m else None
+    def exclude_gcps_by_number(df, nums, id_col="GCP_ID"):
+        if id_col not in df.columns or not nums:
+            return df.reset_index(drop=True)
+        wanted = {int(n) for n in nums}
+        return df[~df[id_col].map(gcp_numeric_suffix).isin(wanted)].reset_index(drop=True)
 
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("green")
@@ -879,7 +887,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
         if excl:
             try:
                 nums = [int(x.strip()) for x in excl.split(",") if x.strip()]
-                df = df[~df["GCP_ID"].isin([f"GCP_{n}" for n in nums])].reset_index(drop=True)
+                df = exclude_gcps_by_number(df, nums)
             except: pass
         return df
 
@@ -1064,7 +1072,10 @@ class GeoReferenceModule(ctk.CTkToplevel):
             dropped = set(range(len(df))) - set(best_idx.tolist())
             if dropped:
                 ids = df["GCP_ID"].values if "GCP_ID" in df.columns else np.arange(len(df))
-                excl = ",".join(str(ids[i]).split("_")[-1] for i in dropped)
+                def _excl_num(v):
+                    n = gcp_numeric_suffix(v)
+                    return str(n) if n is not None else str(v)
+                excl = ",".join(_excl_num(ids[i]) for i in dropped)
                 self.after(0, lambda: (self._excl_ent.delete(0, "end"), self._excl_ent.insert(0, excl)))
         threading.Thread(target=_run, daemon=True).start()
 

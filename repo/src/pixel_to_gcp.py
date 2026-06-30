@@ -254,7 +254,9 @@ class PixelToGCPWindow(ctk.CTkToplevel):
             " • Left-click on the main image to select a pixel (saved in original-image pixel coords).\n"
             " • Press + to zoom in; press - to zoom out.\n"
             " • Use the mouse wheel to scroll vertically; hold Shift + mouse wheel to scroll horizontally.\n"
-            " • Press Enter to advance to the next image.\n"
+            " • Press Enter or \u2192 to go to the next image; press \u2190 to go back to the previous one.\n"
+            " • Re-clicking an image updates its point; revisit any image to correct a mistake.\n"
+            " • The CSV is saved when you advance past the last image (the window stays open), or use Save pixel-to-gcp file button anytime.\n"
             " • The overview image shows the visible viewport in red."
         )
         instructions_label = ctk.CTkLabel(instructions_panel, text=instructions_text, justify="left")
@@ -345,24 +347,52 @@ class PixelToGCPWindow(ctk.CTkToplevel):
         ).pack(side="left")
         ctk.CTkButton(
             pnl_start,
-            text="Save Settings",fg_color="#4F5D75", hover_color="#61708A",
-            command=self.save_settings,
+            text="\u25c0 Previous",
+            command=self.prev_image,
+            fg_color="#6693F5", hover_color="#7DA5F7",
         ).pack(side="left", padx=5)
         ctk.CTkButton(
             pnl_start,
+            text="Next \u25b6",
+            command=self.next_image,
+            fg_color="#6693F5", hover_color="#7DA5F7",
+        ).pack(side="left", padx=5)
+        ctk.CTkButton(
+            pnl_start,
+            text="Save pixel-to-gcp file",
+            command=self.save_output_csv,
+            fg_color="#2E7D32", hover_color="#388E3C",
+        ).pack(side="left", padx=5)
+        # ctk.CTkLabel(
+        #     pnl_start,
+        #     text="(Enter / \u2192 = next, \u2190 = previous; CSV saves on the last image without closing the window)",
+        # ).pack(side="left", padx=8)
+
+        # ── settings / reset row (bottom) ──
+        pnl_settings = ctk.CTkFrame(config_panel)
+        pnl_settings.pack(side="top", fill="x", padx=5, pady=2)
+        ctk.CTkButton(
+            pnl_settings,
+            text="Save Settings",fg_color="#4F5D75", hover_color="#61708A",
+            command=self.save_settings,
+        ).pack(side="left")
+        ctk.CTkButton(
+            pnl_settings,
             text="Load Settings",fg_color="#4F5D75", hover_color="#61708A",
             command=self.load_settings,
         ).pack(side="left", padx=5)
         ctk.CTkButton(
-            pnl_start,
+            pnl_settings,
             text="Reset",
             command=self.reset_to_initial,
             fg_color="#8B0000",
             hover_color="#A52A2A",
         ).pack(side="left", padx=5)
 
-        # BIND keys to the entire window (zoom + next image)
+        # BIND keys to the entire window (zoom + navigation)
         self.bind("<Return>", self.next_image)
+        self.bind("<Right>", self.next_image)
+        self.bind("<Left>", self.prev_image)
         self.bind("<plus>", self.zoom_in)
         self.bind("<minus>", self.zoom_out)
         self.bind("<KP_Add>", self.zoom_in)
@@ -933,14 +963,27 @@ class PixelToGCPWindow(ctk.CTkToplevel):
         if not self.image_list:
             return
 
+        # On the last image, advancing saves the CSV but keeps the window
+        # open (so an accidental Enter can never close it, and the user can
+        # review or Reset). Earlier images simply advance.
+        if self.current_index >= len(self.image_list) - 1:
+            self.log("Last image reached. Saving CSV — the window stays open for review or Reset.")
+            self.save_output_csv()
+            return
+
         self.current_index += 1
-        if self.current_index >= len(self.image_list):
-            self.log("All images processed. Saving CSV.")
-            saved = self.save_output_csv()
-            if saved:
-                self.destroy()
-        else:
-            self.show_image(self.image_list[self.current_index])
+        self.show_image(self.image_list[self.current_index])
+
+    # PREVIOUS IMAGE
+    # ---------------
+    def prev_image(self, event=None):
+        if not self.image_list:
+            return
+        if self.current_index <= 0:
+            self.log("Already at the first image.")
+            return
+        self.current_index -= 1
+        self.show_image(self.image_list[self.current_index])
 
     # SAVE OUTPUT
     # ---------------

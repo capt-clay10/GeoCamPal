@@ -17,6 +17,7 @@ Usage in any module:
 
 import pandas as pd
 import os
+import re
 
 # ── Canonical column names used throughout GeoCamPal ────────────────
 #    Every alias maps to the canonical name on the right.
@@ -243,3 +244,35 @@ def read_gcp_id_csv(path: str, verbose: bool = True) -> pd.DataFrame:
             print("[CSV] Added Real_Z/elevation column (default 0.0)")
 
     return df
+
+
+# ── GCP identifier helpers ──────────────────────────────────────────
+#    These let the "Exclude GCPs" feature work regardless of how the
+#    GCP_ID values are written: GCP_1, GCP1, GCP-1, gcp 1, or a bare 1.
+
+def gcp_numeric_suffix(value):
+    """
+    Return the trailing GCP number from an identifier as an int.
+
+    Handles GCP_1, GCP1, GCP-1, 'gcp 1', 'Point_07', or a bare '5'.
+    Returns None if no trailing number is found.
+    """
+    s = str(value).strip()
+    m = re.search(r"(\d+)\s*$", s)
+    return int(m.group(1)) if m else None
+
+
+def exclude_gcps_by_number(df, nums, id_col="GCP_ID"):
+    """
+    Drop rows whose GCP_ID numeric suffix is in `nums`.
+
+    Tolerant of GCP_ID formatting (GCP_1 vs GCP1 vs GCP-1 vs 1), so the
+    same exclude list works no matter which producer wrote the file.
+
+    Returns a new DataFrame with a reset index.
+    """
+    if id_col not in df.columns or not nums:
+        return df.reset_index(drop=True)
+    wanted = {int(n) for n in nums}
+    keep_mask = ~df[id_col].map(gcp_numeric_suffix).isin(wanted)
+    return df[keep_mask].reset_index(drop=True)

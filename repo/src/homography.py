@@ -88,7 +88,7 @@ from utils import (
 
 # ── shared CSV utility ──
 try:
-    from csv_utils import read_gcp_csv, check_required_columns
+    from csv_utils import read_gcp_csv, check_required_columns, exclude_gcps_by_number
 except ImportError:
     # Fallback if csv_utils.py is not on the path yet
     def read_gcp_csv(path, verbose=True):
@@ -96,6 +96,19 @@ except ImportError:
 
     def check_required_columns(df, required, source="CSV"):
         return [c for c in required if c not in df.columns]
+
+    def exclude_gcps_by_number(df, nums, id_col="GCP_ID"):
+        # Minimal tolerant fallback: match on trailing number of GCP_ID
+        import re as _re
+        if id_col not in df.columns or not nums:
+            return df.reset_index(drop=True)
+        wanted = {int(n) for n in nums}
+
+        def _suffix(v):
+            m = _re.search(r"(\d+)\s*$", str(v).strip())
+            return int(m.group(1)) if m else None
+
+        return df[~df[id_col].map(_suffix).isin(wanted)].reset_index(drop=True)
 
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("green")
@@ -469,9 +482,8 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
             if excl_str:
                 try:
                     nums = [int(x.strip()) for x in excl_str.split(",") if x.strip()]
-                    excl_ids = [f"GCP_{n}" for n in nums]
-                    self.log(f"Excluding GCP IDs: {excl_ids}")
-                    gcp_data = gcp_data[~gcp_data["GCP_ID"].isin(excl_ids)].reset_index(drop=True)
+                    self.log(f"Excluding GCP numbers: {nums}")
+                    gcp_data = exclude_gcps_by_number(gcp_data, nums)
                 except Exception as e:
                     self.log(f"Error parsing excluded GCPs: {e}")
 
