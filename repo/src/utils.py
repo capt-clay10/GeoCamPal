@@ -26,6 +26,8 @@ import queue
 import sys
 import threading
 import time
+import cv2
+import numpy as np
 import tkinter as tk
 from tkinter import filedialog, messagebox
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -592,6 +594,59 @@ def describe_saved_path(path: Optional[str]) -> Dict[str, Any]:
         "exists": bool(text and os.path.exists(text)),
     }
 
+# ─────────────────────────────────────────────────────────────────────
+#  CV.imread helper  —  sometimes cannot read non-ascii
+# ─────────────────────────────────────────────────────────────────────
+
+def imread_safe(path, flags=cv2.IMREAD_COLOR, *, verbose=True):
+    """
+    Drop-in replacement for cv2.imread that:
+      * accepts str or pathlib.Path,
+      * works with non-ASCII / Unicode paths (the classic cv2.imread failure
+        mode on Windows), and
+      * prints a clear reason when an image can't be read, instead of
+        failing silently.
+
+    Returns the image array on success, or None on failure — identical to
+    cv2.imread — so existing 'if img is None:' checks keep working unchanged.
+    """
+    path = os.fspath(path)  # accepts Path or str
+
+    # 1) Missing file — the most common real cause of "can't find images".
+    if not os.path.exists(path):
+        if verbose:
+            print(f"[imread] File not found: {path}")
+        return None
+
+    # 2) Empty file (failed/partial copy or download).
+    try:
+        if os.path.getsize(path) == 0:
+            if verbose:
+                print(f"[imread] File is 0 bytes (empty): {path}")
+            return None
+    except OSError:
+        pass
+
+    # 3) Normal fast path.
+    img = cv2.imread(path, flags)
+    if img is not None:
+        return img
+
+    # 4) Fallback: read raw bytes via numpy, decode in memory.
+    #    This is the standard fix for Unicode/non-ASCII paths that
+    #    cv2.imread cannot open directly.
+    try:
+        data = np.fromfile(path, dtype=np.uint8)
+        img = cv2.imdecode(data, flags)
+    except Exception as e:
+        if verbose:
+            print(f"[imread] Error decoding {path}: {e}")
+        return None
+
+    if img is None and verbose:
+        print(f"[imread] File exists but could not be decoded "
+              f"(unsupported format or corrupt): {path}")
+    return img
 
 # ─────────────────────────────────────────────────────────────────────
 #  Backward-compatible alias

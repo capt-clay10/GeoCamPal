@@ -81,6 +81,7 @@ from PIL import Image, ImageTk
 from utils import (
     fit_geometry, resource_path, setup_console, restore_console,
     save_settings_json, load_settings_json, bring_child_to_front,
+    imread_safe,
     format_eta as shared_format_eta,
 )
 
@@ -699,7 +700,7 @@ class ColorSpaceExplorerWindow(ctk.CTkToplevel):
 
         # Load the first image for reference
         ref_path = images[0]
-        ref_bgr = cv2.imread(str(ref_path))
+        ref_bgr = imread_safe(ref_path)
         if ref_bgr is None:
             messagebox.showerror("AOI", f"Cannot read: {ref_path.name}", parent=self)
             return
@@ -964,7 +965,7 @@ class ColorSpaceExplorerWindow(ctk.CTkToplevel):
             for idx, img_path in enumerate(images):
                 if self._cancel_if_requested():
                     return
-                img = cv2.imread(str(img_path))
+                img = imread_safe(img_path)
                 if img is None:
                     print(f"  [SKIP] Cannot read: {img_path.name}")
                     continue

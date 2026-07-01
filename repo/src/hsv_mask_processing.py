@@ -127,7 +127,7 @@ import shutil
 from rasterio.errors import NotGeoreferencedWarning
 from difflib import SequenceMatcher
 
-from utils import restore_console
+from utils import restore_console, imread_safe
 
 warnings.filterwarnings("ignore", category=NotGeoreferencedWarning)
 
@@ -172,7 +172,7 @@ class HSVMaskProcessingMixin:
         if not path or not os.path.exists(path):
             return None
 
-        m = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+        m = imread_safe(path, cv2.IMREAD_UNCHANGED)
         if m is None:
             return None
 
@@ -459,7 +459,7 @@ class HSVMaskProcessingMixin:
         if not file_path:
             return
     
-        original_image = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
+        original_image = imread_safe(file_path, cv2.IMREAD_UNCHANGED)
         if original_image is None:
             messagebox.showerror("Error", f"Failed to load image: {file_path}", parent=self)
             return
@@ -548,7 +548,7 @@ class HSVMaskProcessingMixin:
             self.mask_label.image = None
 
         file_path = self.image_files[self.current_index]
-        original_image = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
+        original_image = imread_safe(file_path, cv2.IMREAD_UNCHANGED)
         if original_image is None:
             messagebox.showerror("Error", f"Failed to load image {file_path}", parent=self)
             return
@@ -2040,7 +2040,7 @@ class HSVMaskProcessingMixin:
                 pass
 
             # ── Load image ──
-            original = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
+            original = imread_safe(file_path, cv2.IMREAD_UNCHANGED)
             if original is None:
                 print(f"[batch_process] Skipped (unreadable): {basename}")
                 skipped += 1

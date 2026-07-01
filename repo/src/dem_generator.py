@@ -97,7 +97,9 @@ import matplotlib
 
 from utils import (
     fit_geometry, resource_path, setup_console, restore_console,
-    save_settings_json, load_settings_json, compute_eta, format_eta,
+    save_settings_json, load_settings_json, bring_child_to_front,
+    imread_safe,
+    format_eta as shared_format_eta,
 )
 matplotlib.use("Agg")
 ctk.set_appearance_mode("Dark")

@@ -107,6 +107,7 @@ from utils import (
     format_eta,
     compute_eta,
     make_selector_payload,
+    imread_safe,
 )
 
 ctk.set_appearance_mode("Dark")
@@ -630,7 +631,7 @@ class ScrollZoomSelector(tk.Frame):
             )
         if not file_path:
             return
-        self.cv_image = cv2.imread(file_path)
+        self.cv_image = imread_safe(file_path)
         if self.cv_image is None:
             messagebox.showerror("Error", "Failed to load image.", parent=self)
             return

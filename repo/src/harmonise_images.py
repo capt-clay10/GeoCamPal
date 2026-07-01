@@ -145,6 +145,7 @@ from utils import (
     restore_console,
     save_settings_json,
     load_settings_json,
+    imread_safe,
 )
 
 try:
@@ -1610,7 +1611,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
             filetypes=[("Images", "*.jpg *.jpeg *.png *.bmp *.tif *.tiff"),
                        ("All files", "*.*")])
         if f:
-            img = cv2.imread(f)
+            img = imread_safe(f)
             if img is None:
                 messagebox.showerror("Error",
                                       f"Cannot read image:\n{f}")
@@ -1853,7 +1854,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
             self.ref_colour_path = ref_path or None
             self.ref_colour_bgr = None
             if self.ref_colour_path and os.path.isfile(self.ref_colour_path):
-                img = cv2.imread(self.ref_colour_path)
+                img = imread_safe(self.ref_colour_path)
                 if img is not None:
                     self.ref_colour_bgr = img
                     self.ref_colour_label.configure(
@@ -2351,7 +2352,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
                     self._update_progress(idx, len(images), start_time)
                     continue
 
-                img = cv2.imread(str(p))
+                img = imread_safe(str(p))
                 if img is None:
                     # Always flag unreadable files regardless of checkbox state
                     bad_list.append(str(p))
@@ -2490,7 +2491,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
                     self._ui_set_eta("Cancelled")
                     print("Brightness preview cancelled.")
                     return
-                img = cv2.imread(str(p))
+                img = imread_safe(str(p))
                 if img is None:
                     means.append(np.nan)
                 else:
@@ -2498,7 +2499,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
             means_arr = np.array(means)
             ref_mean = float(np.nanmedian(means_arr))
             ref_idx = int(np.nanargmin(np.abs(means_arr - ref_mean)))
-            ref_img = cv2.imread(str(images[ref_idx]))
+            ref_img = imread_safe(str(images[ref_idx]))
             if ref_img is None:
                 print(f"  ERROR: could not load reference image {images[ref_idx].name}")
                 return
@@ -2512,7 +2513,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
                     print("Preview cancelled.")
                     return
                 p = images[si]
-                img = cv2.imread(str(p))
+                img = imread_safe(str(p))
                 if img is None:
                     continue
                 m = means_arr[si]
@@ -2579,7 +2580,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
                     self._ui_set_eta("Cancelled")
                     print("Brightness harmonisation cancelled.")
                     return
-                img = cv2.imread(str(p))
+                img = imread_safe(str(p))
                 if img is None:
                     means.append(np.nan)
                     loaded.append(None)
@@ -2688,7 +2689,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
                     print("Preview cancelled.")
                     return
                 p = images[si]
-                img = cv2.imread(str(p))
+                img = imread_safe(str(p))
                 if img is None:
                     continue
                 corrected = algo_fn(img, cfg["ref_colour_bgr"])
@@ -2749,7 +2750,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
                     self._ui_set_eta("Cancelled")
                     print("Colour harmonisation cancelled.")
                     return
-                img = cv2.imread(str(p))
+                img = imread_safe(str(p))
                 if img is None:
                     print(f"[WARN] Cannot read: {p.name}")
                     continue
@@ -2855,7 +2856,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
                         self._ui_set_eta("Cancelled")
                         print("Averaging cancelled.")
                         return
-                    img = cv2.imread(str(p), cv2.IMREAD_COLOR)
+                    img = imread_safe(str(p), cv2.IMREAD_COLOR)
                     if img is None:
                         skipped_local += 1
                         continue
@@ -2977,7 +2978,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
             print(f"  Mode: {mode_str}")
 
             # Up-front compatibility check against the first image
-            sample = cv2.imread(str(images[0]))
+            sample = imread_safe(str(images[0]))
             if sample is not None and calib_W and calib_H:
                 sH, sW = sample.shape[:2]
                 if (sH, sW) != (calib_H, calib_W):
@@ -3012,7 +3013,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
                     self._ui_set_eta("Cancelled")
                     print("Lens correction cancelled.")
                     return
-                img = cv2.imread(str(p))
+                img = imread_safe(str(p))
                 if img is None:
                     counts["failed"] += 1
                     print(f"  [SKIP] {p.name}: cannot read")

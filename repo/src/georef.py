@@ -103,7 +103,7 @@ from osgeo import gdal, osr
 gdal.UseExceptions()
 gdal.PushErrorHandler('CPLQuietErrorHandler')   # suppress non-fatal TIFF warnings
 
-from utils import fit_geometry, resource_path, setup_console, restore_console, save_settings_json, load_settings_json
+from utils import fit_geometry, resource_path, setup_console, restore_console, save_settings_json, load_settings_json, imread_safe
 
 try:
     from csv_utils import read_gcp_csv, normalise_columns, exclude_gcps_by_number, gcp_numeric_suffix
@@ -914,7 +914,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
     # ── Initial Georeferencing ──
     def _initial_georef(self):
         if not self._img_path: messagebox.showerror("Error", "Browse an image first.", parent=self); return
-        img = cv2.imread(self._img_path)
+        img = imread_safe(self._img_path)
         if img is None: messagebox.showerror("Error", "Cannot read image.", parent=self); return
         self._show(self._img_path, self._orig_lbl)
         mk = self._method_key; scale = self._get_scale()
@@ -1037,7 +1037,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
         def _run():
             K = self._K if mk == "proj" else None; d = self._dist if mk == "proj" else None
             if mk == "proj":
-                img = cv2.imread(self._img_path)
+                img = imread_safe(self._img_path)
                 if img is not None: K = self._get_K_for((img.shape[1], img.shape[0]))
             errs = compute_loo(df, mk, K, d, self._get_elev())
             ids = df["GCP_ID"].values if "GCP_ID" in df.columns else np.arange(len(df))
@@ -1065,7 +1065,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
         if df is None or len(df) < 5: messagebox.showerror("Error", "Need >= 5 GCPs.", parent=self); return
         mk = self._method_key; K = self._K if mk == "proj" else None; d = self._dist if mk == "proj" else None
         if mk == "proj" and self._img_path:
-            img = cv2.imread(self._img_path)
+            img = imread_safe(self._img_path)
             if img is not None: K = self._get_K_for((img.shape[1], img.shape[0]))
         def _run():
             best_idx, _ = run_sa_optimisation(df, mk, K, d, self._get_elev(), log_fn=print)
@@ -1083,7 +1083,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
     def _secondary_georef(self):
         if self._preview_bgr is None: messagebox.showerror("Error", "Run Initial Georeferencing first.", parent=self); return
         if not self._img_path: messagebox.showerror("Error", "No image.", parent=self); return
-        img = cv2.imread(self._img_path)
+        img = imread_safe(self._img_path)
         if img is None: messagebox.showerror("Error", "Cannot read image.", parent=self); return
         mk = self._method_key; scale = self._get_scale(); aoi = self._aoi
         print(f"\n[Secondary Georef] Starting secondary georeferencing ({self._method_var.get()})…")
@@ -1163,7 +1163,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
 
     # ── Batch save single ──
     def _save_single(self, img_path, out_path):
-        img = cv2.imread(img_path)
+        img = imread_safe(img_path)
         if img is None: return False
         mk = self._method_key; hi, wi = img.shape[:2]
         source_corners = self._get_source_corners(hi, wi)

@@ -92,7 +92,7 @@ import customtkinter as ctk
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
-from utils import fit_geometry, resource_path, setup_console, restore_console, save_settings_json, load_settings_json
+from utils import fit_geometry, resource_path, setup_console, restore_console, save_settings_json, load_settings_json, imread_safe
 
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("green")
@@ -572,7 +572,7 @@ class ProfileHovmullerWindow(ctk.CTkToplevel):
             filetypes=[("Images", "*.jpg *.jpeg *.png *.bmp *.tif *.tiff")])
         if not p:
             return
-        img = cv2.imread(p)
+        img = imread_safe(p)
         if img is None:
             messagebox.showerror("Error", f"Cannot read: {p}", parent=self)
             return
@@ -817,7 +817,7 @@ class ProfileHovmullerWindow(ctk.CTkToplevel):
             filenames = []
 
             for idx, (fp, dt) in enumerate(image_list):
-                img = cv2.imread(str(fp))
+                img = imread_safe(str(fp))
                 if img is None:
                     print(f"[WARN] Cannot read: {fp.name}")
                     continue

@@ -93,6 +93,7 @@ from tkinter import filedialog, messagebox
 from utils import (
     fit_geometry, resource_path, setup_console, restore_console,
     save_settings_json, load_settings_json, compute_eta, format_eta,
+    imread_safe,
 )
 
 ctk.set_appearance_mode("Dark")
@@ -490,7 +491,7 @@ class LensCorrectionWindow(ctk.CTkToplevel):
                     self._ui_progress(0, "ETA: Cancelled")
                     return
 
-                img = cv2.imread(img_path)
+                img = imread_safe(img_path)
                 if img is None:
                     print(f"[WARN] Cannot read: {os.path.basename(img_path)}")
                     continue
