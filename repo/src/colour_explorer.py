@@ -926,8 +926,11 @@ class ColorSpaceExplorerWindow(ctk.CTkToplevel):
             ch_names = CS_CHANNELS[cs]
             ch_ranges = CS_RANGES[cs]
 
-            images = collect_images(self.input_folder,
-                                    self.recursive_var.get())
+            recursive = self.recursive_var.get()
+            if recursive:
+                print("Scanning sub-folders for images… "
+                      "(this can take a while on large / networked trees)")
+            images = collect_images(self.input_folder, recursive)
             if not images:
                 self._show_warning("Warning",
                                    "No images found in the folder.")

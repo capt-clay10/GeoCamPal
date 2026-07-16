@@ -24,7 +24,7 @@ Each module folder contains the following subfolders:
 
 ## Getting Started
 
-1. Upon launching an isntance of GeoCamPal, navigate to the module folder you wish to run.
+1. Upon launching an instance of GeoCamPal, navigate to the module folder you wish to run.
 2. In GeoCamPal module of choice open the `.json` file located in the `settings/` subfolder.
 3. **Update the input and output directory paths** to match your local file system.
 4. Load the updated `.json` file into the corresponding GeoCamPal module.

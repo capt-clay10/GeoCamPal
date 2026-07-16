@@ -137,6 +137,7 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
         self.utm_points = None
         self.gcp_ids = None
         self.best_H_annealing = None
+        self.best_subset_annealing = None  # row indices of the winning GCP subset
         self.best_cost = None
         self.detected_epsg = None
         self._cancel_requested = False
@@ -390,6 +391,7 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
         self.utm_points = None
         self.gcp_ids = None
         self.best_H_annealing = None
+        self.best_subset_annealing = None  # row indices of the winning GCP subset
         self.best_cost = None
         self.detected_epsg = None
 
@@ -489,8 +491,12 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
 
         # -------------- store arrays ----------------
         self.gcp_ids = gcp_data["GCP_ID"].values
-        self.pixel_points = gcp_data[["Pixel_X", "Pixel_Y"]].values.astype(np.float32)
-        self.utm_points = gcp_data[["Real_X", "Real_Y"]].values.astype(np.float32)
+        # float64 (not float32): UTM northings are ~6-7 significant digits, so
+        # float32 quantises coordinates by up to ~0.5 m before any computation,
+        # inflating residuals and biasing the SA subset search.  OpenCV accepts
+        # float64 for findHomography / perspectiveTransform.
+        self.pixel_points = gcp_data[["Pixel_X", "Pixel_Y"]].values.astype(np.float64)
+        self.utm_points = gcp_data[["Real_X", "Real_Y"]].values.astype(np.float64)
 
         # -------------- extract EPSG if available ----------------
         self.detected_epsg = None
@@ -542,7 +548,7 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
         messagebox.showinfo("Success", "Homography matrix computed and saved successfully.", parent=self)
 
     def compute_accuracy(self):
-        """Apply H to each pixel point and report per-GCP error."""
+        """Apply H to each pixel point and report the per-GCP reprojection distance."""
         if self.H_final is None or self.pixel_points is None:
             messagebox.showerror("Error", "Please compute the homography matrix first!", parent=self)
             return
@@ -560,8 +566,8 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
 
         report = f"Max difference CV vs. manual: {max_diff:.3f}\n"
         for gid, err in zip(self.gcp_ids, errors):
-            report += f"{gid}: Error = {err:.3f} m\n"
-        report += f"Mean error: {errors.mean():.3f} m\n"
+            report += f"{gid}: reprojection distance = {err:.3f} m\n"
+        report += f"Mean reprojection distance: {errors.mean():.3f} m\n"
         self.log(report)
 
     # %%             Simulated-annealing helpers
@@ -675,8 +681,12 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
 
                 new_subset = current_subset.copy()
                 for _ in range(swaps):
+                    pool = np.setdiff1d(idx_all, new_subset)
+                    if len(pool) == 0:
+                        # subset already uses every GCP — no swap is possible
+                        break
                     out = random.choice(new_subset)
-                    inp = random.choice(np.setdiff1d(idx_all, new_subset))
+                    inp = random.choice(pool)
                     new_subset[np.where(new_subset == out)[0][0]] = inp
                 _, _, _, _, _, _, H2 = self.compute_homography_and_errors(
                     self.pixel_points, self.utm_points, new_subset, r_thresh
@@ -702,21 +712,38 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
                     )
 
             self.best_H_annealing = best_H
+            self.best_subset_annealing = best_subset
             self.best_cost = best_cost
             elapsed = time.time() - t0
             m, med, sd, mx, inl, big = self.compute_full_errors(
                 best_H, self.pixel_points, self.utm_points
             )
             self._set_sa_progress(max_iter, max_iter, eta_seconds=0, message="Completed")
+            best_ids = self._subset_gcp_ids(best_subset)
             self.thread_log(
                 f"SA finished in {elapsed:.2f}s | cost={best_cost:.2f}\n"
                 f"Mean={m:.2f} m, Median={med:.2f} m, σ={sd:.2f} m, Max={mx:.2f} m, "
-                f"Inlier={inl*100:.1f} %, >5m={big}"
+                f"Inlier={inl*100:.1f} %, >5m={big}\n"
+                f"Best GCP subset ({len(best_ids)} GCPs): {', '.join(best_ids)}"
             )
         finally:
             self._sa_running = False
 
     #%%                           Export SA result
+
+    def _subset_gcp_ids(self, subset):
+        """Map SA subset row indices back to their GCP_ID labels (sorted).
+
+        Returns a list of string IDs, or an empty list if the GCP IDs are
+        unavailable.  Used both for the console log and the exported header.
+        """
+        if subset is None or self.gcp_ids is None:
+            return []
+        ids = []
+        for i in sorted(int(x) for x in subset):
+            if 0 <= i < len(self.gcp_ids):
+                ids.append(str(self.gcp_ids[i]))
+        return ids
 
     def accept_and_export_new_matrix(self):
         if self.best_H_annealing is None:
@@ -726,17 +753,32 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
         if not out_name:
             messagebox.showerror("Error", "Please enter an output file name.", parent=self)
             return
+        if not self.output_folder:
+            messagebox.showerror("Error", "Please select an output folder.", parent=self)
+            return
         path = os.path.join(self.output_folder, f"{out_name}_bestsubset.txt")
         try:
-            header = ""
+            # Build the header. EPSG (when known) MUST stay on the first line:
+            # the georeferencing module reads only the first line to detect it.
+            # Extra '#'-prefixed lines are ignored by numpy.loadtxt on load.
+            header_lines = []
             if self.detected_epsg:
-                header = f"EPSG:{self.detected_epsg}"
+                header_lines.append(f"EPSG:{self.detected_epsg}")
+            best_ids = self._subset_gcp_ids(self.best_subset_annealing)
+            if best_ids:
+                header_lines.append(
+                    f"GCPs used (SA best subset, {len(best_ids)}): "
+                    f"{', '.join(best_ids)}"
+                )
+            header = "\n".join(header_lines)
             np.savetxt(path, self.best_H_annealing, header=header)
         except Exception as e:
             self.log(f"Error exporting: {e}")
             messagebox.showerror("Error", f"Error exporting best matrix: {e}", parent=self)
             return
         self.log(f"Best homography matrix exported to: {path}")
+        if best_ids:
+            self.log(f"Best GCP subset ({len(best_ids)} GCPs): {', '.join(best_ids)}")
         messagebox.showinfo("Success", "Best homography matrix exported successfully.", parent=self)
 
 

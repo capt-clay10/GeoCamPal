@@ -1,5 +1,5 @@
 """
-hsv_mask_processing.py  —  GeoCamPal Feature Processing Mixin
+hsv_mask_processing.py  —  GeoCamPal Feature identification
 ==============================================================
 
 Purpose
@@ -637,21 +637,45 @@ class HSVMaskProcessingMixin:
 
     # -------------- MASK CALCULATION --------------
 
+    # ── Batch thread-safety helpers ─────────────────────────────────
+    def _bv(self, key, getter):
+        """Batch-value: return the main-thread snapshot for *key* when the
+        batch worker is running (``self._batch_overrides`` set), else call the
+        widget *getter*.  Reading tkinter widgets/variables from a background
+        thread is undefined behaviour and can crash on macOS/Linux; every
+        widget read reachable from _batch_worker is routed through here."""
+        ov = getattr(self, "_batch_overrides", None)
+        if ov is not None and key in ov:
+            return ov[key]
+        return getter()
+
+    def _aoi_filter_active(self):
+        """Thread-safe check of the 'use AOI / profile filter' toggle."""
+        ov = getattr(self, "_batch_overrides", None)
+        if ov is not None and "use_aoi" in ov:
+            return bool(ov["use_aoi"])
+        return bool(getattr(self, 'use_aoi_filter', None)
+                    and self.use_aoi_filter.get())
+
     def calculate_mask(self):
         if not isinstance(self.cv_image, np.ndarray):
             return
-        if not self.use_bbox.get():
+        if not self._bv("use_bbox", self.use_bbox.get):
             bbox_mask = (self.alpha_mask * 255).astype(np.uint8)
         else:
-            bbox_text = self.bbox_entry.get().strip("()")
+            bbox_text = self._bv("bbox_text", self.bbox_entry.get).strip("()")
             if not bbox_text:
                 bbox_mask = (self.alpha_mask * 255).astype(np.uint8)
             else:
                 try:
                     x, y, w, h = map(int, bbox_text.split(","))
                 except Exception as e:
-                    messagebox.showerror(
-                        "Error", f"Invalid bounding box format: {e}", parent=self)
+                    if getattr(self, "_batch_overrides", None) is not None:
+                        # batch thread: never raise a dialog from here
+                        print(f"[batch] Invalid bounding box format: {e}")
+                    else:
+                        messagebox.showerror(
+                            "Error", f"Invalid bounding box format: {e}", parent=self)
                     return
                 x = int(x * self.scale)
                 y = int(y * self.scale)
@@ -662,7 +686,7 @@ class HSVMaskProcessingMixin:
                 bbox_mask = cv2.bitwise_and(
                     bbox_mask, (self.alpha_mask * 255).astype(np.uint8))
 
-            if self.use_inner_mask.get():
+            if self._bv("use_inner_mask", self.use_inner_mask.get):
                 kernel_inner = np.ones((20, 20), np.uint8)
                 self.inner_bbox_mask = cv2.erode(
                     bbox_mask, kernel_inner, iterations=1)
@@ -673,9 +697,9 @@ class HSVMaskProcessingMixin:
             self.cv_image, self.cv_image, mask=bbox_mask)
         hsv = cv2.cvtColor(masked_bgr, cv2.COLOR_BGR2HSV)
         h_chan, s_chan, v_chan = cv2.split(hsv)
-        if self.enable_enhancements.get():
-            s_mult = self.s_multiplier_slider.get() / 100.0
-            v_mult = self.v_multiplier_slider.get() / 100.0
+        if self._bv("enable_enhancements", self.enable_enhancements.get):
+            s_mult = self._bv("s_multiplier", self.s_multiplier_slider.get) / 100.0
+            v_mult = self._bv("v_multiplier", self.v_multiplier_slider.get) / 100.0
             s_chan = np.clip(s_chan.astype(np.float32) *
                              s_mult, 0, 255).astype(np.uint8)
             v_chan = np.clip(v_chan.astype(np.float32) *
@@ -684,22 +708,22 @@ class HSVMaskProcessingMixin:
             v_chan = clahe.apply(v_chan)
 
         enhanced_hsv = cv2.merge([h_chan, s_chan, v_chan])
-        h_low = int(self.h_low_slider.get())
-        s_low = int(self.s_low_slider.get())
-        v_low = int(self.v_low_slider.get())
-        h_high = int(self.h_high_slider.get())
-        s_high = int(self.s_high_slider.get())
-        v_high = int(self.v_high_slider.get())
+        h_low = int(self._bv("h_low", self.h_low_slider.get))
+        s_low = int(self._bv("s_low", self.s_low_slider.get))
+        v_low = int(self._bv("v_low", self.v_low_slider.get))
+        h_high = int(self._bv("h_high", self.h_high_slider.get))
+        s_high = int(self._bv("s_high", self.s_high_slider.get))
+        v_high = int(self._bv("v_high", self.v_high_slider.get))
         mask1 = cv2.inRange(enhanced_hsv, (h_low, s_low,
                             v_low), (h_high, s_high, v_high))
 
-        if self.use_dual_hsv.get():
-            h2_low = int(self.h2_low_slider.get())
-            s2_low = int(self.s2_low_slider.get())
-            v2_low = int(self.v2_low_slider.get())
-            h2_high = int(self.h2_high_slider.get())
-            s2_high = int(self.s2_high_slider.get())
-            v2_high = int(self.v2_high_slider.get())
+        if self._bv("use_dual_hsv", self.use_dual_hsv.get):
+            h2_low = int(self._bv("h2_low", self.h2_low_slider.get))
+            s2_low = int(self._bv("s2_low", self.s2_low_slider.get))
+            v2_low = int(self._bv("v2_low", self.v2_low_slider.get))
+            h2_high = int(self._bv("h2_high", self.h2_high_slider.get))
+            s2_high = int(self._bv("s2_high", self.s2_high_slider.get))
+            v2_high = int(self._bv("v2_high", self.v2_high_slider.get))
             mask2 = cv2.inRange(
                 enhanced_hsv, (h2_low, s2_low, v2_low), (h2_high, s2_high, v2_high))
             mask_full = cv2.bitwise_or(mask1, mask2)
@@ -714,7 +738,7 @@ class HSVMaskProcessingMixin:
         mask_clean = cv2.bitwise_and(mask_clean, bbox_mask)
 
         # ── Apply AOI constraint from AOI / Profile Filter (if active) ──
-        if getattr(self, 'use_aoi_filter', None) and self.use_aoi_filter.get() \
+        if self._aoi_filter_active() \
                 and getattr(self, 'aoi_mask', None) is not None:
             aoi_cv = self.aoi_mask
             if aoi_cv.shape[:2] != mask_clean.shape[:2]:
@@ -722,7 +746,7 @@ class HSVMaskProcessingMixin:
                                     interpolation=cv2.INTER_NEAREST)
             mask_clean = cv2.bitwise_and(mask_clean, aoi_cv)
 
-        if self.do_invert_mask.get():
+        if self._bv("do_invert_mask", self.do_invert_mask.get):
             mask_clean = cv2.bitwise_not(mask_clean)
 
         self.current_mask = mask_clean
@@ -800,7 +824,7 @@ class HSVMaskProcessingMixin:
                 )
                 border_mask = cv2.bitwise_or(border_mask, alpha_border)
 
-        if getattr(self, 'use_aoi_filter', None) and self.use_aoi_filter.get() \
+        if self._aoi_filter_active() \
                 and getattr(self, 'aoi_mask', None) is not None:
             aoi_mask = self.aoi_mask
             if aoi_mask.shape[:2] != (h, w):
@@ -1601,7 +1625,7 @@ class HSVMaskProcessingMixin:
             working_mask = (alpha > 0).astype(np.uint8) * 255
 
         # Intersect with AOI filter if active
-        if getattr(self, 'use_aoi_filter', None) and self.use_aoi_filter.get() \
+        if self._aoi_filter_active() \
                 and getattr(self, 'aoi_mask', None) is not None:
             aoi_full = self.aoi_mask
             if aoi_full.shape[:2] != (h, w):
@@ -1679,8 +1703,11 @@ class HSVMaskProcessingMixin:
         selected_mask = cv2.morphologyEx(selected_mask, cv2.MORPH_CLOSE, kernel)
         selected_mask = cv2.morphologyEx(selected_mask, cv2.MORPH_OPEN, kernel)
 
-        output_mode = getattr(self, "color_pick_output_mode", None)
-        output_mode = output_mode.get() if hasattr(output_mode, "get") else "Remove selection"
+        output_mode = self._bv(
+            "cpick_output_mode",
+            lambda: (self.color_pick_output_mode.get()
+                     if hasattr(getattr(self, "color_pick_output_mode", None), "get")
+                     else "Remove selection"))
 
         if output_mode in ("Keep selection only", "Keep selected class"):
             result_mask = selected_mask
@@ -1730,7 +1757,7 @@ class HSVMaskProcessingMixin:
                 messagebox.showwarning("Color Picker", "Add at least one remove-sample first.", parent=self)
             return False
 
-        method = self.color_pick_method.get()
+        method = self._bv("cpick_method", self.color_pick_method.get)
         img = self.full_image
         h, w = img.shape[:2]
         working_mask = self._get_color_pick_working_mask((h, w))
@@ -1907,7 +1934,7 @@ class HSVMaskProcessingMixin:
 
         # Launch worker
         worker = threading.Thread(
-            target=self._batch_worker, args=(batch_cfg,), daemon=True)
+            target=self._batch_worker_safe, args=(batch_cfg,), daemon=True)
         worker.start()
 
     # ── helpers for threaded batch ──
@@ -1927,13 +1954,18 @@ class HSVMaskProcessingMixin:
             pass
 
     def _snapshot_batch_config(self, export_path):
-        """Read all relevant widget values into a plain dict (main thread)."""
+        """Read all relevant widget values into a plain dict (main thread).
+
+        The dict doubles as the ``_batch_overrides`` table consumed by
+        ``_bv()`` / ``_aoi_filter_active()`` so that the batch worker thread
+        never reads a tkinter widget or variable directly."""
         cfg = {
             "export_path": export_path,
             "image_files": list(self.image_files),
             "use_aoi": bool(getattr(self, 'use_aoi_filter', None) and self.use_aoi_filter.get()),
             "aoi_min": 0,
             "aoi_max": 255,
+            "aoi_polygon": None,
             "use_hsv": bool(getattr(self, 'use_hsv_masking', None) and self.use_hsv_masking.get()),
             "use_cpick": bool(getattr(self, 'use_color_picker', None) and self.use_color_picker.get()),
             "use_ml": bool(self.use_ml_pred_mask.get()),
@@ -1941,7 +1973,37 @@ class HSVMaskProcessingMixin:
             "common_name_len": self.common_name_len_var.get(),
             "edge_thickness": int(self.edge_thickness_slider.get()) if hasattr(self, 'edge_thickness_slider') else 2,
             "extraction_mode": self.batch_extraction_mode.get() if hasattr(self, 'batch_extraction_mode') else "boundary",
+            # ── values consumed via _bv() inside the worker thread ──
+            "use_bbox": bool(self.use_bbox.get()),
+            "bbox_text": self.bbox_entry.get(),
+            "use_inner_mask": bool(self.use_inner_mask.get()),
+            "enable_enhancements": bool(self.enable_enhancements.get()),
+            "s_multiplier": self.s_multiplier_slider.get(),
+            "v_multiplier": self.v_multiplier_slider.get(),
+            "h_low": self.h_low_slider.get(),
+            "s_low": self.s_low_slider.get(),
+            "v_low": self.v_low_slider.get(),
+            "h_high": self.h_high_slider.get(),
+            "s_high": self.s_high_slider.get(),
+            "v_high": self.v_high_slider.get(),
+            "use_dual_hsv": bool(self.use_dual_hsv.get()),
+            "h2_low": self.h2_low_slider.get(),
+            "s2_low": self.s2_low_slider.get(),
+            "v2_low": self.v2_low_slider.get(),
+            "h2_high": self.h2_high_slider.get(),
+            "s2_high": self.s2_high_slider.get(),
+            "v2_high": self.v2_high_slider.get(),
+            "do_invert_mask": bool(self.do_invert_mask.get()),
         }
+        try:
+            cfg["cpick_method"] = self.color_pick_method.get()
+        except Exception:
+            cfg["cpick_method"] = "Color distance"
+        try:
+            om = getattr(self, "color_pick_output_mode", None)
+            cfg["cpick_output_mode"] = om.get() if hasattr(om, "get") else "Remove selection"
+        except Exception:
+            cfg["cpick_output_mode"] = "Remove selection"
         if cfg["use_aoi"]:
             try:
                 cfg["aoi_min"] = int(self.aoi_min_entry.get())
@@ -1951,6 +2013,22 @@ class HSVMaskProcessingMixin:
                 cfg["aoi_max"] = int(self.aoi_max_entry.get())
             except Exception:
                 pass
+            # Polygon AOI (drawn or typed) — mirrors _aoi_apply_filter().
+            # Previously the batch worker only knew the threshold range, so a
+            # saved/loaded polygon AOI was silently ignored in batch runs.
+            aoi_poly = getattr(self, '_aoi_polygon_pts', None)
+            if (aoi_poly is None or len(aoi_poly) < 3) and hasattr(self, 'aoi_polygon_entry'):
+                poly_text = self.aoi_polygon_entry.get().strip()
+                if poly_text:
+                    try:
+                        aoi_poly = []
+                        for pair in poly_text.split(";"):
+                            x, y = pair.strip().split(",")
+                            aoi_poly.append((int(x.strip()), int(y.strip())))
+                    except Exception:
+                        aoi_poly = None
+            if aoi_poly is not None and len(aoi_poly) >= 3:
+                cfg["aoi_polygon"] = [(int(x), int(y)) for x, y in aoi_poly]
         return cfg
 
     def _batch_update_progress(self, idx, total, t_start, basename):
@@ -2003,9 +2081,38 @@ class HSVMaskProcessingMixin:
                 f"All in: {export_path}",
                 parent=self)
 
+    def _batch_worker_safe(self, cfg):
+        """Run _batch_worker with guaranteed cleanup.
+
+        Previously an unexpected exception inside the worker killed the
+        thread silently, leaving every button disabled and the progress bar
+        stuck.  This wrapper (a) prints the traceback, (b) re-enables the UI
+        via _batch_finished, and (c) always clears the widget-override table.
+        """
+        try:
+            self._batch_worker(cfg)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            print(f"[batch_process] Aborted by unexpected error: {e}")
+            try:
+                self.after(0, self._batch_finished,
+                           0, 0, len(cfg.get("image_files", [])),
+                           cfg.get("export_path", ""), "", "")
+            except Exception:
+                pass
+        finally:
+            self._batch_overrides = None
+
     def _batch_worker(self, cfg):
         """Background worker: processes images without blocking the GUI."""
         from shapely.geometry import Polygon as ShapelyPolygon
+
+        # Activate the main-thread snapshot as the override table: from here
+        # on, every _bv()/_aoi_filter_active() call inside calculate_mask(),
+        # the colour picker, etc. reads cfg values instead of tkinter widgets.
+        # Cleared again in _batch_worker_safe's finally block.
+        self._batch_overrides = cfg
 
         export_path     = cfg["export_path"]
         image_files     = cfg["image_files"]
@@ -2032,6 +2139,17 @@ class HSVMaskProcessingMixin:
 
             basename = os.path.basename(file_path)
 
+            # ── Clear per-image detection state ──
+            # extract_boundary()/extract_polygon() early-return WITHOUT clearing
+            # self.features / self.edge_points when no contour is found, and a
+            # failed colour-pick leaves the previous image's color_pick_mask in
+            # place.  Without this reset, a detection failure on this image
+            # silently exports the PREVIOUS image's shoreline into this image's
+            # GeoJSON/mask/overlay/COCO.
+            self.features = []
+            self.edge_points = []
+            self.color_pick_mask = None
+
             # ── Update progress on the main thread ──
             try:
                 self.after(0, self._batch_update_progress,
@@ -2054,10 +2172,22 @@ class HSVMaskProcessingMixin:
             # ── AOI mask ──
             if cfg["use_aoi"]:
                 try:
-                    gray_full = (cv2.cvtColor(original, cv2.COLOR_BGR2GRAY)
-                                 if original.ndim == 3 else original)
-                    self.aoi_mask = cv2.inRange(
-                        gray_full, cfg["aoi_min"], cfg["aoi_max"])
+                    if cfg.get("aoi_polygon"):
+                        # Polygon AOI (mirrors _aoi_apply_filter): rebuild at
+                        # this image's full resolution.  Previously batch only
+                        # supported the threshold path, so polygon AOIs were
+                        # silently ignored (defaults 0-255 → whole frame).
+                        h_full, w_full = original.shape[:2]
+                        aoi = np.zeros((h_full, w_full), dtype=np.uint8)
+                        pts = np.array(cfg["aoi_polygon"],
+                                       dtype=np.int32).reshape((-1, 1, 2))
+                        cv2.fillPoly(aoi, [pts], 255)
+                        self.aoi_mask = aoi
+                    else:
+                        gray_full = (cv2.cvtColor(original, cv2.COLOR_BGR2GRAY)
+                                     if original.ndim == 3 else original)
+                        self.aoi_mask = cv2.inRange(
+                            gray_full, cfg["aoi_min"], cfg["aoi_max"])
                 except Exception:
                     self.aoi_mask = None
 

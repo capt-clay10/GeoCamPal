@@ -80,6 +80,7 @@ import sys
 import os
 import time
 import threading
+import traceback
 import pandas as pd
 import geopandas as gpd
 from scipy.interpolate import interp1d
@@ -87,21 +88,21 @@ from scipy.ndimage import gaussian_filter
 from scipy.spatial import ConvexHull
 import numpy as np
 from PIL import Image
+import matplotlib
+matplotlib.use("Agg")  # must be set before importing pyplot (headless render to CTkLabel buffer)
 import matplotlib.pyplot as plt
 from matplotlib.path import Path as MPath
 import customtkinter as ctk
 import tkinter as tk
 from tkinter import filedialog, messagebox
 import matplotlib.dates as mdates
-import matplotlib
 
 from utils import (
     fit_geometry, resource_path, setup_console, restore_console,
     save_settings_json, load_settings_json, bring_child_to_front,
     imread_safe,
-    format_eta as shared_format_eta,
+    format_eta, compute_eta, atomic_output_path,
 )
-matplotlib.use("Agg")
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("green")
 
@@ -526,7 +527,10 @@ class CreateDemWindow(ctk.CTkToplevel):
             pattern = re.compile(self.regex_var.get().strip())
         except re.error as err:
             messagebox.showerror("Regex error", f"Invalid filename pattern:\n{err}",parent=self)
-            raise
+            # Raise ValueError (not the raw re.error) so the button handlers
+            # treat this as an already-reported failure and don't show a
+            # second, generic dialog.
+            raise ValueError("invalid filename pattern")
 
         shore_gdfs = []
         for gj in sorted(Path(folder).glob("*.geojson")):
@@ -534,13 +538,29 @@ class CreateDemWindow(ctk.CTkToplevel):
             if not m:
                 continue
             gd = m.groupdict()
-            year = int(gd.get("year"))
-            month = int(gd.get("month"))
-            day = int(gd.get("day"))
-            h1 = int(gd.get("hour1"))
-            min1 = int(gd.get("min1"))
-            h2 = int(gd.get("hour2", h1))
-            min2 = int(gd.get("min2", min1))
+
+            # Robust group extraction:
+            #  • gd.get(name) returns None both when the key is absent AND when
+            #    an *optional* group in the pattern didn't match, so a plain
+            #    int(gd.get(...)) or int(gd.get(name, default)) can raise
+            #    int(None).  Coalesce with `or` and skip files that lack the
+            #    essential date groups instead of raising (which previously
+            #    made the Generate button silently do nothing).
+            def _grp(name, default=None):
+                v = gd.get(name)
+                return int(v) if v not in (None, "") else default
+
+            year = _grp("year")
+            month = _grp("month")
+            day = _grp("day")
+            if year is None or month is None or day is None:
+                print(f"[DEM] Skipping {gj.name}: filename pattern matched but "
+                      f"is missing a year/month/day group.")
+                continue
+            h1 = _grp("hour1", 0)
+            min1 = _grp("min1", 0)
+            h2 = _grp("hour2", h1)
+            min2 = _grp("min2", min1)
             mid_total_min = (h1*60 + min1 + h2*60 + min2) // 2
             mid_hour, mid_min = divmod(mid_total_min, 60)
             ts = pd.to_datetime(f"{year}-{month}-{day} {mid_hour}:{mid_min}:00")
@@ -800,9 +820,15 @@ class CreateDemWindow(ctk.CTkToplevel):
 
     # ————————————————————— transect interpolation —————————————————————
     def _interpolate_transects(self, dense_shorelines, grid_x, grid_y,
-                               grid_x_vals, grid_y_vals, res):
-        """Dispatch DEM interpolation according to the selected beach shape."""
-        beach_shape = self.beach_shape_var.get().strip().lower()
+                               grid_x_vals, grid_y_vals, res,
+                               beach_shape_raw=None):
+        """Dispatch DEM interpolation according to the selected beach shape.
+
+        beach_shape_raw lets a batch worker pass a main-thread snapshot so no
+        tkinter variable is read from the background thread."""
+        if beach_shape_raw is None:
+            beach_shape_raw = self.beach_shape_var.get()
+        beach_shape = beach_shape_raw.strip().lower()
         if beach_shape == "curved":
             return self._interpolate_transects_curved(
                 dense_shorelines, grid_x, grid_y, grid_x_vals, grid_y_vals, res
@@ -1039,10 +1065,30 @@ class CreateDemWindow(ctk.CTkToplevel):
                 return candidate
         return path  # give up, let rasterio raise its own error
 
-    def create_dem_for_day(self, date_val):
-        out_dir = self.out_dir_var.get().strip()
+    def create_dem_for_day(self, date_val, cfg=None):
+        # cfg: optional dict of raw widget values captured on the MAIN thread
+        # (see on_batch_process).  When the batch worker passes it, this
+        # method never touches a tkinter variable from the background thread.
+        # Interactive calls (cfg=None) read the widgets exactly as before.
+        if cfg is not None:
+            out_dir = cfg["out_dir"]
+            spacing_raw = cfg["spacing"]
+            resolution_raw = cfg["resolution"]
+            sigma_raw = cfg["sigma"]
+            beach_shape_raw = cfg["beach_shape"]
+            export_xyz = cfg["export_xyz"]
+        else:
+            out_dir = self.out_dir_var.get().strip()
+            spacing_raw = self.spacing_var.get()
+            resolution_raw = self.resolution_var.get()
+            sigma_raw = self.sigma_var.get()
+            beach_shape_raw = self.beach_shape_var.get()
+            export_xyz = bool(self.export_xyz_var.get())
         if not out_dir:
-            messagebox.showerror("Error", "Please specify an output directory.",parent=self)
+            if cfg is None:
+                messagebox.showerror("Error", "Please specify an output directory.",parent=self)
+            else:
+                print("No output directory set — skipping.")
             return None
 
         gdf_day = self.shorelines_gdf[self.shorelines_gdf["date"] == date_val].copy()
@@ -1050,11 +1096,11 @@ class CreateDemWindow(ctk.CTkToplevel):
 
         # --- gather densified shoreline data ---
         try:
-            spacing = float(self.spacing_var.get())
+            spacing = float(spacing_raw)
             if spacing <= 0:
                 raise ValueError
         except Exception:
-            spacing = float(self.resolution_var.get() or 1)
+            spacing = float(resolution_raw or 1)
             print(f"Invalid spacing, using {spacing} m.")
 
         dense_shorelines = []
@@ -1078,12 +1124,12 @@ class CreateDemWindow(ctk.CTkToplevel):
 
         # DEM grid set-up
         try:
-            res = float(self.resolution_var.get())
+            res = float(resolution_raw)
         except Exception:
             res = 1.0
 
         try:
-            sigma = float(self.sigma_var.get())
+            sigma = float(sigma_raw)
         except Exception:
             sigma = 1.5
 
@@ -1098,9 +1144,10 @@ class CreateDemWindow(ctk.CTkToplevel):
         grid_x, grid_y = np.meshgrid(grid_x_vals, grid_y_vals)
 
         # --- transect interpolation ---
-        print(f"Beach shape mode: {self.beach_shape_var.get()}")
+        print(f"Beach shape mode: {beach_shape_raw}")
         grid_z = self._interpolate_transects(
-            dense_shorelines, grid_x, grid_y, grid_x_vals, grid_y_vals, res)
+            dense_shorelines, grid_x, grid_y, grid_x_vals, grid_y_vals, res,
+            beach_shape_raw=beach_shape_raw)
 
         if grid_z is None or np.all(np.isnan(grid_z)):
             print(f"Interpolation failed for {date_val}")
@@ -1127,19 +1174,21 @@ class CreateDemWindow(ctk.CTkToplevel):
         # save GeoTIFF
         out_path = self._safe_output_path(
             Path(out_dir) / f"DEM_{date_val}_transect.tif")
-        with rasterio.open(
-            out_path, "w", driver="GTiff",
-            height=dem_masked.shape[0], width=dem_masked.shape[1],
-            count=1, dtype="float64",
-            crs=self.shorelines_gdf.crs,
-            transform=transform) as dst:
-            dst.write(dem_masked, 1)
+        with atomic_output_path(out_path) as tmp_path:
+            with rasterio.open(
+                tmp_path, "w", driver="GTiff",
+                height=dem_masked.shape[0], width=dem_masked.shape[1],
+                count=1, dtype="float64",
+                crs=self.shorelines_gdf.crs,
+                transform=transform) as dst:
+                dst.write(dem_masked, 1)
         print(f"Saved DEM → {out_path}")
 
-        if self.export_xyz_var.get():
+        if export_xyz:
             xyz_df = pd.DataFrame(xyz_all, columns=["x", "y", "z"])
             csv_path = Path(out_dir) / f"shoreline_xyz_{date_val}.csv"
-            xyz_df.to_csv(csv_path, index=False)
+            with atomic_output_path(csv_path) as tmp_csv:
+                xyz_df.to_csv(tmp_csv, index=False)
             print(f"Exported XYZ → {csv_path}")
         self._last_dem_extent = (x_min, x_max, y_min, y_max)
         return dem_masked
@@ -1237,19 +1286,21 @@ class CreateDemWindow(ctk.CTkToplevel):
         tag = f"{date_min}_to_{date_max}"
         out_path = self._safe_output_path(
             Path(out_dir) / f"DEM_composite_{tag}_transect.tif")
-        with rasterio.open(
-            out_path, "w", driver="GTiff",
-            height=grid_z.shape[0], width=grid_z.shape[1],
-            count=1, dtype="float64",
-            crs=self.shorelines_gdf.crs,
-            transform=transform) as dst:
-            dst.write(grid_z, 1)
+        with atomic_output_path(out_path) as tmp_path:
+            with rasterio.open(
+                tmp_path, "w", driver="GTiff",
+                height=grid_z.shape[0], width=grid_z.shape[1],
+                count=1, dtype="float64",
+                crs=self.shorelines_gdf.crs,
+                transform=transform) as dst:
+                dst.write(grid_z, 1)
         print(f"Saved composite DEM → {out_path}")
 
         if self.export_xyz_var.get():
             xyz_df = pd.DataFrame(xyz_all, columns=["x", "y", "z"])
             csv_path = Path(out_dir) / f"shoreline_xyz_composite_{tag}.csv"
-            xyz_df.to_csv(csv_path, index=False)
+            with atomic_output_path(csv_path) as tmp_csv:
+                xyz_df.to_csv(tmp_csv, index=False)
             print(f"Exported XYZ → {csv_path}")
         self._last_dem_extent = (x_min, x_max, y_min, y_max)
         return grid_z
@@ -1258,7 +1309,13 @@ class CreateDemWindow(ctk.CTkToplevel):
     def on_generate_next_dem(self):
         try:
             self.load_data_if_needed()
-        except Exception:
+        except ValueError:
+            return  # already reported by load_data_if_needed (dialog shown)
+        except Exception as e:
+            # Any *unexpected* failure (e.g. a malformed CSV or an unusual
+            # filename pattern) used to be swallowed, leaving a dead button
+            # with no message.  Surface it so the user knows what happened.
+            messagebox.showerror("Error", f"Could not load data:\n{e}", parent=self)
             return
 
         if self.dem_mode_var.get() == "Composite":
@@ -1289,8 +1346,14 @@ class CreateDemWindow(ctk.CTkToplevel):
     def on_batch_process(self):
         try:
             self.load_data_if_needed()
-        except Exception:
+        except ValueError:
+            return  # already reported by load_data_if_needed (dialog shown)
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not load data:\n{e}", parent=self)
             return
+        # out_dir is validated here on the main thread *before* the worker
+        # thread starts, so create_dem_for_day never needs to raise a dialog
+        # from the background thread.
         out_dir = self.out_dir_var.get().strip()
         if not out_dir:
             messagebox.showerror("Error", "Please specify output folder.",parent=self)
@@ -1307,32 +1370,81 @@ class CreateDemWindow(ctk.CTkToplevel):
         self._cancel_flag = False
         self.batch_progress.set(0.0)
         self.batch_eta_label.configure(text="Starting batch…")
+        # Snapshot every widget value the worker needs, here on the main
+        # thread — the worker must not read tkinter variables itself.
+        batch_cfg = {
+            "out_dir": out_dir,
+            "spacing": self.spacing_var.get(),
+            "resolution": self.resolution_var.get(),
+            "sigma": self.sigma_var.get(),
+            "beach_shape": self.beach_shape_var.get(),
+            "export_xyz": bool(self.export_xyz_var.get()),
+        }
         self._batch_thread = threading.Thread(
-            target=self._batch_worker, daemon=True)
+            target=self._batch_worker, args=(batch_cfg,), daemon=True)
         self._batch_thread.start()
 
-    def _batch_worker(self):
+    def _batch_worker(self, cfg):
         total = len(self.daily_dates)
         t0 = time.time()
+        failed_days = []
         print("Batch process has started")
-        for i, date_val in enumerate(self.daily_dates, 1):
-            if self._cancel_flag:
-                print("Batch cancelled by user.")
+        try:
+            for i, date_val in enumerate(self.daily_dates, 1):
+                if self._cancel_flag:
+                    print("Batch cancelled by user.")
+                    self.after(0, self.batch_eta_label.configure,
+                               {"text": "Cancelled"})
+                    return
+                self.after(0, self.batch_progress.set, i / total)
+                # The ETA read-out is cosmetic — it must never be able to
+                # abort DEM creation (a missing/failed helper here once
+                # killed the whole batch thread silently).
+                try:
+                    eta_str = format_eta(compute_eta(t0, i, total))
+                except Exception:
+                    eta_str = "estimating..."
                 self.after(0, self.batch_eta_label.configure,
-                           {"text": "Cancelled"})
-                return
-            self.after(0, self.batch_progress.set, i / total)
-            eta = compute_eta(t0, i, total)
-            eta_str = format_eta(eta)
+                           {"text": f"Batch {i}/{total} — ETA {eta_str}"})
+                # One bad day (e.g. a malformed GeoJSON) should not stop
+                # the remaining days: log it, remember it, carry on.
+                try:
+                    self.create_dem_for_day(date_val, cfg=cfg)
+                except Exception as e:
+                    failed_days.append(str(date_val))
+                    print(f"ERROR — DEM for {date_val} failed: {e}")
+                    traceback.print_exc()
+        except Exception as e:
+            # Anything unexpected outside the per-day loop body: surface
+            # it in the UI instead of letting the daemon thread die with
+            # a stuck progress bar.
+            print(f"Batch aborted: {e}")
+            traceback.print_exc()
             self.after(0, self.batch_eta_label.configure,
-                       {"text": f"Batch {i}/{total} — ETA {eta_str}"})
-            self.create_dem_for_day(date_val)
+                       {"text": "Batch failed — see console"})
+            self.after(0, lambda err=e: messagebox.showerror(
+                "Batch failed",
+                f"Batch DEM creation stopped:\n{err}", parent=self))
+            return
         self.after(0, self.batch_progress.set, 1.0)
         elapsed = format_eta(time.time() - t0)
-        self.after(0, self.batch_eta_label.configure,
-                   {"text": f"Done ({total} days, {elapsed})"})
-        self.after(0, lambda: messagebox.showinfo(
-            "Done", f"Batch DEM creation finished ({total} days, {elapsed})."))
+        if failed_days:
+            shown = ", ".join(failed_days[:10])
+            if len(failed_days) > 10:
+                shown += ", …"
+            self.after(0, self.batch_eta_label.configure,
+                       {"text": f"Done — {len(failed_days)}/{total} day(s) failed ({elapsed})"})
+            self.after(0, lambda: messagebox.showwarning(
+                "Batch finished with errors",
+                f"Batch DEM creation finished ({elapsed}).\n"
+                f"{len(failed_days)} of {total} day(s) failed — see console for details:\n{shown}",
+                parent=self))
+        else:
+            self.after(0, self.batch_eta_label.configure,
+                       {"text": f"Done ({total} days, {elapsed})"})
+            self.after(0, lambda: messagebox.showinfo(
+                "Done", f"Batch DEM creation finished ({total} days, {elapsed}).",
+                parent=self))
 
     def _cancel_batch(self):
         self._cancel_flag = True

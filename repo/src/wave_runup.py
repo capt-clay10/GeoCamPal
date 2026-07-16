@@ -1448,6 +1448,13 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
             self.batch_mask_label.configure(text=folder)
 
     def run_batch_process(self):
+        # Guard against re-entry: this batch runs on the main thread and pumps
+        # events via self.update(), so the "Run Batch Process" button stays
+        # live and a second click would nest a second batch inside the first.
+        if self._batch_running:
+            messagebox.showwarning("Busy", "A batch process is already running.", parent=self)
+            return
+
         # 1) Validate folders
         if not self.batch_raw_folder or not self.batch_mask_folder:
             messagebox.showerror("Error", "Please select both batch raw and batch annotation folders.", parent=self)

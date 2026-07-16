@@ -103,7 +103,7 @@ from osgeo import gdal, osr
 gdal.UseExceptions()
 gdal.PushErrorHandler('CPLQuietErrorHandler')   # suppress non-fatal TIFF warnings
 
-from utils import fit_geometry, resource_path, setup_console, restore_console, save_settings_json, load_settings_json, imread_safe
+from utils import fit_geometry, resource_path, setup_console, restore_console, save_settings_json, load_settings_json, imread_safe, load_lens_calibration
 
 try:
     from csv_utils import read_gcp_csv, normalise_columns, exclude_gcps_by_number, gcp_numeric_suffix
@@ -194,8 +194,10 @@ def _homo_compute(pixel_pts, utm_pts):
         T = np.array([[sc,0,-sc*c[0]],[0,sc,-sc*c[1]],[0,0,1]])
         h = np.hstack([pts, np.ones((len(pts),1))])
         return (T @ h.T).T, T
-    pn, Tp = _norm(pixel_pts.astype(np.float32))
-    un, Tu = _norm(utm_pts.astype(np.float32))
+    # float64 (not float32): float32 quantises UTM coordinates by up to ~0.5 m,
+    # which corrupts the homography fit and the LOO accuracy metrics.
+    pn, Tp = _norm(pixel_pts.astype(np.float64))
+    un, Tu = _norm(utm_pts.astype(np.float64))
     Hn, _ = cv2.findHomography(pn[:,:2], un[:,:2], cv2.RANSAC, 0.5)
     if Hn is None: return None
     H = np.linalg.inv(Tu) @ Hn @ Tp
@@ -373,14 +375,16 @@ def _apply_crop_to_extent(extent, crop_fracs):
 
 # ── LOO Cross-Validation ──
 def _loo_homography(df):
-    px = df[["Pixel_X","Pixel_Y"]].values.astype(np.float32)
-    utm = df[["Real_X","Real_Y"]].values.astype(np.float32)
+    # float64 (not float32) so leave-one-out residuals are not polluted by
+    # ~0.5 m coordinate quantisation on large UTM northings.
+    px = df[["Pixel_X","Pixel_Y"]].values.astype(np.float64)
+    utm = df[["Real_X","Real_Y"]].values.astype(np.float64)
     n = len(df); errs = np.full(n, np.nan)
     for i in range(n):
         mask = np.ones(n, bool); mask[i] = False
         H = _homo_compute(px[mask], utm[mask])
         if H is None: continue
-        pred = cv2.perspectiveTransform(np.array([[px[i]]], np.float32), H).reshape(2)
+        pred = cv2.perspectiveTransform(np.array([[px[i]]], np.float64), H).reshape(2)
         errs[i] = np.linalg.norm(pred - utm[i])
     return errs
 
@@ -762,10 +766,15 @@ class GeoReferenceModule(ctk.CTkToplevel):
         else:
             if self._manual_corner_ent.winfo_manager(): self._manual_corner_ent.pack_forget()
 
-    def _get_source_corners(self, h, w):
-        choice = self._corner_var.get()
+    def _get_source_corners(self, h, w, choice=None, manual_text=None):
+        # choice / manual_text let a batch worker use a main-thread snapshot
+        # instead of reading tkinter widgets from a background thread.
+        if choice is None:
+            choice = self._corner_var.get()
+        if manual_text is None:
+            manual_text = self._manual_corner_ent.get()
         if choice == "Manual":
-            vals = [float(v.strip()) for v in self._manual_corner_ent.get().split(",") if v.strip()]
+            vals = [float(v.strip()) for v in manual_text.split(",") if v.strip()]
             if len(vals) != 8: raise ValueError("Manual corners need 8 numbers")
             return np.array(vals, dtype=np.float32).reshape(4, 1, 2)
         lut = {"Bottom Left": [[0,int(h*0.5)],[w-1,int(h*0.5)],[w-1,h-1],[0,h-1]],
@@ -775,17 +784,23 @@ class GeoReferenceModule(ctk.CTkToplevel):
         pts = lut.get(choice, [[0,0],[w-1,0],[w-1,h-1],[0,h-1]])
         return np.array(pts, dtype=np.float32).reshape(4, 1, 2)
 
-    def _get_crop_fracs(self):
+    def _get_crop_fracs(self, prevals=None):
+        # prevals lets a batch worker use a main-thread snapshot instead of
+        # reading tkinter entries from a background thread.
+        if prevals is not None:
+            return prevals
         return tuple(float(self._crop_entries[t].get().strip() or 0) for t in ["S","N","E","W"])
 
-    def _corners_to_world_extent(self, source_corners, h, w):
+    def _corners_to_world_extent(self, source_corners, h, w, df=None, elev=None):
+        # df / elev let a batch worker pass a main-thread snapshot instead of
+        # reading tkinter widgets from a background thread.
         mk = self._method_key
         if mk == "homo":
             tc = cv2.perspectiveTransform(source_corners, self._H)
             mn = tc.min(axis=(0,1)); mx = tc.max(axis=(0,1))
             return float(mn[0]), float(mn[1]), float(mx[0]), float(mx[1])
         elif mk == "proj":
-            K = self._get_K_for((w, h)); elev = self._get_elev()
+            K = self._get_K_for((w, h)); elev = self._get_elev(preval=elev)
             wpts = []
             for pt in source_corners.reshape(-1, 2):
                 wp = _back_project_pixel(float(pt[0]), float(pt[1]), K, self._dist, self._rvec, self._tvec, self._centroid, elev)
@@ -794,7 +809,8 @@ class GeoReferenceModule(ctk.CTkToplevel):
             wpts = np.array(wpts)
             return wpts[:,0].min(), wpts[:,1].min(), wpts[:,0].max(), wpts[:,1].max()
         else:
-            df = self._get_working_df()
+            if df is None:
+                df = self._get_working_df()
             if df is None or len(df) < 3: return None
             return _corners_to_extent_affine(df, source_corners)
 
@@ -855,12 +871,12 @@ class GeoReferenceModule(ctk.CTkToplevel):
         except Exception as e: messagebox.showerror("GCP Error", str(e), parent=self)
 
     def _load_cal(self, filepath=None):
-        p = filepath or filedialog.askopenfilename(parent=self,filetypes=[("Pickle","*.pkl"),("All","*.*")])
+        p = filepath or filedialog.askopenfilename(parent=self,filetypes=[("Calibration","*.pkl *.json"),("Pickle","*.pkl"),("JSON","*.json"),("All","*.*")])
         if not p: return
         if not os.path.exists(p):
             print(f"[Warning] Calibration file not found: {p}"); return
         try:
-            with open(p, "rb") as f: d = pickle.load(f)
+            d = load_lens_calibration(p)
             self._K = d["camera_matrix"].astype(np.float64)
             self._dist = d["dist_coeff"].ravel().astype(np.float64)
             self._cal_img_size = d.get("image_size")
@@ -891,11 +907,15 @@ class GeoReferenceModule(ctk.CTkToplevel):
             except: pass
         return df
 
-    def _get_elev(self):
+    def _get_elev(self, preval=None):
+        if preval is not None:
+            return preval
         try: return float(self._elev_ent.get() or 0)
         except: return 0.0
 
-    def _get_scale(self):
+    def _get_scale(self, preval=None):
+        if preval is not None:
+            return preval
         try: return float(self._scale_ent.get() or 4)
         except: return 4.0
 
@@ -1162,14 +1182,25 @@ class GeoReferenceModule(ctk.CTkToplevel):
             messagebox.showerror("Error", str(e), parent=self); import traceback; traceback.print_exc()
 
     # ── Batch save single ──
-    def _save_single(self, img_path, out_path):
+    def _save_single(self, img_path, out_path, snap=None):
+        # snap: a dict of main-thread-read widget values (corner/manual/crop/
+        # scale/df/elev).  When the batch worker passes it, this method never
+        # touches tkinter from the background thread.  When None (not expected
+        # in batch), it falls back to reading the widgets directly.
         img = imread_safe(img_path)
         if img is None: return False
         mk = self._method_key; hi, wi = img.shape[:2]
-        source_corners = self._get_source_corners(hi, wi)
-        crop_fracs = self._get_crop_fracs()
+        if snap is not None:
+            source_corners = self._get_source_corners(
+                hi, wi, choice=snap["corner"], manual_text=snap["manual"])
+            crop_fracs = snap["crop"]; scale = snap["scale"]
+            work_df = snap["df"]; elev = snap["elev"]
+        else:
+            source_corners = self._get_source_corners(hi, wi)
+            crop_fracs = self._get_crop_fracs(); scale = self._get_scale()
+            work_df = self._get_working_df(); elev = self._get_elev()
         if mk == "homo":
-            warped, Hf, gt = _homo_warp_windowed(img, self._H, self._get_scale(), source_corners, crop_fracs)
+            warped, Hf, gt = _homo_warp_windowed(img, self._H, scale, source_corners, crop_fracs)
             if self._aoi and self._aoi_preview_shape is not None:
                 oh, ow = self._aoi_preview_shape; nh, nw = warped.shape[:2]
                 sx, sy = nw/ow, nh/oh; x1, y1, x2, y2 = self._aoi
@@ -1185,7 +1216,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
             gt = (float(self._grid_x[0,0]), self._preview_gt[1], 0, float(self._grid_y[0,0]), 0, self._preview_gt[5])
             return _write_geotiff(out_path, rect, alpha, gt, self.user_epsg, self._lock)
         else:
-            df = self._get_working_df(); gcps, epsg = _make_gdal_gcps(df)
+            df = work_df; gcps, epsg = _make_gdal_gcps(df)
             epsg = epsg if epsg else self.user_epsg
             srs = osr.SpatialReference(); srs.ImportFromEPSG(epsg)
             gsd = abs(self._preview_gt[1]) if self._preview_gt else _estimate_gsd(df)
@@ -1193,7 +1224,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
                 gt = self._preview_gt; x1, y1, x2, y2 = self._aoi
                 te = [gt[0]+x1*gt[1], gt[3]+max(y1,y2)*gt[5], gt[0]+x2*gt[1], gt[3]+min(y1,y2)*gt[5]]
             else:
-                extent = self._corners_to_world_extent(source_corners, hi, wi)
+                extent = self._corners_to_world_extent(source_corners, hi, wi, df=work_df, elev=elev)
                 if extent: x0, y0, x1, y1 = _apply_crop_to_extent(extent, crop_fracs); te = [x0, y0, x1, y1]
                 else:
                     ex, ey = df["Real_X"].values, df["Real_Y"].values; mg = max(50, (ex.max()-ex.min())*0.05)
@@ -1222,13 +1253,39 @@ class GeoReferenceModule(ctk.CTkToplevel):
         if mk == "proj" and self._rvec is None: messagebox.showerror("Error", "Run georeferencing first.", parent=self); return
         if mk in ("tps","poly1","poly2") and self._gcp_df is None: messagebox.showerror("Error", "Load GCPs.", parent=self); return
         use_sub = self._subfolder_var.get()
+
+        # Snapshot every widget-derived value on the main thread so the batch
+        # worker (background thread) never reads tkinter widgets — reading
+        # widgets off-thread is undefined behaviour and can segfault on
+        # macOS/Linux during a long batch.
+        try:
+            _snap = {
+                "corner": self._corner_var.get(),
+                "manual": self._manual_corner_ent.get(),
+                "crop": self._get_crop_fracs(),
+                "scale": self._get_scale(),
+                "df": self._get_working_df(),
+                "elev": self._get_elev(),
+            }
+        except Exception as e:
+            messagebox.showerror("Error", f"Invalid batch settings: {e}", parent=self); return
+
         def _worker():
-            # Collect all directories to process (recursive with os.walk)
+            # Collect all directories to process (recursive with os.walk).
+            # Give the user feedback *before* and *during* the walk — on large
+            # or networked trees this crawl can take minutes, and without this
+            # the console stays blank and the ETA never starts.
             if use_sub:
-                subs = sorted(
-                    dirpath
-                    for dirpath, _, _ in os.walk(self.input_folder)
-                )
+                self.after(0, lambda: self._eta_lbl.configure(text="Scanning folders…"))
+                print("\n[Batch] Scanning sub-folders for images… "
+                      "(this can take a while on large / networked trees)")
+                subs = []
+                for n_dir, (dirpath, _, _) in enumerate(os.walk(self.input_folder), 1):
+                    subs.append(dirpath)
+                    if n_dir % 200 == 0:
+                        print(f"  …scanned {n_dir} folders so far")
+                subs = sorted(subs)
+                print(f"[Batch] Found {len(subs)} folder(s) to inspect.")
             else:
                 subs = [self.input_folder]
             all_jobs = []
@@ -1248,7 +1305,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
             print(f"\n[Batch] Processing {n} image(s)...")
             self.after(0, lambda: self._prog.set(0))
             for i, (ip, op) in enumerate(all_jobs, 1):
-                try: self._save_single(ip, op); m2i[op] = ip
+                try: self._save_single(ip, op, snap=_snap); m2i[op] = ip
                 except Exception as e: print(f"  Error: {os.path.basename(ip)}: {e}")
                 f = i/n; self.after(0, lambda f=f: self._prog.set(f))
                 self.after(0, lambda t=self._eta(t0, f): self._eta_lbl.configure(text=t))
@@ -1273,7 +1330,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
                         if inp and os.path.exists(inp):
                             try:
                                 if os.path.exists(cp): os.remove(cp)
-                                self._save_single(inp, cp)
+                                self._save_single(inp, cp, snap=_snap)
                             except: pass
                             rc[cp] = rc.get(cp, 0) + 1
                         else: pf.append((cp, "Input not found")); pfs.add(cp)

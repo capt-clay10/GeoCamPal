@@ -26,11 +26,21 @@ import queue
 import sys
 import threading
 import time
+import contextlib
 import cv2
 import numpy as np
 import tkinter as tk
 from tkinter import filedialog, messagebox
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+
+# ─────────────────────────────────────────────────────────────────────
+#  Version  —  single source of truth for the whole application
+# ─────────────────────────────────────────────────────────────────────
+#  Import this everywhere the version is shown or recorded (launcher
+#  footer, calibration reports, saved-settings provenance) so the
+#  number can never drift between the GUI, the code, and the paper.
+__version__ = "1.0.0"
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -597,6 +607,144 @@ def describe_saved_path(path: Optional[str]) -> Dict[str, Any]:
 # ─────────────────────────────────────────────────────────────────────
 #  CV.imread helper  —  sometimes cannot read non-ascii
 # ─────────────────────────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────────────
+#  Atomic file output  —  write-to-temp, then os.replace
+# ─────────────────────────────────────────────────────────────────────
+#  Long batch loops run in daemon threads that are killed abruptly when
+#  the tool window closes.  Writing directly to the final path can leave
+#  a half-written, corrupt GeoTIFF/CSV on disk.  This context manager
+#  writes to a sibling '.tmp' file and only renames it into place once
+#  the write completes.  os.replace is atomic on the same filesystem, so
+#  a reader never sees a partial file, and an interrupted write leaves
+#  the previous good file (if any) untouched.
+
+
+@contextlib.contextmanager
+def atomic_output_path(final_path):
+    """
+    Yield a temporary path to write to; on clean exit, atomically move it
+    to *final_path*.  On any exception, remove the temp file and re-raise.
+
+    Usage::
+
+        with atomic_output_path(out_tif) as tmp:
+            with rasterio.open(tmp, "w", ...) as dst:
+                dst.write(arr, 1)
+        # out_tif now exists atomically
+    """
+    final_path = os.fspath(final_path)
+    tmp_path = final_path + ".tmp"
+    try:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+    except OSError:
+        pass
+    try:
+        yield tmp_path
+        os.replace(tmp_path, final_path)  # atomic on the same filesystem
+    except BaseException:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+# ─────────────────────────────────────────────────────────────────────
+#  Lens-calibration I/O  —  pickle (primary) + JSON sidecar
+# ─────────────────────────────────────────────────────────────────────
+#  Lens calibration files are commonly shared between collaborators.
+#  The historical format is a Python pickle (.pkl), which (a) requires
+#  pickle.load on a possibly-untrusted file and (b) is brittle across
+#  NumPy versions.  These helpers keep the .pkl as the primary output
+#  for full backward compatibility while ALSO writing a plain-text JSON
+#  sidecar that any tool (or a human) can read safely.
+#
+#  load_lens_calibration() accepts EITHER format and always returns a
+#  dict whose 'camera_matrix' and 'dist_coeff' are NumPy arrays, so all
+#  existing downstream code keeps working unchanged.
+
+_LENS_ARRAY_KEYS = ("camera_matrix", "dist_coeff")
+_LENS_TUPLE_KEYS = ("image_size", "pattern_size", "board_squares")
+
+
+def _json_safe_calibration(cal_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a JSON-serialisable copy of a lens-calibration dict."""
+    out: Dict[str, Any] = {}
+    for k, v in cal_data.items():
+        if isinstance(v, np.ndarray):
+            out[k] = v.tolist()
+        elif isinstance(v, tuple):
+            out[k] = list(v)
+        elif isinstance(v, (np.floating, np.integer)):
+            out[k] = v.item()
+        else:
+            out[k] = v
+    out["_meta"] = {
+        "geocampal_version": __version__,
+        "produced_by": "GeoCamPal lens_correction",
+    }
+    return out
+
+
+def save_lens_calibration(cal_data: Dict[str, Any], pkl_path: str) -> Tuple[str, Optional[str]]:
+    """
+    Write a lens-calibration dict as a pickle (primary) plus a JSON
+    sidecar alongside it.
+
+    The pickle is written first and exactly as before, so nothing about
+    the existing workflow changes.  The JSON is best-effort: if it fails
+    to write, the calibration is still considered saved (the .pkl exists)
+    and a warning is printed.
+
+    Returns ``(pkl_path, json_path_or_None)``.
+    """
+    with open(pkl_path, "wb") as f:
+        import pickle
+        pickle.dump(cal_data, f)
+
+    json_path: Optional[str] = os.path.splitext(pkl_path)[0] + ".json"
+    try:
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(_json_safe_calibration(cal_data), f, indent=2)
+    except Exception as e:  # noqa: BLE001 — JSON is a convenience, never fatal
+        print(f"[lens] Could not write JSON sidecar ({e}); .pkl saved normally.")
+        json_path = None
+
+    return pkl_path, json_path
+
+
+def load_lens_calibration(path: str) -> Dict[str, Any]:
+    """
+    Load a lens calibration from a ``.json`` or ``.pkl`` file.
+
+    Regardless of source, the returned dict has ``camera_matrix`` and
+    ``dist_coeff`` as float64 NumPy arrays, so existing callers that do
+    ``d["camera_matrix"].astype(...)`` keep working unchanged.
+
+    Raises the underlying I/O / parse error on failure (callers already
+    wrap this in try/except).
+    """
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".json":
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        data.pop("_meta", None)
+        for k in _LENS_ARRAY_KEYS:
+            if k in data and data[k] is not None:
+                data[k] = np.asarray(data[k], dtype=np.float64)
+        for k in _LENS_TUPLE_KEYS:
+            if k in data and isinstance(data[k], list):
+                data[k] = tuple(data[k])
+        return data
+
+    # Default / .pkl path — unchanged behaviour.
+    with open(path, "rb") as f:
+        import pickle
+        return pickle.load(f)
+
 
 def imread_safe(path, flags=cv2.IMREAD_COLOR, *, verbose=True):
     """

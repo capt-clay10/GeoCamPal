@@ -10,7 +10,7 @@ in the toolbox can be opened.
 
 Launcher structure
 ------------------
-The launcher groups tools into five labelled sections:
+The launcher groups tools into six labelled sections:
 
     Pre-prep Tools
         FOV Generator       — camera field-of-view footprint planner
@@ -108,7 +108,7 @@ from harmonise_images import HarmoniseImagesWindow
 from exploration import TimeSeriesExplorerWindow
 from profile_tool import ProfileHovmullerWindow
 from colour_explorer import ColorSpaceExplorerWindow
-from utils import fit_geometry, resource_path
+from utils import fit_geometry, resource_path, __version__
 
 
 def set_window_icon(window):
@@ -333,7 +333,7 @@ def launcher_window():
         "creator: Clayton Soares\n"
         "contact: clayton.soares@ifg.uni-kiel.de\n"
         "Institute: Institute of Geosciences, CAU, Kiel\n"
-        "source code (v1.0.0) : https://github.com/capt-clay10/GeoCamPal.git"
+        f"source code (v{__version__}) : https://github.com/capt-clay10/GeoCamPal.git"
     )
     footer = ctk.CTkLabel(
         frame,

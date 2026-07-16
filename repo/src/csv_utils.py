@@ -166,9 +166,13 @@ def read_csv_flexible(path: str, verbose: bool = True) -> pd.DataFrame:
     # Strip whitespace from column names
     df.columns = [c.strip() for c in df.columns]
 
-    # Strip whitespace from string columns
+    # Strip whitespace from string columns.
+    # NOTE: use an element-wise map that only strips actual strings.  Using
+    # ``.str.strip()`` on an object-dtype column turns every non-string value
+    # (e.g. a stray number in an otherwise-text column) into NaN, which would
+    # silently destroy valid coordinate values.  This guard preserves them.
     for col in df.select_dtypes(include=["object"]).columns:
-        df[col] = df[col].str.strip()
+        df[col] = df[col].map(lambda x: x.strip() if isinstance(x, str) else x)
 
     # Normalise column names
     df = normalise_columns(df, verbose=verbose)

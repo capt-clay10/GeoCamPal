@@ -146,6 +146,7 @@ from utils import (
     save_settings_json,
     load_settings_json,
     imread_safe,
+    load_lens_calibration,
 )
 
 try:
@@ -728,13 +729,24 @@ def collect_images(folder):
     )
 
 
-def collect_images_recursive(folder):
-    """Collect image paths from a folder and all sub-folders."""
+def collect_images_recursive(folder, progress_cb=None, cancel_cb=None):
+    """Collect image paths from a folder and all sub-folders.
+
+    progress_cb(n_dirs, n_imgs) is called periodically during the walk so the
+    caller can show feedback (the crawl itself can take minutes on large or
+    networked trees).  cancel_cb() returning True aborts the walk early and
+    returns whatever was found so far.  Both are optional and preserve the
+    original behaviour when omitted.
+    """
     results = []
-    for root, _, files in os.walk(folder):
+    for n_dirs, (root, _, files) in enumerate(os.walk(folder), 1):
+        if cancel_cb is not None and cancel_cb():
+            break
         for f in sorted(files):
             if Path(f).suffix.lower() in IMAGE_EXTS:
                 results.append(Path(root) / f)
+        if progress_cb is not None and n_dirs % 200 == 0:
+            progress_cb(n_dirs, len(results))
     return results
 
 
@@ -1405,6 +1417,24 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
         if not self.output_folder:
             messagebox.showwarning("Warning", "Select an output folder first.")
             return False
+        # In recursive mode, an output folder nested inside the input folder
+        # means the next run re-ingests previously written images as new inputs
+        # (compounding corrections / double-counting stats).  Warn and let the
+        # user decide rather than silently corrupting a re-run.
+        try:
+            if bool(self.recursive_var.get()):
+                in_res = Path(self.input_folder).resolve()
+                out_res = Path(self.output_folder).resolve()
+                if in_res == out_res or in_res in out_res.parents:
+                    proceed = messagebox.askyesno(
+                        "Output inside input",
+                        "The output folder is inside the input folder while "
+                        "'recursive' is enabled.\n\nA later run may re-process "
+                        "images written by this one. Continue anyway?")
+                    if not proceed:
+                        return False
+        except Exception:
+            pass
         return True
 
     def _collect_filter_config(self):
@@ -1642,12 +1672,11 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
             parent=self,
             title="Select Lens Calibration File",
             initialdir=init_dir,
-            filetypes=[("Pickle files", "*.pkl"), ("All files", "*.*")])
+            filetypes=[("Calibration", "*.pkl *.json"), ("Pickle files", "*.pkl"), ("JSON files", "*.json"), ("All files", "*.*")])
         if not f:
             return
         try:
-            with open(f, "rb") as fh:
-                data = pickle.load(fh)
+            data = load_lens_calibration(f)
             if (not isinstance(data, dict)
                     or "camera_matrix" not in data
                     or "dist_coeff" not in data):
@@ -1898,8 +1927,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
             self.lens_calib_data = None
             if lens_path and os.path.isfile(lens_path):
                 try:
-                    with open(lens_path, "rb") as fh:
-                        calib = pickle.load(fh)
+                    calib = load_lens_calibration(lens_path)
                     if (isinstance(calib, dict)
                             and "camera_matrix" in calib
                             and "dist_coeff" in calib):
@@ -2104,15 +2132,40 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
     # ——— gather images helper ———
 
     @staticmethod
-    def _gather_images_from(folder, recursive=False, exclude_bad=False, bad_list=None):
+    def _gather_images_from(folder, recursive=False, exclude_bad=False, bad_list=None,
+                            progress_cb=None, cancel_cb=None):
         if recursive:
-            images = collect_images_recursive(folder)
+            images = collect_images_recursive(
+                folder, progress_cb=progress_cb, cancel_cb=cancel_cb)
         else:
             images = collect_images(folder)
         if exclude_bad and bad_list:
-            bad_set = set(map(str, bad_list))
-            images = [p for p in images if str(p) not in bad_set]
+            # Normalise case/separators so a bad_images.json written on another
+            # OS (or with different path casing) still matches reliably.
+            def _norm(x):
+                return os.path.normcase(os.path.normpath(str(x)))
+            bad_set = set(_norm(b) for b in bad_list)
+            images = [p for p in images if _norm(p) not in bad_set]
         return images
+
+    def _scan_feedback(self, folder, recursive):
+        """Announce a (potentially slow) recursive scan and return
+        (progress_cb, cancel_cb).  For a non-recursive gather returns
+        (None, None) since that listing is fast."""
+        if not recursive:
+            return None, None
+        print(f"Scanning '{folder}' for images (recursive)… "
+              f"this can take a while on large / networked trees.")
+        self._ui_set_eta("Scanning folders…")
+
+        def progress_cb(n_dirs, n_imgs):
+            print(f"  …scanned {n_dirs} folders, {n_imgs} images so far")
+            self._ui_set_eta(f"Scanning… {n_dirs} folders, {n_imgs} imgs")
+
+        def cancel_cb():
+            return self._cancel_requested
+
+        return progress_cb, cancel_cb
 
     def _gather_images(self, exclude_bad=True):
         return self._gather_images_from(
@@ -2264,6 +2317,11 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
             return
         if cfg is None:
             return
+        # Set the busy flag synchronously (before the thread starts) so a
+        # rapid second click can't slip past the `if self._processing` guard
+        # and launch a duplicate worker writing to the same outputs.
+        self._processing = True
+        self._cancel_requested = False
         threading.Thread(target=self._run_filter, args=(cfg,), daemon=True).start()
 
     def _run_filter(self, cfg):
@@ -2273,7 +2331,14 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
             self._ui_set_progress_fraction(0)
             self._ui_set_eta("ETA: --")
 
-            images = self._gather_images_from(cfg["input_folder"], recursive=cfg["recursive"])
+            pcb, ccb = self._scan_feedback(cfg["input_folder"], cfg["recursive"])
+            images = self._gather_images_from(
+                cfg["input_folder"], recursive=cfg["recursive"],
+                progress_cb=pcb, cancel_cb=ccb)
+            if self._cancel_requested:
+                self._ui_set_eta("Cancelled")
+                print("Cancelled during folder scan.")
+                return
             if not images:
                 self._ui_message("warning", "Warning", "No images found.")
                 return
@@ -2346,7 +2411,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
                         detail = "failed_image (0 bytes)"
                     else:
                         detail = f"failed_image ({file_sz/1024:.1f} KB < {failed_size_threshold/1024:.1f} KB threshold)"
-                    bad_reasons[p.name] = [detail]
+                    bad_reasons[str(p)] = [detail]
                     reason_counts["failed_image"] += 1
                     print(f"  x {p.name}: {detail}")
                     self._update_progress(idx, len(images), start_time)
@@ -2357,7 +2422,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
                     # Always flag unreadable files regardless of checkbox state
                     bad_list.append(str(p))
                     detail = f"failed_image (unreadable, {file_sz/1024:.1f} KB)"
-                    bad_reasons[p.name] = [detail]
+                    bad_reasons[str(p)] = [detail]
                     reason_counts["failed_image"] += 1
                     print(f"  x {p.name}: {detail}")
                     self._update_progress(idx, len(images), start_time)
@@ -2380,7 +2445,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
 
                 if reasons:
                     bad_list.append(str(p))
-                    bad_reasons[p.name] = reasons
+                    bad_reasons[str(p)] = reasons
                     for r in reasons:
                         reason_counts[r] = reason_counts.get(r, 0) + 1
                     print(f"  x {p.name}: {', '.join(reasons)}")
@@ -2398,7 +2463,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
                     "absolute_path": str(bp_path),
                     "relative_path": str(bp_path.relative_to(input_root)),
                     "filename": bp_path.name,
-                    "reasons": bad_reasons.get(bp_path.name, []),
+                    "reasons": bad_reasons.get(str(bp_path), []),
                 })
             self.bad_details = details
 
@@ -2466,6 +2531,11 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
             return
         if cfg is None:
             return
+        # Set the busy flag synchronously (before the thread starts) so a
+        # rapid second click can't slip past the `if self._processing` guard
+        # and launch a duplicate worker writing to the same outputs.
+        self._processing = True
+        self._cancel_requested = False
         threading.Thread(target=self._run_preview_brightness, args=(cfg,), daemon=True).start()
 
     def _run_preview_brightness(self, cfg):
@@ -2474,8 +2544,14 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
             self._cancel_requested = False
             self._ui_set_progress_fraction(0)
 
+            pcb, ccb = self._scan_feedback(cfg["input_folder"], cfg["recursive"])
             images = self._gather_images_from(cfg["input_folder"], recursive=cfg["recursive"],
-                                              exclude_bad=cfg["exclude_bad"], bad_list=cfg["bad_list"])
+                                              exclude_bad=cfg["exclude_bad"], bad_list=cfg["bad_list"],
+                                              progress_cb=pcb, cancel_cb=ccb)
+            if self._cancel_requested:
+                self._ui_set_eta("Cancelled")
+                print("Cancelled during folder scan.")
+                return
             if not images:
                 self._ui_message("warning", "Warning", "No images remaining.")
                 return
@@ -2497,6 +2573,10 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
                 else:
                     means.append(mean_luminance(img, cfg["sky_frac"]))
             means_arr = np.array(means)
+            if not np.any(~np.isnan(means_arr)):
+                print("  ERROR: no readable images for brightness preview.")
+                self._ui_message("warning", "Warning", "No readable images to preview.")
+                return
             ref_mean = float(np.nanmedian(means_arr))
             ref_idx = int(np.nanargmin(np.abs(means_arr - ref_mean)))
             ref_img = imread_safe(str(images[ref_idx]))
@@ -2555,6 +2635,11 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
             return
         if cfg is None:
             return
+        # Set the busy flag synchronously (before the thread starts) so a
+        # rapid second click can't slip past the `if self._processing` guard
+        # and launch a duplicate worker writing to the same outputs.
+        self._processing = True
+        self._cancel_requested = False
         threading.Thread(target=self._run_harmonise_brightness, args=(cfg,), daemon=True).start()
 
     def _run_harmonise_brightness(self, cfg):
@@ -2564,8 +2649,14 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
             self._ui_set_progress_fraction(0)
             self._ui_set_eta("ETA: --")
 
+            pcb, ccb = self._scan_feedback(cfg["input_folder"], cfg["recursive"])
             images = self._gather_images_from(cfg["input_folder"], recursive=cfg["recursive"],
-                                              exclude_bad=cfg["exclude_bad"], bad_list=cfg["bad_list"])
+                                              exclude_bad=cfg["exclude_bad"], bad_list=cfg["bad_list"],
+                                              progress_cb=pcb, cancel_cb=ccb)
+            if self._cancel_requested:
+                self._ui_set_eta("Cancelled")
+                print("Cancelled during folder scan.")
+                return
             if not images:
                 self._ui_message("warning", "Warning", "No images remaining after filtering.")
                 return
@@ -2573,26 +2664,30 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
             sky_msg = (f", sky mask top {cfg['sky_pct']:.0f}%" if cfg["sky_frac"] > 0 else "")
             print(f"\nHarmonising brightness for {len(images)} images (tolerance +/-{cfg['tol']} L-units{sky_msg})...")
 
+            # Pass 1: compute per-image luminance ONLY.  Previously every decoded
+            # image was held in `loaded` for the whole run, which needs tens of GB
+            # (and crashes) on large batches — the exact case recursive mode hits.
+            # We now store just the means and re-read images on demand, matching
+            # the preview path's memory profile.
             means = []
-            loaded = []
             for p in images:
                 if self._cancel_requested:
                     self._ui_set_eta("Cancelled")
                     print("Brightness harmonisation cancelled.")
                     return
                 img = imread_safe(str(p))
-                if img is None:
-                    means.append(np.nan)
-                    loaded.append(None)
-                    continue
-                loaded.append(img)
-                means.append(mean_luminance(img, cfg["sky_frac"]))
+                means.append(np.nan if img is None else mean_luminance(img, cfg["sky_frac"]))
 
             means_arr = np.array(means)
             valid = ~np.isnan(means_arr)
+            if not valid.any():
+                print("ERROR: no readable images to harmonise.")
+                self._ui_message("warning", "Warning", "No readable images to harmonise.")
+                return
             ref_mean = float(np.nanmedian(means_arr))
             ref_idx = int(np.nanargmin(np.abs(means_arr - ref_mean)))
-            ref_img = loaded[ref_idx]
+            # Re-read just the reference image (kept in memory for hist_match).
+            ref_img = imread_safe(str(images[ref_idx]))
             if ref_img is None:
                 print(f"ERROR: reference image {images[ref_idx].name} could not be loaded.")
                 return
@@ -2602,11 +2697,18 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
             counts = {"copy": 0, "histogram": 0, "soft-gain": 0, "bright-gain": 0, "reverted": 0}
             start_time = time.time()
 
-            for idx, (p, img, m) in enumerate(zip(images, loaded, means)):
+            # Pass 2: re-read each image on demand and apply the correction.
+            for idx, (p, m) in enumerate(zip(images, means)):
                 if self._cancel_requested:
                     self._ui_set_eta("Cancelled")
                     print("Brightness harmonisation cancelled.")
                     return
+                if np.isnan(m):
+                    continue
+                if idx == ref_idx:
+                    img = ref_img
+                else:
+                    img = imread_safe(str(p))
                 if img is None:
                     continue
                 delta = m - ref_mean
@@ -2659,6 +2761,11 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
         cfg = self._collect_colour_config()
         if cfg is None:
             return
+        # Set the busy flag synchronously (before the thread starts) so a
+        # rapid second click can't slip past the `if self._processing` guard
+        # and launch a duplicate worker writing to the same outputs.
+        self._processing = True
+        self._cancel_requested = False
         threading.Thread(target=self._run_preview_colour, args=(cfg,), daemon=True).start()
 
     def _run_preview_colour(self, cfg):
@@ -2667,8 +2774,14 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
             self._cancel_requested = False
             self._ui_set_progress_fraction(0)
 
+            pcb, ccb = self._scan_feedback(cfg["input_folder"], cfg["recursive"])
             images = self._gather_images_from(cfg["input_folder"], recursive=cfg["recursive"],
-                                              exclude_bad=cfg["exclude_bad"], bad_list=cfg["bad_list"])
+                                              exclude_bad=cfg["exclude_bad"], bad_list=cfg["bad_list"],
+                                              progress_cb=pcb, cancel_cb=ccb)
+            if self._cancel_requested:
+                self._ui_set_eta("Cancelled")
+                print("Cancelled during folder scan.")
+                return
             ref_abs = os.path.abspath(cfg["ref_colour_path"])
             images = [p for p in images if os.path.abspath(str(p)) != ref_abs]
             if not images:
@@ -2719,6 +2832,11 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
         cfg = self._collect_colour_config()
         if cfg is None:
             return
+        # Set the busy flag synchronously (before the thread starts) so a
+        # rapid second click can't slip past the `if self._processing` guard
+        # and launch a duplicate worker writing to the same outputs.
+        self._processing = True
+        self._cancel_requested = False
         threading.Thread(target=self._run_harmonise_colour, args=(cfg,), daemon=True).start()
 
     def _run_harmonise_colour(self, cfg):
@@ -2728,8 +2846,14 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
             self._ui_set_progress_fraction(0)
             self._ui_set_eta("ETA: --")
 
+            pcb, ccb = self._scan_feedback(cfg["input_folder"], cfg["recursive"])
             images = self._gather_images_from(cfg["input_folder"], recursive=cfg["recursive"],
-                                              exclude_bad=cfg["exclude_bad"], bad_list=cfg["bad_list"])
+                                              exclude_bad=cfg["exclude_bad"], bad_list=cfg["bad_list"],
+                                              progress_cb=pcb, cancel_cb=ccb)
+            if self._cancel_requested:
+                self._ui_set_eta("Cancelled")
+                print("Cancelled during folder scan.")
+                return
             ref_abs = os.path.abspath(cfg["ref_colour_path"])
             images = [p for p in images if os.path.abspath(str(p)) != ref_abs]
             if not images:
@@ -2793,6 +2917,11 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
         cfg = self._collect_average_config()
         if cfg is None:
             return
+        # Set the busy flag synchronously (before the thread starts) so a
+        # rapid second click can't slip past the `if self._processing` guard
+        # and launch a duplicate worker writing to the same outputs.
+        self._processing = True
+        self._cancel_requested = False
         threading.Thread(target=self._run_average_images, args=(cfg,), daemon=True).start()
 
     def _run_average_images(self, cfg):
@@ -2809,7 +2938,14 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
             jobs = []
             excluded_total = 0
             if cfg["recursive"]:
-                for root, _, files in os.walk(cfg["input_folder"]):
+                print(f"Scanning '{cfg['input_folder']}' for images (recursive)… "
+                      f"this can take a while on large / networked trees.")
+                self._ui_set_eta("Scanning folders…")
+                for n_dirs, (root, _, files) in enumerate(os.walk(cfg["input_folder"]), 1):
+                    if self._cancel_requested:
+                        self._ui_set_eta("Cancelled")
+                        print("Cancelled during folder scan.")
+                        return
                     imgs = [Path(root) / f for f in sorted(files) if Path(f).suffix.lower() in IMAGE_EXTS]
                     if exclude_bad and bad_set:
                         before = len(imgs)
@@ -2817,6 +2953,9 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
                         excluded_total += before - len(imgs)
                     if imgs:
                         jobs.append((Path(root), imgs))
+                    if n_dirs % 200 == 0:
+                        print(f"  …scanned {n_dirs} folders, {len(jobs)} with images so far")
+                        self._ui_set_eta(f"Scanning… {n_dirs} folders")
             else:
                 imgs = collect_images(cfg["input_folder"])
                 if exclude_bad and bad_set:
@@ -2922,6 +3061,11 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
             return
         if cfg is None:
             return
+        # Set the busy flag synchronously (before the thread starts) so a
+        # rapid second click can't slip past the `if self._processing` guard
+        # and launch a duplicate worker writing to the same outputs.
+        self._processing = True
+        self._cancel_requested = False
         threading.Thread(target=self._run_lens_correction,
                          args=(cfg,), daemon=True).start()
 

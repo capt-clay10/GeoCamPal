@@ -1300,56 +1300,86 @@ class TimestackTool(ctk.CTkToplevel):
             messagebox.showerror("Error", str(e), parent=self)
             return
         freq, dur = self._current_freq_duration()
+        fill_gaps = bool(self.fill_gaps.get())
 
-        all_subs = [os.path.join(mbf, d) for d in os.listdir(mbf)
-                    if os.path.isdir(os.path.join(mbf, d))]
-        if not all_subs:
-            messagebox.showerror("Error", "No sub-folders found in batch folder.", parent=self)
-            return
-
-        subs_to_do = []
-        skipped = 0
-        for sub in all_subs:
-            imgs = collect_images(sub)
-            if not imgs:
-                continue
-            try:
-                files_sorted, dts_sorted = collect_dated_files(imgs)
-                first_ts = dts_sorted[0].strftime("%Y_%m_%d_%H_%M")
-                imgs = files_sorted
-            except Exception:
-                imgs.sort()
-                first_ts = "_".join(os.path.basename(imgs[0]).split("_")[0:5])
-            expected_name = f"{first_ts}_raw_timestack.png"
-            if os.path.exists(os.path.join(outf, expected_name)):
-                skipped += 1
-            else:
-                subs_to_do.append(sub)
-
-        if not subs_to_do:
-            messagebox.showinfo("Batch Done", f"Nothing to do: {skipped} sub-folders were already processed.", parent=self)
-            return
-
-        total = len(subs_to_do)
+        # Mark running now, on the main thread, so the Busy-guard and the
+        # close/reset handlers see it immediately.  The sub-folder scan (which
+        # can be slow on large / networked trees) is done inside the worker
+        # thread below rather than here, so the UI never freezes during it.
         self._cancel_requested = False
         self._batch_running = True
         self._batch_start_time = time.time()
         self.batch_pb.set(0)
-        self.batch_lbl.configure(text=f"0 / {total} — ETA {format_eta(None)}")
-        fill_gaps = bool(self.fill_gaps.get())
-        print(f"Batch process has started – {total} new sub-folders (skipped {skipped} already done)")
-
-        def update_ui(done_cnt: int):
-            frac = done_cnt / total
-            eta = compute_eta(self._batch_start_time or time.time(), done_cnt, total) if self._batch_start_time else None
-            label = f"{done_cnt} / {total} — ETA {format_eta(eta)}"
-            self._ui_batch_progress(frac, label)
+        self.batch_lbl.configure(text="Scanning sub-folders…")
+        print("Scanning batch sub-folders… "
+              "(this can take a while on large / networked trees)")
 
         def controller():
             done = 0
+            skipped = 0
             cancelled = False
-            max_workers = min(4, os.cpu_count() or 1, total)
+            all_subs = []
+            subs_to_do = []
+            processing_phase = False  # only show the completion dialog if we
+                                      # actually reached the processing stage
             try:
+                # ── Folder scan (moved off the main thread) ──
+                all_subs = [os.path.join(mbf, d) for d in os.listdir(mbf)
+                            if os.path.isdir(os.path.join(mbf, d))]
+                if not all_subs:
+                    self._ui_message("error", "Error",
+                                     "No sub-folders found in batch folder.")
+                    return
+
+                for n_sub, sub in enumerate(all_subs, 1):
+                    if self._cancel_requested:
+                        cancelled = True
+                        break
+                    imgs = collect_images(sub)
+                    if not imgs:
+                        continue
+                    try:
+                        files_sorted, dts_sorted = collect_dated_files(imgs)
+                        first_ts = dts_sorted[0].strftime("%Y_%m_%d_%H_%M")
+                        imgs = files_sorted
+                    except Exception:
+                        imgs.sort()
+                        first_ts = "_".join(os.path.basename(imgs[0]).split("_")[0:5])
+                    expected_name = f"{first_ts}_raw_timestack.png"
+                    if os.path.exists(os.path.join(outf, expected_name)):
+                        skipped += 1
+                    else:
+                        subs_to_do.append(sub)
+                    if n_sub % 50 == 0:
+                        self._ui_batch_progress(
+                            0, f"Scanning… {n_sub}/{len(all_subs)} folders")
+
+                if cancelled or self._cancel_requested:
+                    cancelled = True
+                    self._ui_message("info", "Cancelled",
+                                     "Batch scan cancelled before processing.")
+                    return
+                if not subs_to_do:
+                    self._ui_message(
+                        "info", "Batch Done",
+                        f"Nothing to do: {skipped} sub-folders were already processed.")
+                    return
+
+                total = len(subs_to_do)
+                self._ui_batch_progress(0, f"0 / {total} — ETA {format_eta(None)}")
+                print(f"Batch process has started – {total} new sub-folders "
+                      f"(skipped {skipped} already done)")
+
+                def update_ui(done_cnt: int):
+                    frac = done_cnt / total
+                    eta = compute_eta(self._batch_start_time or time.time(),
+                                      done_cnt, total) if self._batch_start_time else None
+                    label = f"{done_cnt} / {total} — ETA {format_eta(eta)}"
+                    self._ui_batch_progress(frac, label)
+
+                # ── Parallel processing (logic unchanged) ──
+                processing_phase = True
+                max_workers = min(4, os.cpu_count() or 1, total)
                 with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers,
                                                            thread_name_prefix="batch") as pool:
                     self._batch_executor = pool
@@ -1383,22 +1413,25 @@ class TimestackTool(ctk.CTkToplevel):
                         update_ui(done)
             finally:
                 self._batch_executor = None
-                elapsed = time.time() - (self._batch_start_time or time.time())
-                elapsed_str = f"{elapsed/60:.1f} min" if elapsed >= 60 else f"{elapsed:.1f} s"
-                if cancelled or self._cancel_requested:
-                    print("Batch process cancelled.")
-                    self._ui_message("info", "Cancelled", f"Batch process cancelled after {done} sub-folders.\nElapsed time: {elapsed_str}")
-                else:
-                    print(f"Batch process complete in {elapsed_str}")
-                    self._ui_message(
-                        "info",
-                        "Batch Done",
-                        f"Newly processed: {done}\n"
-                        f"Previously done: {skipped}\n"
-                        f"Total in folder: {len(all_subs)}\n"
-                        f"Elapsed time: {elapsed_str}\n\n"
-                        "Batch process complete"
-                    )
+                # Only announce completion if we actually processed; the early
+                # scan-stage returns above show their own dialog.
+                if processing_phase:
+                    elapsed = time.time() - (self._batch_start_time or time.time())
+                    elapsed_str = f"{elapsed/60:.1f} min" if elapsed >= 60 else f"{elapsed:.1f} s"
+                    if cancelled or self._cancel_requested:
+                        print("Batch process cancelled.")
+                        self._ui_message("info", "Cancelled", f"Batch process cancelled after {done} sub-folders.\nElapsed time: {elapsed_str}")
+                    else:
+                        print(f"Batch process complete in {elapsed_str}")
+                        self._ui_message(
+                            "info",
+                            "Batch Done",
+                            f"Newly processed: {done}\n"
+                            f"Previously done: {skipped}\n"
+                            f"Total in folder: {len(all_subs)}\n"
+                            f"Elapsed time: {elapsed_str}\n\n"
+                            "Batch process complete"
+                        )
                 self._batch_running = False
                 self._batch_start_time = None
                 self._ui_batch_progress(0, "")
