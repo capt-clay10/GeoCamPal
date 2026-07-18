@@ -2,12 +2,15 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/license-MIT-green?style=for-the-badge" alt="License">
-  <img src="https://img.shields.io/badge/python-3.8%2B-blue?style=for-the-badge" alt="Python 3.8+">
+  <img src="https://img.shields.io/badge/python-3.10%2B-blue?style=for-the-badge" alt="Python 3.10+">
 </p>
 
 <p align="center">
   <strong>A modular GUI-driven toolbox for geospatial image processing, camera pre-processing, georeferencing, Feature labeling, semi-automatic feature detection, Machine learning integration, DEM generation, time-stacking, and wave run-up analysis.</strong>
 </p>
+
+<img width="5534" height="2213" alt="Graphical_abstract_GeoCamPal" src="https://github.com/user-attachments/assets/b265395b-20b0-432b-907c-d1006dae8621" />
+
 
 ---
 
