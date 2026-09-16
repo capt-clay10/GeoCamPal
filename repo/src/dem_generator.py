@@ -106,6 +106,19 @@ from utils import (
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("green")
 
+class DataLoadReported(Exception):
+    """Raised by load_data_if_needed() *after* it has already shown the user
+    a dialog explaining the problem.
+
+    Callers catch this and return silently.  Any *other* exception escaping
+    load_data_if_needed() is unexpected and must still be surfaced: pandas
+    raises ValueError subclasses (ParserError, EmptyDataError,
+    OutOfBoundsDatetime) and geopandas raises a plain ValueError for mixed
+    CRS, so a blanket `except ValueError` used to swallow real failures and
+    leave a dead button with no message at all.
+    """
+
+
 # %% ————————————————————————————— main window ——————————————————————————
 class CreateDemWindow(ctk.CTkToplevel):
     """
@@ -152,10 +165,14 @@ class CreateDemWindow(ctk.CTkToplevel):
         self.wl_bin_var = tk.StringVar(value="0.02")
 
         # default filename pattern
+        # Only the date/time groups the loader actually reads — no camera
+        # name, version or file extension.  Anchoring those tied the default
+        # to one site's naming convention and made it match nothing at all
+        # for files exported with a feature-name suffix, e.g.
+        # "..._HDR_shoreline.geojson".
         DEFAULT_PATTERN = (
             r"(?P<year>\d{4})_(?P<month>\d{2})_(?P<day>\d{2})_"
-            r"(?P<hour1>\d{2})_(?P<min1>\d{2})-(?P<hour2>\d{2})_(?P<min2>\d{2})_"
-            r"cam[A-Za-z0-9]+_v\d+_HDR\.geojson"
+            r"(?P<hour1>\d{2})_(?P<min1>\d{2})-(?P<hour2>\d{2})_(?P<min2>\d{2})"
         )
         self.regex_var = tk.StringVar(value=DEFAULT_PATTERN)
 
@@ -374,6 +391,10 @@ class CreateDemWindow(ctk.CTkToplevel):
             "                      so that date/time can be extracted.\n"
             "  Filename pattern  — Regex with named groups: year, month,\n"
             "                      day, hour1, min1, hour2, min2.\n"
+            "                      Only year/month/day are required;\n"
+            "                      hour1/min1 default to 00:00, and hour2/\n"
+            "                      min2 default to hour1/min1 so single-\n"
+            "                      timestamp filenames work too.\n"
             "                      The midpoint of hour1:min1–hour2:min2\n"
             "                      is used as the shoreline timestamp.\n"
             "\n"
@@ -509,7 +530,7 @@ class CreateDemWindow(ctk.CTkToplevel):
         csv_path = self.wl_csv_var.get().strip()
         if not csv_path or not os.path.isfile(csv_path):
             messagebox.showerror("Error", "Please specify a valid water-level CSV.",parent=self)
-            raise ValueError("No CSV")
+            raise DataLoadReported("No CSV")
 
         df = pd.read_csv(csv_path)
         df["time"] = pd.to_datetime(df["time"])
@@ -521,50 +542,59 @@ class CreateDemWindow(ctk.CTkToplevel):
         folder = self.geojson_dir_var.get().strip()
         if not folder or not os.path.isdir(folder):
             messagebox.showerror("Error", "Please specify a valid GeoJSON folder.",parent=self)
-            raise ValueError("No folder")
+            raise DataLoadReported("No folder")
 
         try:
             pattern = re.compile(self.regex_var.get().strip())
         except re.error as err:
             messagebox.showerror("Regex error", f"Invalid filename pattern:\n{err}",parent=self)
-            # Raise ValueError (not the raw re.error) so the button handlers
-            # treat this as an already-reported failure and don't show a
-            # second, generic dialog.
-            raise ValueError("invalid filename pattern")
+            # Raise DataLoadReported (not the raw re.error) so the button
+            # handlers treat this as an already-reported failure and don't
+            # show a second, generic dialog.
+            raise DataLoadReported("invalid filename pattern")
 
         shore_gdfs = []
         for gj in sorted(Path(folder).glob("*.geojson")):
             m = pattern.search(gj.name)
             if not m:
                 continue
-            gd = m.groupdict()
+            try:
+                gd = m.groupdict()
 
-            # Robust group extraction:
-            #  • gd.get(name) returns None both when the key is absent AND when
-            #    an *optional* group in the pattern didn't match, so a plain
-            #    int(gd.get(...)) or int(gd.get(name, default)) can raise
-            #    int(None).  Coalesce with `or` and skip files that lack the
-            #    essential date groups instead of raising (which previously
-            #    made the Generate button silently do nothing).
-            def _grp(name, default=None):
-                v = gd.get(name)
-                return int(v) if v not in (None, "") else default
+                # Robust group extraction:
+                #  • gd.get(name) returns None both when the key is absent AND
+                #    when an *optional* group in the pattern didn't match, so a
+                #    plain int(gd.get(...)) or int(gd.get(name, default)) can
+                #    raise int(None).  Coalesce and skip files that lack the
+                #    essential date groups instead of raising (which previously
+                #    made the Generate button silently do nothing).
+                def _grp(name, default=None):
+                    v = gd.get(name)
+                    return int(v) if v not in (None, "") else default
 
-            year = _grp("year")
-            month = _grp("month")
-            day = _grp("day")
-            if year is None or month is None or day is None:
-                print(f"[DEM] Skipping {gj.name}: filename pattern matched but "
-                      f"is missing a year/month/day group.")
+                year = _grp("year")
+                month = _grp("month")
+                day = _grp("day")
+                if year is None or month is None or day is None:
+                    print(f"[DEM] Skipping {gj.name}: filename pattern matched "
+                          f"but is missing a year/month/day group.")
+                    continue
+                h1 = _grp("hour1", 0)
+                min1 = _grp("min1", 0)
+                h2 = _grp("hour2", h1)
+                min2 = _grp("min2", min1)
+                mid_total_min = (h1*60 + min1 + h2*60 + min2) // 2
+                mid_hour, mid_min = divmod(mid_total_min, 60)
+                ts = pd.to_datetime(f"{year}-{month}-{day} {mid_hour}:{mid_min}:00")
+                gdf = gpd.read_file(gj)
+            except Exception as e:
+                # One unreadable file or unparseable date must not abort the
+                # whole load — this mirrors the per-day resilience that
+                # _batch_worker already has.  A permissive filename pattern
+                # can match a stray file and yield e.g. "1234-56-78"; log it
+                # and carry on with the rest of the folder.
+                print(f"[DEM] Skipping {gj.name}: {type(e).__name__}: {e}")
                 continue
-            h1 = _grp("hour1", 0)
-            min1 = _grp("min1", 0)
-            h2 = _grp("hour2", h1)
-            min2 = _grp("min2", min1)
-            mid_total_min = (h1*60 + min1 + h2*60 + min2) // 2
-            mid_hour, mid_min = divmod(mid_total_min, 60)
-            ts = pd.to_datetime(f"{year}-{month}-{day} {mid_hour}:{mid_min}:00")
-            gdf = gpd.read_file(gj)
             if gdf.empty:
                 continue
             gdf["time"] = ts.tz_localize(None)
@@ -573,7 +603,7 @@ class CreateDemWindow(ctk.CTkToplevel):
 
         if not shore_gdfs:
             messagebox.showwarning("Warning", "No GeoJSONs matched the pattern.",parent=self)
-            raise ValueError("No geojson data")
+            raise DataLoadReported("No geojson data")
 
         combined = gpd.GeoDataFrame(pd.concat(shore_gdfs, ignore_index=True),
                                     crs=shore_gdfs[0].crs)
@@ -1309,7 +1339,7 @@ class CreateDemWindow(ctk.CTkToplevel):
     def on_generate_next_dem(self):
         try:
             self.load_data_if_needed()
-        except ValueError:
+        except DataLoadReported:
             return  # already reported by load_data_if_needed (dialog shown)
         except Exception as e:
             # Any *unexpected* failure (e.g. a malformed CSV or an unusual
@@ -1346,7 +1376,7 @@ class CreateDemWindow(ctk.CTkToplevel):
     def on_batch_process(self):
         try:
             self.load_data_if_needed()
-        except ValueError:
+        except DataLoadReported:
             return  # already reported by load_data_if_needed (dialog shown)
         except Exception as e:
             messagebox.showerror("Error", f"Could not load data:\n{e}", parent=self)
@@ -1411,7 +1441,7 @@ class CreateDemWindow(ctk.CTkToplevel):
                 try:
                     self.create_dem_for_day(date_val, cfg=cfg)
                 except Exception as e:
-                    failed_days.append(str(date_val))
+                    failed_days.append((str(date_val), str(e)))
                     print(f"ERROR — DEM for {date_val} failed: {e}")
                     traceback.print_exc()
         except Exception as e:
@@ -1429,16 +1459,32 @@ class CreateDemWindow(ctk.CTkToplevel):
         self.after(0, self.batch_progress.set, 1.0)
         elapsed = format_eta(time.time() - t0)
         if failed_days:
-            shown = ", ".join(failed_days[:10])
+            shown = ", ".join(d for d, _ in failed_days[:10])
             if len(failed_days) > 10:
                 shown += ", …"
+            report_path = None
+            try:
+                report_path = os.path.join(cfg["out_dir"],
+                                           "dem_batch_failures.txt")
+                with open(report_path, "w", encoding="utf-8") as fh:
+                    fh.write("DEM batch - failed days\n")
+                    fh.write(f"Run: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                    fh.write(f"Output folder: {cfg['out_dir']}\n")
+                    fh.write(f"Days: {total}   Failed: {len(failed_days)}\n\n")
+                    for day, reason in failed_days:
+                        fh.write(f"{day}\t{reason}\n")
+                print(f"Failure report: {report_path}")
+            except Exception as e:
+                report_path = None
+                print(f"Could not write failure report: {e}")
             self.after(0, self.batch_eta_label.configure,
                        {"text": f"Done — {len(failed_days)}/{total} day(s) failed ({elapsed})"})
-            self.after(0, lambda: messagebox.showwarning(
-                "Batch finished with errors",
-                f"Batch DEM creation finished ({elapsed}).\n"
-                f"{len(failed_days)} of {total} day(s) failed — see console for details:\n{shown}",
-                parent=self))
+            msg = (f"Batch DEM creation finished ({elapsed}).\n"
+                   f"{len(failed_days)} of {total} day(s) failed:\n{shown}")
+            if report_path:
+                msg += f"\n\nFull list with reasons: {report_path}"
+            self.after(0, lambda m=msg: messagebox.showwarning(
+                "Batch finished with errors", m, parent=self))
         else:
             self.after(0, self.batch_eta_label.configure,
                        {"text": f"Done ({total} days, {elapsed})"})
