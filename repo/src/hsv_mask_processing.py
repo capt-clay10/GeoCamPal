@@ -2078,7 +2078,9 @@ class HSVMaskProcessingMixin:
                 f"  images/\n"
                 f"  masks/\n"
                 f"  coco/\n\n"
-                f"All in: {export_path}",
+                f"All in: {export_path}"
+                + (f"\n\nSkipped images: {self._batch_skipped_report}"
+                   if getattr(self, "_batch_skipped_report", None) else ""),
                 parent=self)
 
     def _batch_worker_safe(self, cfg):
@@ -2130,6 +2132,8 @@ class HSVMaskProcessingMixin:
 
         processed = 0
         skipped   = 0
+        skipped_names = []          # (path, reason) behind the counter
+        self._batch_skipped_report = None   # cleared per run, never stale
         t_start   = time.time()
 
         for idx, file_path in enumerate(image_files):
@@ -2162,6 +2166,7 @@ class HSVMaskProcessingMixin:
             if original is None:
                 print(f"[batch_process] Skipped (unreadable): {basename}")
                 skipped += 1
+                skipped_names.append((file_path, "unreadable"))
                 continue
 
             self.full_image = original.copy()
@@ -2255,13 +2260,21 @@ class HSVMaskProcessingMixin:
             is_polygon = cfg["extraction_mode"] == "polygon"
 
             # ── GeoJSON export ──
+            # A read failure is not the same as an image with no georeference
+            # (a PNG/JPG opens fine and reports crs=None).  Both fall back to
+            # pixel coordinates, so say which one happened.  This runs on a
+            # worker thread, so it reports to the console — never a dialog.
             try:
                 with rasterio.open(file_path) as src:
                     transform = src.transform
                     crs       = src.crs
-            except Exception:
+            except Exception as e:
                 transform = None
                 crs       = None
+                print(f"  WARNING: could not read georeference from {basename}: "
+                      f"{type(e).__name__}: {e}")
+                print(f"  WARNING: {stem}.geojson will contain PIXEL coordinates "
+                      f"and cannot be used by Create DEM.")
 
             out_geo = os.path.join(geojson_folder, stem + ".geojson")
             if all_features:
@@ -2360,6 +2373,23 @@ class HSVMaskProcessingMixin:
 
             processed += 1
             print(f"  [{processed}/{total}] {basename}")
+
+        # Write the names behind the skipped count; the dialog only has room
+        # for the number.
+        if skipped_names:
+            try:
+                rp = os.path.join(export_path, "batch_skipped.txt")
+                with open(rp, "w", encoding="utf-8") as fh:
+                    fh.write("Batch processing - images skipped\n")
+                    fh.write(f"Run: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                    fh.write(f"Processed: {processed}   "
+                             f"Skipped: {skipped}   Total: {total}\n\n")
+                    for name, reason in skipped_names:
+                        fh.write(f"{name}\t{reason}\n")
+                self._batch_skipped_report = rp
+                print(f"[batch] Skipped-image list saved to: {rp}")
+            except Exception as e:
+                print(f"[batch] Could not write skipped-image list: {e}")
 
         # ── Signal completion on the main thread ──
         try:
