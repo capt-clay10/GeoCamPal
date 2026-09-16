@@ -69,7 +69,15 @@ Process All applies the current settings to every image in the input
 folder (optionally including sub-folders, preserving the relative
 directory structure in the output).  Each output GeoTIFF is validated
 after writing; files that fail the size or GDAL check are automatically
-retried up to MAX_RETRIES times.
+retried up to MAX_RETRIES times.  Validation is scoped to the current
+run's outputs, so pre-existing GeoTIFFs in the output folder neither
+skew the size threshold nor count as failures.  Anything still failing
+after the retries is listed in full in georef_failures.txt.
+
+Tick "Skip existing" to resume an interrupted batch: images whose
+output already exists and opens cleanly in GDAL are skipped, while
+half-written outputs are reprocessed.  With it unticked (the default)
+every image is reprocessed and its output overwritten.
 
 Inputs
 ------
@@ -84,6 +92,9 @@ Outputs
 -------
     <image_name>.tif      — DEFLATE-compressed GeoTIFF with alpha channel,
                              CRS set from EPSG, pixel size from GSD estimate
+    georef_failures.txt   — written only when a batch has failures: every
+                             failed file with its reason (written to the
+                             output folder)
 
 Dependencies
 ------------
@@ -103,7 +114,7 @@ from osgeo import gdal, osr
 gdal.UseExceptions()
 gdal.PushErrorHandler('CPLQuietErrorHandler')   # suppress non-fatal TIFF warnings
 
-from utils import fit_geometry, resource_path, setup_console, restore_console, save_settings_json, load_settings_json, imread_safe, load_lens_calibration
+from utils import show_path, fit_geometry, resource_path, setup_console, restore_console, save_settings_json, load_settings_json, imread_safe, load_lens_calibration
 
 try:
     from csv_utils import read_gcp_csv, normalise_columns, exclude_gcps_by_number, gcp_numeric_suffix
@@ -147,8 +158,13 @@ def validate_geotiff(fp, min_size=MIN_GEOTIFF_SIZE):
         return (w > 1 and h > 1), f"dims {w}x{h}"
     except Exception as e: return False, str(e)
 
-def sweep_and_validate(folder):
+def sweep_and_validate(folder, only=None):
     tifs = glob.glob(os.path.join(folder, "*.tif"))
+    # `only` (a set of os.path.normcase'd paths) restricts the sweep to the
+    # current batch's outputs.  Without it, stale GeoTIFFs left in the output
+    # folder by an earlier run skew the median size threshold below and are
+    # reported as failures the retry loop has no input mapping to fix.
+    if only is not None: tifs = [f for f in tifs if os.path.normcase(f) in only]
     if not tifs: return []
     sizes = [os.path.getsize(f) for f in tifs if os.path.exists(f)]
     if not sizes: return []
@@ -704,6 +720,8 @@ class GeoReferenceModule(ctk.CTkToplevel):
         self._in_lbl = ctk.CTkLabel(r4, text="\u2014", text_color="gray"); self._in_lbl.pack(side="left", padx=4)
         self._subfolder_var = tk.BooleanVar(value=False)
         ctk.CTkCheckBox(r4, text="Include subfolders", variable=self._subfolder_var).pack(side="left", padx=8)
+        self._skip_done_var = tk.BooleanVar(value=False)
+        ctk.CTkCheckBox(r4, text="Skip existing", variable=self._skip_done_var).pack(side="left", padx=8)
         ctk.CTkButton(r4, text="Browse Output Folder", command=self._browse_out, fg_color="#8C7738", hover_color="#A18A45").pack(side="left", padx=4)
         self._out_lbl = ctk.CTkLabel(r4, text="\u2014", text_color="gray"); self._out_lbl.pack(side="left", padx=4)
         self._epsg_ent = ctk.CTkEntry(r4, width=80, placeholder_text="EPSG"); self._epsg_ent.pack(side="left", padx=4)
@@ -733,6 +751,8 @@ class GeoReferenceModule(ctk.CTkToplevel):
         print("  5. Compute Accuracy / Optimise GCPs")
         print("  6. Secondary Georeferencing for final preview")
         print("  7. Process All for batch")
+        print("     (tick \u2018Skip existing\u2019 to resume: outputs already")
+        print("      present and readable are skipped instead of redone)")
         print("="*50 + "\n")
         self._on_method_change(METHODS[0])
 
@@ -1235,10 +1255,10 @@ class GeoReferenceModule(ctk.CTkToplevel):
     # ── Batch ──
     def _browse_in(self):
         f = filedialog.askdirectory(parent=self)
-        if f: self.input_folder = f; self._in_lbl.configure(text=os.path.basename(f), text_color="#81C784")
+        if f: self.input_folder = f; show_path(self._in_lbl, f, "input")
     def _browse_out(self):
         f = filedialog.askdirectory(parent=self)
-        if f: self.output_folder = f; self._out_lbl.configure(text=os.path.basename(f), text_color="#81C784")
+        if f: self.output_folder = f; show_path(self._out_lbl, f, "output", empty="No output folder selected")
     def _collect_images(self, folder):
         imgs = []
         for e in ["*.jpg","*.jpeg","*.png","*.bmp","*.tif","*.tiff"]: imgs.extend(glob.glob(os.path.join(folder, e)))
@@ -1252,7 +1272,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
         if mk == "homo" and self._H is None: messagebox.showerror("Error", "Load homography.", parent=self); return
         if mk == "proj" and self._rvec is None: messagebox.showerror("Error", "Run georeferencing first.", parent=self); return
         if mk in ("tps","poly1","poly2") and self._gcp_df is None: messagebox.showerror("Error", "Load GCPs.", parent=self); return
-        use_sub = self._subfolder_var.get()
+        use_sub = self._subfolder_var.get(); skip_done = self._skip_done_var.get()
 
         # Snapshot every widget-derived value on the main thread so the batch
         # worker (background thread) never reads tkinter widgets — reading
@@ -1301,12 +1321,33 @@ class GeoReferenceModule(ctk.CTkToplevel):
                     out_sub = self.output_folder
                 for ip in imgs: all_jobs.append((ip, os.path.join(out_sub, os.path.splitext(os.path.basename(ip))[0]+".tif")))
             if not all_jobs: self.after(0, lambda: messagebox.showerror("Error", "No images.", parent=self)); return
-            n = len(all_jobs); t0 = time.time(); m2i = {}
+            # Resume support: drop jobs whose output already exists and opens
+            # cleanly in GDAL.  A half-written GeoTIFF from an interrupted run
+            # fails validate_geotiff and is therefore redone, not skipped.
+            if skip_done:
+                keep, done = [], 0
+                for ip, op in all_jobs:
+                    ok, _ = validate_geotiff(op)
+                    if ok: done += 1
+                    else: keep.append((ip, op))
+                print(f"[Batch] Skip existing: ON - {done} output(s) already valid and skipped, "
+                      f"{len(keep)} to process.")
+                all_jobs = keep
+                if not all_jobs:
+                    self.after(0, lambda: self._prog.set(1.0))
+                    self.after(0, lambda: self._eta_lbl.configure(text="Done"))
+                    self.after(0, lambda d=done: messagebox.showinfo(
+                        "Complete", f"Nothing to do - all {d} output(s) already exist and are valid.", parent=self))
+                    return
+            else:
+                print(f"[Batch] Skip existing: OFF - all {len(all_jobs)} image(s) will be "
+                      f"processed; any existing output is overwritten.")
+            n = len(all_jobs); t0 = time.time(); m2i = {}; errs = []
             print(f"\n[Batch] Processing {n} image(s)...")
             self.after(0, lambda: self._prog.set(0))
             for i, (ip, op) in enumerate(all_jobs, 1):
-                try: self._save_single(ip, op, snap=_snap); m2i[op] = ip
-                except Exception as e: print(f"  Error: {os.path.basename(ip)}: {e}")
+                try: self._save_single(ip, op, snap=_snap); m2i[os.path.normcase(op)] = ip
+                except Exception as e: errs.append((ip, str(e))); print(f"  Error: {os.path.basename(ip)}: {e}")
                 f = i/n; self.after(0, lambda f=f: self._prog.set(f))
                 self.after(0, lambda t=self._eta(t0, f): self._eta_lbl.configure(text=t))
             print("\n[Validation] Checking...")
@@ -1314,10 +1355,11 @@ class GeoReferenceModule(ctk.CTkToplevel):
             self.after(0, lambda: self._eta_lbl.configure(text="Validating..."))
             rc = {}; pf = []; pfs = set()
             out_folders = set(os.path.dirname(op) for _, op in all_jobs)
+            run_outs = set(os.path.normcase(op) for _, op in all_jobs)
             max_passes = 20
             for vpass in range(max_passes):
                 bad = []
-                for folder in out_folders: bad.extend(sweep_and_validate(folder))
+                for folder in out_folders: bad.extend(sweep_and_validate(folder, only=run_outs))
                 bad = [(p, r) for p, r in bad if p not in pfs]
                 if not bad: print("[Validation] All OK!"); break
                 vfrac = (vpass + 1) / max_passes
@@ -1326,7 +1368,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
                     if rc.get(cp, 0) >= MAX_RETRIES:
                         if cp not in pfs: pf.append((cp, reason)); pfs.add(cp)
                     else:
-                        inp = m2i.get(cp)
+                        inp = m2i.get(os.path.normcase(cp))
                         if inp and os.path.exists(inp):
                             try:
                                 if os.path.exists(cp): os.remove(cp)
@@ -1336,9 +1378,30 @@ class GeoReferenceModule(ctk.CTkToplevel):
                         else: pf.append((cp, "Input not found")); pfs.add(cp)
             m, s = divmod(int(time.time()-t0), 60); print(f"\n[Batch] Complete in {m}m {s}s")
             self.after(0, lambda: self._prog.set(1.0)); self.after(0, lambda: self._eta_lbl.configure(text="Done"))
-            if pf:
-                ns = "\n".join(os.path.basename(p) for p, _ in pf[:10])
-                self.after(0, lambda: messagebox.showwarning("Some Failed", f"{len(pf)} file(s) failed:\n\n{ns}", parent=self))
+            if pf or errs:
+                # The dialog can only show a handful of names, so write the
+                # complete list, with reasons, next to the outputs.
+                rp = os.path.join(self.output_folder, "georef_failures.txt")
+                try:
+                    with open(rp, "w", encoding="utf-8") as fh:
+                        fh.write(f"Georeferencing failures - {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                        fh.write(f"Input : {self.input_folder}\nOutput: {self.output_folder}\n")
+                        fh.write(f"Jobs: {n}   Not written: {len(errs)}   Failed validation: {len(pf)}\n\n")
+                        if errs:
+                            fh.write("-- Could not be written --\n")
+                            for p, r in errs: fh.write(f"{p}\t{r}\n")
+                        if pf:
+                            fh.write("\n-- Written but failed validation --\n")
+                            for p, r in pf: fh.write(f"{p}\t{r}\n")
+                    print(f"[Batch] Failure report: {rp}")
+                except Exception as e:
+                    rp = None; print(f"[Batch] Could not write failure report: {e}")
+                tot = len(errs) + len(pf)
+                ns = "\n".join(f"{os.path.basename(p)}  ({r})" for p, r in (errs + pf)[:10])
+                msg = f"{tot} file(s) failed:\n\n{ns}"
+                if tot > 10: msg += f"\n... and {tot - 10} more"
+                if rp: msg += f"\n\nFull list: {rp}"
+                self.after(0, lambda m=msg: messagebox.showwarning("Some Failed", m, parent=self))
             else:
                 self.after(0, lambda: messagebox.showinfo("Complete", f"All {n} files processed!", parent=self))
         threading.Thread(target=_worker, daemon=True).start()
@@ -1364,6 +1427,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
             "excluded_gcps": self._excl_ent.get().strip(),
             "aoi_manual": self._aoi_ent.get().strip(),
             "include_subfolders": bool(self._subfolder_var.get()),
+            "skip_existing": bool(self._skip_done_var.get()),
         }
         try:
             initialdir = self.output_folder or None
@@ -1388,10 +1452,10 @@ class GeoReferenceModule(ctk.CTkToplevel):
                     self._show(self._img_path, self._orig_lbl)
             if paths.get("input_folder"):
                 self.input_folder = paths["input_folder"]
-                self._in_lbl.configure(text=os.path.basename(self.input_folder), text_color="#81C784")
+                show_path(self._in_lbl, self.input_folder, "input")
             if paths.get("output_folder"):
                 self.output_folder = paths["output_folder"]
-                self._out_lbl.configure(text=os.path.basename(self.output_folder), text_color="#81C784")
+                show_path(self._out_lbl, self.output_folder, "output", empty="No output folder selected")
 
             method = data.get("method")
             if method and method in METHODS:
@@ -1446,6 +1510,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
                 self._aoi_ent.insert(0, aoi)
 
             self._subfolder_var.set(bool(data.get("include_subfolders", False)))
+            self._skip_done_var.set(bool(data.get("skip_existing", False)))
 
             print(f"Settings loaded: {path}")
         except Exception as e:
@@ -1474,6 +1539,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
         self._aoi_status.configure(text="AOI: not set", text_color="gray")
         self._rec_scale_lbl.configure(text="")
         self._prog.set(0); self._eta_lbl.configure(text="ETA: ~"); self._subfolder_var.set(False)
+        self._skip_done_var.set(False)
         print("\n" + "="*50 + "\n  Reset complete\n" + "="*50 + "\n")
 
 
