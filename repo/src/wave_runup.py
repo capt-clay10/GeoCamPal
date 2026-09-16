@@ -116,6 +116,7 @@ from collections import defaultdict
 from pathlib import Path
 
 from utils import (
+    show_path,
     fit_geometry,
     resource_path,
     setup_console,
@@ -679,9 +680,9 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
             self.output_folder = paths.get("output_folder") or ""
             self.batch_raw_folder = paths.get("batch_raw_folder") or ""
             self.batch_mask_folder = paths.get("batch_mask_folder") or ""
-            self.out_folder_label.configure(text=self.output_folder or "No folder selected")
-            self.batch_raw_label.configure(text=self.batch_raw_folder or "No folder selected")
-            self.batch_mask_label.configure(text=self.batch_mask_folder or "No folder selected")
+            show_path(self.out_folder_label, self.output_folder, "output", empty="No output folder selected")
+            show_path(self.batch_raw_label, self.batch_raw_folder, "input")
+            show_path(self.batch_mask_label, self.batch_mask_folder, "input")
 
             self.land_left.set(bool(state.get("land_left", False)))
             self.manual_res_var.set(bool(state.get("manual_resolution", False)))
@@ -1252,7 +1253,7 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         folder = filedialog.askdirectory(parent=self, title="Select Output Folder")
         if folder:
             self.output_folder = folder
-            self.out_folder_label.configure(text=folder)
+            show_path(self.out_folder_label, folder, "output", empty="No output folder selected")
 
     def export_runup(self):
         if self.runup_time is None or self.runup_distance is None:
@@ -1439,13 +1440,13 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         folder = filedialog.askdirectory(parent=self, title="Select Folder with Raw TS Images")
         if folder:
             self.batch_raw_folder = folder
-            self.batch_raw_label.configure(text=folder)
+            show_path(self.batch_raw_label, folder, "input")
 
     def select_batch_mask_folder(self):
         folder = filedialog.askdirectory(parent=self, title="Select Folder with Annotations (Masks/GeoJSON/JSON)")
         if folder:
             self.batch_mask_folder = folder
-            self.batch_mask_label.configure(text=folder)
+            show_path(self.batch_mask_label, folder, "input")
 
     def run_batch_process(self):
         # Guard against re-entry: this batch runs on the main thread and pumps
@@ -1474,21 +1475,32 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
                            if f.lower().endswith(('.png', '.geojson', '.json'))]
 
         # 3) Group by timestamp key
+        # Every file that drops out between here and the end of the loop is
+        # recorded in `dropped` so the run can report what it did not use;
+        # previously unpaired / unreadable files vanished without a trace.
+        dropped = []
         date_pattern = r"(\d{4}[-_]\d{2}[-_]\d{2}[-_]\d{2}[-_]\d{2})"
         groups = defaultdict(lambda: {"raw": [], "annotation": []})
         for f in raw_files:
             m = re.search(date_pattern, f)
             if m:
                 groups[m.group(1)]["raw"].append(f)
+            else:
+                dropped.append((f, "raw: filename has no YYYY-MM-DD-HH-MM timestamp"))
         for f in annotation_files:
             m = re.search(date_pattern, f)
             if m:
                 groups[m.group(1)]["annotation"].append(f)
+            else:
+                dropped.append((f, "annotation: filename has no YYYY-MM-DD-HH-MM timestamp"))
 
         # 4) Build valid pairs, preferring exact formats (geojson > json > png)
         valid_pairs = []
         for key, files in groups.items():
             if not files["raw"] or not files["annotation"]:
+                missing = "annotation" if files["raw"] else "raw image"
+                for f in files["raw"] + files["annotation"]:
+                    dropped.append((f, f"no matching {missing} for timestamp {key}"))
                 continue
             
             # For each raw file, find best annotation
@@ -1542,7 +1554,9 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
 
             try:
                 raw_img = Image.open(raw_path)
-            except:
+            except BaseException as e:
+                dropped.append((raw_name, f"cannot open raw image: {e}"))
+                print(f"  [SKIP] {raw_name}: cannot open raw image: {e}")
                 continue
 
             # Resolution & timing
@@ -1581,6 +1595,10 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
                 )
             
             if t_arr.size == 0:
+                dropped.append((annotation_name,
+                                f"no runup points extracted ({ann_format})"))
+                print(f"  [SKIP] {annotation_name}: no runup points extracted "
+                      f"({ann_format})")
                 continue
 
             # Sort by time asc
@@ -1773,15 +1791,46 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         self.fig_stats.tight_layout()
         self.canvas_stats.draw()
 
+        # Write the full list of unused files next to the outputs.  The dialog
+        # can only summarise; this is the record of what was left out and why.
+        report_path = None
+        if dropped:
+            try:
+                report_path = os.path.join(self.output_folder,
+                                           "wave_runup_skipped.txt")
+                with open(report_path, "w", encoding="utf-8") as fh:
+                    fh.write("Wave runup batch - files not used\n")
+                    fh.write(f"Run: {datetime.datetime.now():%Y-%m-%d %H:%M:%S}\n")
+                    fh.write(f"Raw folder       : {self.batch_raw_folder}\n")
+                    fh.write(f"Annotation folder: {self.batch_mask_folder}\n")
+                    fh.write(f"Pairs found: {total_pairs}   "
+                             f"Processed: {processed}   "
+                             f"Not used: {len(dropped)}\n\n")
+                    for name, reason in dropped:
+                        fh.write(f"{name}\t{reason}\n")
+                print(f"Skipped-file list saved to: {report_path}")
+            except Exception as e:
+                report_path = None
+                print(f"Could not write skipped-file list: {e}")
+
         self._batch_running = False
         self._batch_start_time = None
         if self._cancel_requested:
             self._cancel_requested = False
             self.batch_eta_label.configure(text="ETA: cancelled")
-            messagebox.showinfo("Batch Process", "Batch processing cancelled.", parent=self)
+            messagebox.showinfo(
+                "Batch Process",
+                f"Batch processing cancelled.\n\n"
+                f"{processed} of {total_pairs} pair(s) processed before stopping.",
+                parent=self)
         else:
             self._update_batch_progress(processed, total_pairs)
-            messagebox.showinfo("Batch Process", "Batch processing completed.", parent=self)
+            msg = f"Batch processing completed.\n\n{processed} of {total_pairs} pair(s) processed."
+            if dropped:
+                msg += f"\n{len(dropped)} file(s) were not used."
+                if report_path:
+                    msg += f"\n\nDetails: {report_path}"
+            messagebox.showinfo("Batch Process", msg, parent=self)
 
 
 def main():
