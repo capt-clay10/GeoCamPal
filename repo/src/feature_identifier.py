@@ -111,6 +111,7 @@ import cv2
 import numpy as np
 
 from utils import (
+    show_path,
     fit_geometry, setup_console, resource_path as _resource_path,
     bring_child_to_front,
 )
@@ -694,7 +695,7 @@ class FeatureIdentifier(HSVMaskEditingMixin, HSVMaskProcessingMixin, HSVMaskUIMi
         if hasattr(self, '_batch_input_label') and self.image_files:
             folder = getattr(self, '_current_input_folder', None)
             if folder:
-                self._batch_input_label.configure(text=folder, text_color="white")
+                show_path(self._batch_input_label, folder, "input")
                 print(f"Input folder: {folder}  ({len(self.image_files)} images)")
 
     def _batch_browse_output(self):
@@ -703,7 +704,7 @@ class FeatureIdentifier(HSVMaskEditingMixin, HSVMaskProcessingMixin, HSVMaskUIMi
         if hasattr(self, '_batch_output_label'):
             path = self.export_path_entry.get().strip()
             if path:
-                self._batch_output_label.configure(text=path, text_color="white")
+                show_path(self._batch_output_label, path, "output", empty="No output folder selected")
                 print(f"Output folder: {path}")
 
     def reset_session(self):
@@ -808,9 +809,9 @@ class FeatureIdentifier(HSVMaskEditingMixin, HSVMaskProcessingMixin, HSVMaskUIMi
 
         # Clear batch mode labels
         if hasattr(self, '_batch_input_label'):
-            self._batch_input_label.configure(text="No folder selected", text_color="gray")
+            show_path(self._batch_input_label, None, "input")
         if hasattr(self, '_batch_output_label'):
-            self._batch_output_label.configure(text="No folder selected", text_color="gray")
+            show_path(self._batch_output_label, None, "output", empty="No output folder selected")
         if hasattr(self, 'batch_progress_bar') and self.batch_progress_bar.winfo_exists():
             self.batch_progress_bar.set(0)
         if hasattr(self, 'progress_label') and self.progress_label.winfo_exists():

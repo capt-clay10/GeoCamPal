@@ -85,6 +85,7 @@ from PIL import Image, ImageTk
 import utm
 
 from utils import (
+    show_path,
     fit_geometry,
     resource_path,
     setup_console,
@@ -424,9 +425,9 @@ class PixelToGCPWindow(ctk.CTkToplevel):
         self._scroll_job = None
         self._selection_ids = []
 
-        self.label_image_folder.configure(text="No folder selected")
+        show_path(self.label_image_folder, None, "input")
         self.label_gcp_file.configure(text="No file selected")
-        self.label_output_folder.configure(text="No folder selected")
+        show_path(self.label_output_folder, None, "output", empty="No output folder selected")
         self.entry_bad_gcps.delete(0, tk.END)
         self.entry_output_filename.delete(0, tk.END)
         self.convert_to_utm_var.set(True)
@@ -481,9 +482,9 @@ class PixelToGCPWindow(ctk.CTkToplevel):
             self.gcp_file = paths.get("gcp_file") or None
             self.output_folder = paths.get("output_folder") or None
 
-            self.label_image_folder.configure(text=self.image_folder or "No folder selected")
+            show_path(self.label_image_folder, self.image_folder, "input")
             self.label_gcp_file.configure(text=os.path.basename(self.gcp_file) if self.gcp_file else "No file selected")
-            self.label_output_folder.configure(text=self.output_folder or "No folder selected")
+            show_path(self.label_output_folder, self.output_folder, "output", empty="No output folder selected")
 
             self.entry_bad_gcps.delete(0, tk.END)
             if state.get("bad_gcps"):
@@ -510,7 +511,7 @@ class PixelToGCPWindow(ctk.CTkToplevel):
         folder = filedialog.askdirectory(parent= self,title="Select Image Folder")
         if folder:
             self.image_folder = folder
-            self.label_image_folder.configure(text=folder)
+            show_path(self.label_image_folder, folder, "input")
             self.log(f"Image folder selected: {folder}")
 
     def browse_gcp_file(self):
@@ -527,7 +528,7 @@ class PixelToGCPWindow(ctk.CTkToplevel):
         folder = filedialog.askdirectory(parent= self,title="Select Output Folder")
         if folder:
             self.output_folder = folder
-            self.label_output_folder.configure(text=folder)
+            show_path(self.label_output_folder, folder, "output", empty="No output folder selected")
             self.log(f"Output folder selected: {folder}")
 
     def start_process(self):

@@ -79,6 +79,7 @@ from tkinter import filedialog, messagebox
 from PIL import Image, ImageTk
 
 from utils import (
+    show_path,
     fit_geometry, resource_path, setup_console, restore_console,
     save_settings_json, load_settings_json, bring_child_to_front,
     imread_safe,
@@ -561,13 +562,13 @@ class ColorSpaceExplorerWindow(ctk.CTkToplevel):
         d = filedialog.askdirectory(parent= self,title="Select Image Folder")
         if d:
             self.input_folder = d
-            self.input_label.configure(text=d)
+            show_path(self.input_label, d, "input")
 
     def _browse_output(self):
         d = filedialog.askdirectory(parent= self,title="Select Output Folder")
         if d:
             self.output_folder = d
-            self.output_label.configure(text=d)
+            show_path(self.output_label, d, "output", empty="No output folder selected")
 
     def _save_settings(self):
         settings = {
@@ -608,8 +609,8 @@ class ColorSpaceExplorerWindow(ctk.CTkToplevel):
         self.input_folder = paths.get("input_folder") or None
         self.output_folder = paths.get("output_folder") or None
 
-        self.input_label.configure(text=self.input_folder or "No folder selected")
-        self.output_label.configure(text=self.output_folder or "No output folder selected")
+        show_path(self.input_label, self.input_folder, "input")
+        show_path(self.output_label, self.output_folder, "output", empty="No output folder selected")
 
         self.recursive_var.set(bool(ui.get("recursive", False)))
         if ui.get("color_space") in ["RGB", "HSV", "LAB", "Normalised RGB"]:
@@ -658,8 +659,8 @@ class ColorSpaceExplorerWindow(ctk.CTkToplevel):
         self.sampled_pixels = None
         self.aoi_polygon_pts = None
         self.aoi_mask = None
-        self.input_label.configure(text="No folder selected")
-        self.output_label.configure(text="No output folder selected")
+        show_path(self.input_label, None, "input")
+        show_path(self.output_label, None, "output", empty="No output folder selected")
         self.aoi_status_label.configure(text="No AOI set (full image)")
         self.feature_class_entry.delete(0, tk.END)
         self.progress_bar.set(0)

@@ -115,6 +115,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 
 from utils import (
+    show_path,
     fit_geometry, resource_path, setup_console, restore_console,
     save_settings_json, load_settings_json, compute_eta, format_eta,
 )
@@ -962,9 +963,7 @@ class FOVGeneratorWindow(ctk.CTkToplevel):
         self.dem_label.configure(
             text=os.path.basename(self.dem_path) if self.dem_path else "No DEM (flat ground)"
         )
-        self.output_label.configure(
-            text=self.output_folder if self.output_folder else "No output folder selected"
-        )
+        show_path(self.output_label, self.output_folder, "output", empty="No output folder selected")
 
         for key, entry in self.loc_entries.items():
             self._set_entry_value(entry, ui.get("location", {}).get(key), entry.get())
@@ -1075,7 +1074,7 @@ class FOVGeneratorWindow(ctk.CTkToplevel):
         d = filedialog.askdirectory(title="Select Output Folder",parent=self)
         if d:
             self.output_folder = d
-            self.output_label.configure(text=d)
+            show_path(self.output_label, d, "output", empty="No output folder selected")
 
     # ——— reset ———
 
@@ -1089,7 +1088,7 @@ class FOVGeneratorWindow(ctk.CTkToplevel):
         self.output_folder = None
         self.basemap_label.configure(text="No basemap (distance grid)")
         self.dem_label.configure(text="No DEM (flat ground)")
-        self.output_label.configure(text="No output folder selected")
+        show_path(self.output_label, None, "output", empty="No output folder selected")
 
         for d in (self.loc_entries, self.range_entries, self.sensor_entries):
             for e in d.values():

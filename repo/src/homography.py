@@ -82,6 +82,7 @@ import time
 import threading
 
 from utils import (
+    show_path,
     fit_geometry, resource_path, setup_console, restore_console,
     save_settings_json, load_settings_json, compute_eta, format_eta,
 )
@@ -319,7 +320,7 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
         folder = filedialog.askdirectory(parent= self,title="Select Output Folder")
         if folder:
             self.output_folder = folder
-            self.output_folder_label.configure(text=folder)
+            show_path(self.output_folder_label, folder, "output", empty="No output folder selected")
             self.log(f"Selected output folder: {folder}")
 
 
@@ -361,7 +362,7 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
         self.input_file = data.get("input_file") or None
         self.output_folder = data.get("output_folder") or None
         self.input_file_label.configure(text=os.path.basename(self.input_file) if self.input_file else "No file selected")
-        self.output_folder_label.configure(text=self.output_folder if self.output_folder else "No folder selected")
+        show_path(self.output_folder_label, self.output_folder, "output", empty="No output folder selected")
 
         self.entry_output_name.delete(0, tk.END)
         self.entry_output_name.insert(0, data.get("output_name", ""))
@@ -396,7 +397,7 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
         self.detected_epsg = None
 
         self.input_file_label.configure(text="No file selected")
-        self.output_folder_label.configure(text="No folder selected")
+        show_path(self.output_folder_label, None, "output", empty="No output folder selected")
         self.entry_output_name.delete(0, tk.END)
         self.exclude_var.set(False)
         self.entry_exclude.delete(0, tk.END)
