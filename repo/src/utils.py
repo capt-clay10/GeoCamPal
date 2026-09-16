@@ -40,7 +40,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 #  Import this everywhere the version is shown or recorded (launcher
 #  footer, calibration reports, saved-settings provenance) so the
 #  number can never drift between the GUI, the code, and the paper.
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 
 # ─────────────────────────────────────────────────────────────────────
