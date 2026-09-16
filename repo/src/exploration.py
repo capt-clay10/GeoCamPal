@@ -88,6 +88,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 
 from utils import (
+    show_path,
     fit_geometry, resource_path, setup_console, restore_console,
     save_settings_json, load_settings_json, compute_eta, format_eta,
 )
@@ -225,10 +226,15 @@ def parse_datetime_from_filename(filename, user_format=None):
     return None
 
 
-def collect_dated_images(folder, user_format=None, recursive=False):
+def collect_dated_images(folder, user_format=None, recursive=False,
+                         skipped=None):
     """
     Return sorted list of (filepath, datetime) tuples.
     """
+    # `skipped`, when the caller passes a list, collects image files whose
+    # name carries no parseable timestamp.  Left as None (the default) the
+    # behaviour is exactly as before: those files are dropped silently and
+    # the caller sees only the images that were kept.
     results = []
     if recursive:
         for root, _, files in os.walk(folder):
@@ -238,12 +244,16 @@ def collect_dated_images(folder, user_format=None, recursive=False):
                     dt = parse_datetime_from_filename(f, user_format)
                     if dt is not None:
                         results.append((fp, dt))
+                    elif skipped is not None:
+                        skipped.append(str(fp))
     else:
         for p in Path(folder).iterdir():
             if p.suffix.lower() in IMAGE_EXTS:
                 dt = parse_datetime_from_filename(p.name, user_format)
                 if dt is not None:
                     results.append((p, dt))
+                elif skipped is not None:
+                    skipped.append(str(p))
     results.sort(key=lambda x: x[1])
     return results
 
@@ -1395,13 +1405,13 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
         d = filedialog.askdirectory(parent=self, title="Select Image Folder")
         if d:
             self.image_folder = d
-            self.img_label.configure(text=os.path.basename(d) or d)
+            show_path(self.img_label, d, "input")
 
     def _browse_output(self):
         d = filedialog.askdirectory(parent=self, title="Select Output Folder")
         if d:
             self.output_folder = d
-            self.output_label.configure(text=os.path.basename(d) or d)
+            show_path(self.output_label, d, "output", empty="No output folder selected")
 
     def _visualise_data(self):
         """Scan images from the browsed folder, interpolate their
@@ -1427,8 +1437,10 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
         recursive = bool(self.recursive_var.get())
 
         print("\n[Visualise] Scanning images …")
+        skipped_preview = []
         image_list = collect_dated_images(
-            self.image_folder, user_fmt, recursive)
+            self.image_folder, user_fmt, recursive,
+            skipped=skipped_preview)
         if not image_list:
             messagebox.showwarning(
                 "Visualise Data",
@@ -1437,6 +1449,9 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
                 parent=self)
             return
 
+        if skipped_preview:
+            print(f"[Visualise] {len(skipped_preview)} image(s) skipped: "
+                  f"no parseable timestamp in filename.")
         self.preview_image_list = image_list
         labels = [w["label_entry"].get().strip() or f"Series_{i+1}"
                   for i, _, w in active]
@@ -1786,8 +1801,8 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
         self.output_folder = None
         self.matched_results = []
         self.preview_image_list = []
-        self.img_label.configure(text="No folder selected")
-        self.output_label.configure(text="No output folder selected")
+        show_path(self.img_label, None, "input")
+        show_path(self.output_label, None, "output", empty="No output folder selected")
         self.progress_bar.set(0)
         self.eta_label.configure(text="")
         self.recursive_var.set(False)
@@ -2124,8 +2139,10 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
 
             # --- collect images ---
             print("Scanning images for timestamps …")
+            skipped_imgs = []
             image_list = collect_dated_images(
-                cfg["image_folder"], user_fmt, cfg["recursive"])
+                cfg["image_folder"], user_fmt, cfg["recursive"],
+                skipped=skipped_imgs)
             if not image_list:
                 self._show_warning_safe(
                     "Warning",
@@ -2133,6 +2150,24 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
                     "Check your filename format.")
                 return
             print(f"Found {len(image_list)} dated images.")
+            if skipped_imgs:
+                # Excluded from the analysis entirely - report, don't hide.
+                print(f"  [!] {len(skipped_imgs)} image(s) skipped: "
+                      f"no parseable timestamp in filename.")
+                try:
+                    sk_path = os.path.join(cfg["output_folder"],
+                                           "skipped_images.txt")
+                    with open(sk_path, "w", encoding="utf-8") as fh:
+                        fh.write(f"Images skipped - no parseable timestamp "
+                                 f"in filename\n")
+                        fh.write(f"Image folder: {cfg['image_folder']}\n")
+                        fh.write(f"Used: {len(image_list)}   "
+                                 f"Skipped: {len(skipped_imgs)}\n\n")
+                        for s in skipped_imgs:
+                            fh.write(s + "\n")
+                    print(f"  Skipped-image list saved to: {sk_path}")
+                except Exception as e:
+                    print(f"  Could not write skipped-image list: {e}")
             self._set_progress_safe(0.1)
 
             # --- run combined analysis ---

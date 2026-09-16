@@ -92,7 +92,7 @@ import customtkinter as ctk
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
-from utils import fit_geometry, resource_path, setup_console, restore_console, save_settings_json, load_settings_json, imread_safe
+from utils import show_path, fit_geometry, resource_path, setup_console, restore_console, save_settings_json, load_settings_json, imread_safe
 
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("green")
@@ -144,7 +144,12 @@ def parse_datetime_from_filename(filename, user_format=None):
     return None
 
 
-def collect_dated_images(folder, user_format=None, recursive=False):
+def collect_dated_images(folder, user_format=None, recursive=False,
+                         skipped=None):
+    # `skipped`, when the caller passes a list, collects image files whose
+    # name carries no parseable timestamp.  Left as None (the default) the
+    # behaviour is exactly as before: those files are dropped silently and
+    # the caller sees only the images that were kept.
     results = []
     if recursive:
         for root, _, files in os.walk(folder):
@@ -154,12 +159,16 @@ def collect_dated_images(folder, user_format=None, recursive=False):
                     dt = parse_datetime_from_filename(f, user_format)
                     if dt is not None:
                         results.append((fp, dt))
+                    elif skipped is not None:
+                        skipped.append(str(fp))
     else:
         for p in Path(folder).iterdir():
             if p.suffix.lower() in IMAGE_EXTS:
                 dt = parse_datetime_from_filename(p.name, user_format)
                 if dt is not None:
                     results.append((p, dt))
+                elif skipped is not None:
+                    skipped.append(str(p))
     results.sort(key=lambda x: x[1])
     return results
 
@@ -558,13 +567,13 @@ class ProfileHovmullerWindow(ctk.CTkToplevel):
         d = filedialog.askdirectory(title="Select Image Folder")
         if d:
             self.image_folder = d
-            self.folder_label.configure(text=d)
+            show_path(self.folder_label, d, "input")
 
     def _browse_output(self):
         d = filedialog.askdirectory(title="Select Output Folder")
         if d:
             self.output_folder = d
-            self.output_label.configure(text=d)
+            show_path(self.output_label, d, "output", empty="No output folder selected")
 
     def _load_sample(self):
         p = filedialog.askopenfilename(
@@ -703,10 +712,10 @@ class ProfileHovmullerWindow(ctk.CTkToplevel):
             paths = data.get("paths", {})
             if paths.get("image_folder"):
                 self.image_folder = paths["image_folder"]
-                self.folder_label.configure(text=self.image_folder)
+                show_path(self.folder_label, self.image_folder, "input")
             if paths.get("output_folder"):
                 self.output_folder = paths["output_folder"]
-                self.output_label.configure(text=self.output_folder)
+                show_path(self.output_label, self.output_folder, "output", empty="No output folder selected")
 
             prof = data.get("profile", {})
             for key, entry in [("x1", self.x1_entry), ("y1", self.y1_entry),
@@ -743,8 +752,8 @@ class ProfileHovmullerWindow(ctk.CTkToplevel):
         self.sample_path = None
         self.click_points = []
         self.profile_data = None
-        self.folder_label.configure(text="No folder selected")
-        self.output_label.configure(text="No output folder")
+        show_path(self.folder_label, None, "input")
+        show_path(self.output_label, None, "output", empty="No output folder")
         self.sample_label.configure(text="No sample loaded")
         self.progress_bar.set(0)
         self.recursive_var.set(False)
@@ -805,11 +814,31 @@ class ProfileHovmullerWindow(ctk.CTkToplevel):
                   f"{px_length} px long  |  "
                   f"avg width: {avg_width} px  |  mode: {mode}")
 
-            image_list = collect_dated_images(image_folder, user_fmt, recursive)
+            skipped_imgs = []
+            image_list = collect_dated_images(image_folder, user_fmt, recursive,
+                                              skipped=skipped_imgs)
             if not image_list:
                 self._ui_message("warning", "Warning", "No images with parseable timestamps found.")
                 return
             print(f"Found {len(image_list)} dated images.")
+            if skipped_imgs:
+                # These images are absent from the Hovmoller / profile output.
+                # Silently dropping them changes the result, so say so.
+                print(f"  [!] {len(skipped_imgs)} image(s) skipped: "
+                      f"no parseable timestamp in filename.")
+                try:
+                    sk_path = os.path.join(output_folder, "skipped_images.txt")
+                    with open(sk_path, "w", encoding="utf-8") as fh:
+                        fh.write(f"Images skipped - no parseable timestamp "
+                                 f"in filename\n")
+                        fh.write(f"Image folder: {image_folder}\n")
+                        fh.write(f"Used: {len(image_list)}   "
+                                 f"Skipped: {len(skipped_imgs)}\n\n")
+                        for s in skipped_imgs:
+                            fh.write(s + "\n")
+                    print(f"  Skipped-image list saved to: {sk_path}")
+                except Exception as e:
+                    print(f"  Could not write skipped-image list: {e}")
 
             profiles_rgb = []
             profiles_gray = []
