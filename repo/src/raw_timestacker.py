@@ -55,11 +55,22 @@ a warning.
 
 Batch mode
 ----------
-Batch process iterates over all immediate sub-folders of a chosen parent
-folder.  Each sub-folder is treated as an independent image set.  Output
-filenames are derived from the first image timestamp in each sub-folder.
-Sub-folders whose expected output file already exists are skipped.
+Batch process iterates over the burst folders under a chosen parent
+folder.  Each burst folder is treated as an independent image set, and
+output filenames are derived from its first image timestamp.  Burst
+folders whose expected output file already exists are skipped.
 Processing runs in a ThreadPoolExecutor (up to 4 workers).
+
+With "Include sub-folders" off, only the immediate sub-folders of the
+parent are considered and every timestack is written flat into the
+output folder.  With it on, every folder at any depth that directly
+contains images is treated as a burst, and the input tree above it is
+reproduced under the output folder, e.g.
+
+    timestacks/storm_a/burst_01/*.jpg  ->  output/storm_a/<ts>_raw_timestack.png
+
+so several storms can be batched in one run without losing which
+timestack came from which storm.
 
 Output
 ------
@@ -80,6 +91,7 @@ Dependencies
 import json
 import os
 import glob
+import sys
 import threading
 import time
 from datetime import datetime, timedelta
@@ -97,6 +109,7 @@ from scipy.interpolate import interp1d
 import concurrent.futures
 
 from utils import (
+    show_path,
     fit_geometry,
     resource_path,
     setup_console,
@@ -112,6 +125,36 @@ from utils import (
 
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("green")
+
+
+def apply_window_icon(window):
+    """
+    Give a child window the GeoCamPal icon instead of the default Tk feather.
+
+    The .png via iconphoto() is the reliable cross-platform path — it is what
+    the other GeoCamPal windows use — and on Windows the .ico is applied on
+    top of it for a crisper title bar.  Both are re-applied after a short
+    delay because Tk can drop an icon that is set before the window is
+    mapped.  A missing asset is not fatal.
+    """
+    def _set():
+        try:
+            img = tk.PhotoImage(file=resource_path("launch_logo.png"))
+            window.iconphoto(False, img)
+            window._icon_image = img  # keep a reference alive
+        except Exception:
+            pass
+        if sys.platform == "win32":
+            try:
+                window.iconbitmap(resource_path("launch_logo.ico"))
+            except Exception:
+                pass
+
+    _set()
+    try:
+        window.after(200, _set)
+    except Exception:
+        pass
 
 # %% helpers
 
@@ -217,6 +260,61 @@ def collect_images(folder):
     for ext in IMAGE_EXTS:
         imgs.extend(glob.glob(os.path.join(folder, ext)))
     return imgs
+
+
+def find_burst_folders(root, recursive=False, exclude=None):
+    """
+    Return the folders that each hold one burst of images.
+
+    recursive=False — the immediate sub-folders of *root* (legacy behaviour).
+    recursive=True  — every folder at any depth under *root* (including *root*
+                      itself) that directly contains at least one supported
+                      image, so a  parent/storm/burst/  tree can be batched in
+                      a single run.
+
+    *exclude* is an optional folder — normally the output folder — that is
+    skipped along with everything below it.  Without it, an output folder
+    placed inside the input tree would have its own .png timestacks picked
+    up as a burst on the next run.
+    """
+    excluded = os.path.realpath(exclude) if exclude else None
+
+    def _is_excluded(path):
+        return excluded is not None and os.path.realpath(path) == excluded
+
+    if not recursive:
+        return sorted(os.path.join(root, d) for d in os.listdir(root)
+                      if os.path.isdir(os.path.join(root, d))
+                      and not _is_excluded(os.path.join(root, d)))
+    folders = []
+    for dirpath, dirnames, _files in os.walk(root):
+        if _is_excluded(dirpath):
+            dirnames[:] = []          # do not descend into the output tree
+            continue
+        dirnames.sort()
+        if collect_images(dirpath):
+            folders.append(dirpath)
+    return folders
+
+
+def mirrored_output_dir(batch_root, sub_path, output_root, recursive=False):
+    """
+    Where the timestack for *sub_path* should be written.
+
+    In recursive mode the input tree *above* the burst folder is reproduced
+    under *output_root* (parent/storm_a/burst_01 -> output_root/storm_a), so
+    each storm keeps its own output folder.  Otherwise everything lands flat
+    in *output_root*, as before.
+    """
+    if not recursive:
+        return output_root
+    try:
+        rel = os.path.relpath(os.path.dirname(sub_path), batch_root)
+    except ValueError:  # different drives on Windows
+        return output_root
+    if rel in (".", "") or rel.startswith(os.pardir):
+        return output_root
+    return os.path.join(output_root, rel)
 
 
 def _read_rgb_image(path):
@@ -553,6 +651,7 @@ def _process_subfolder(sub_path: str, selector: dict, res_x: float,
             first_ts = "_".join(os.path.basename(imgs[0]).split("_")[0:5])
 
         out_name = f"{first_ts}_raw_timestack.png"
+        os.makedirs(output_folder, exist_ok=True)
         out_path = os.path.join(output_folder, out_name)
 
         if os.path.exists(out_path):
@@ -577,12 +676,11 @@ class ScrollZoomSelector(tk.Frame):
 
     def __init__(self, master, mode_var=None, line_width_var=None, **kwargs):
         super().__init__(master, **kwargs)
-        master.title("Scrollable & Zoomable ROI / Line Selector")
+        master.title("Select ROI")
         self.mode_var = mode_var or tk.StringVar(master=master, value="bbox")
         self.line_width_var = line_width_var or tk.StringVar(master=master, value="1")
 
-        top_frame = tk.Frame(self)
-        top_frame.pack(fill="both", expand=True)
+        top_frame = tk.Frame(self)   # packed at the end of __init__, see below
 
         self.canvas = tk.Canvas(top_frame, cursor="cross", highlightthickness=0)
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -617,11 +715,22 @@ class ScrollZoomSelector(tk.Frame):
         tk.Button(button_frame, text="Load Image", command=self.load_image).pack(side=tk.LEFT, padx=5)
         tk.Button(button_frame, text="Zoom In", command=self.zoom_in).pack(side=tk.LEFT, padx=5)
         tk.Button(button_frame, text="Zoom Out", command=self.zoom_out).pack(side=tk.LEFT, padx=5)
+        tk.Button(button_frame, text="Fit to Window", command=self.fit_to_window).pack(side=tk.LEFT, padx=5)
+        tk.Button(button_frame, text="100%", command=self.actual_size).pack(side=tk.LEFT, padx=5)
+        self.zoom_lbl = tk.Label(button_frame, text="")
+        self.zoom_lbl.pack(side=tk.LEFT, padx=(12, 3))
         tk.Label(button_frame, text="Mode:").pack(side=tk.LEFT, padx=(15, 3))
         tk.OptionMenu(button_frame, self.mode_var, "bbox", "line", "freehand").pack(side=tk.LEFT, padx=3)
         tk.Label(button_frame, text="Line width:").pack(side=tk.LEFT, padx=(12, 3))
         tk.Entry(button_frame, textvariable=self.line_width_var, width=4).pack(side=tk.LEFT, padx=3)
         tk.Label(button_frame, text="Drag to select; press Enter to confirm").pack(side=tk.LEFT, padx=10)
+
+        # Packed last on purpose.  Tk's packer hands out space in packing
+        # order, so the toolbar and scrollbar claim their strips first and the
+        # image area expands into whatever is left.  Packed first (as it was),
+        # an expanding top_frame squeezed the controls off the bottom of a
+        # short window.
+        top_frame.pack(fill="both", expand=True)
 
     def load_image(self, file_path=None):
         if file_path is None:
@@ -666,6 +775,7 @@ class ScrollZoomSelector(tk.Frame):
         self.rect_id = None
         self.line_id = None
         self.freehand_id = None
+        self._update_zoom_label()
 
     def zoom_in(self):
         if self.pil_image is None:
@@ -680,6 +790,65 @@ class ScrollZoomSelector(tk.Frame):
         self.scale_factor = max(self.scale_factor * 0.8, 0.1)
         self.display_image()
         self.clear_selection()
+
+    def fit_to_window(self, _tries=0):
+        """Scale the view so the whole image fits inside the visible canvas.
+
+        Only self.scale_factor changes.  Selections are still converted back
+        to original-image pixels by dividing by it, exactly as Zoom In/Out
+        already do, so the recorded coordinates stay in source-image space
+        whatever the view is doing.
+        """
+        if self.pil_image is None:
+            return
+        self.canvas.update_idletasks()
+        cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
+        if cw < 2 or ch < 2:
+            # Canvas not mapped yet (called straight after the window opens).
+            if _tries < 20:
+                self.after(50, lambda: self.fit_to_window(_tries + 1))
+            return
+        w0, h0 = self.pil_image.size
+        self.scale_factor = max(min(cw / w0, ch / h0), 0.01)
+        self.display_image()
+        self.clear_selection()
+
+    def actual_size(self):
+        """Back to 1 screen pixel = 1 image pixel, the finest selection."""
+        if self.pil_image is None:
+            return
+        self.scale_factor = 1.0
+        self.display_image()
+        self.clear_selection()
+
+    def _update_zoom_label(self):
+        """Show the zoom level and, with it, the selection precision."""
+        lbl = getattr(self, "zoom_lbl", None)
+        if lbl is None:
+            return
+        if self.scale_factor >= 1.0:
+            lbl.config(text=f"Zoom {self.scale_factor * 100:.0f}%  "
+                            f"(full pixel precision)")
+        else:
+            lbl.config(text=f"Zoom {self.scale_factor * 100:.0f}%  "
+                            f"(1 screen px = {1.0 / self.scale_factor:.1f} "
+                            f"image px \u2014 zoom in for exact edges)")
+
+    def _to_image_px(self, x_disp, y_disp):
+        """Display coords -> original-image pixel coords, clamped to the image.
+
+        The division by scale_factor is the only conversion, unchanged.  The
+        clamp keeps a drag that strayed past the edge from recording a
+        coordinate the source image does not have; that is easy to do once
+        the image is fitted and blank canvas surrounds it.
+        """
+        x = int(x_disp / self.scale_factor)
+        y = int(y_disp / self.scale_factor)
+        if self.pil_image is not None:
+            w0, h0 = self.pil_image.size
+            x = max(0, min(x, w0 - 1))
+            y = max(0, min(y, h0 - 1))
+        return x, y
 
     def on_button_press(self, event):
         mode = self.mode_var.get().lower()
@@ -731,21 +900,21 @@ class ScrollZoomSelector(tk.Frame):
         if mode == "bbox":
             x1_disp, x2_disp = sorted([self.start_x_display, end_x])
             y1_disp, y2_disp = sorted([self.start_y_display, end_y])
-            x1 = int(x1_disp / self.scale_factor)
-            y1 = int(y1_disp / self.scale_factor)
-            w = int((x2_disp - x1_disp) / self.scale_factor)
-            h = int((y2_disp - y1_disp) / self.scale_factor)
-            self.bbox = (x1, y1, w, h)
+            # Convert both corners, then take the span.  Converting the corners
+            # independently is what lets each be clamped to the image, and it
+            # puts the far edge on the pixel actually under the cursor.
+            x1, y1 = self._to_image_px(x1_disp, y1_disp)
+            x2, y2 = self._to_image_px(x2_disp, y2_disp)
+            self.bbox = (x1, y1, x2 - x1, y2 - y1)
         elif mode == "line":
             self.line_points = [
-                (int(self.start_x_display / self.scale_factor), int(self.start_y_display / self.scale_factor)),
-                (int(end_x / self.scale_factor), int(end_y / self.scale_factor)),
+                self._to_image_px(self.start_x_display, self.start_y_display),
+                self._to_image_px(end_x, end_y),
             ]
         elif mode == "freehand":
             self.freehand_points.append((end_x, end_y))
             self.freehand_points = [
-                (int(x / self.scale_factor), int(y / self.scale_factor))
-                for x, y in self.freehand_points
+                self._to_image_px(x, y) for x, y in self.freehand_points
             ]
 
     def get_selector(self):
@@ -779,6 +948,7 @@ class TimestackTool(ctk.CTkToplevel):
         self.input_folder = tk.StringVar()
         self.output_folder = tk.StringVar()
         self.batch_folder = tk.StringVar()
+        self.batch_recursive = tk.BooleanVar(value=False)
 
         self.selector_state = None
         self.bbox = None  # backward-compatible alias for bbox mode
@@ -848,6 +1018,19 @@ class TimestackTool(ctk.CTkToplevel):
         self._ui_call(self.batch_pb.set, fraction)
         self._ui_call(self.batch_lbl.configure, text=label_text)
 
+    def _bind_path_label(self, label, var, kind, empty="No folder selected"):
+        """Render `var` on `label` through show_path, and keep it in sync.
+
+        These labels used to be bound with textvariable=, which shows the raw
+        path.  The StringVar is still the source of truth - the processing
+        code and the settings file both read it back - so it is never
+        rewritten here; only the label's own text and colour change.
+        """
+        def _refresh(*_):
+            show_path(label, var.get().strip(), kind, empty=empty)
+        var.trace_add("write", _refresh)
+        _refresh()
+
     def _build_ui(self):
         self.top_frame = ctk.CTkFrame(self, height=400, fg_color="black")
         self.top_frame.pack(fill="both", expand=True, padx=10, pady=10)
@@ -864,8 +1047,10 @@ class TimestackTool(ctk.CTkToplevel):
 
         ip = ctk.CTkFrame(self.bottom_frame)
         ip.pack(fill="x", padx=5, pady=5)
-        ctk.CTkButton(ip, text="Browse Input Folder", command=self.browse_input_folder).grid(row=0, column=0, padx=5, pady=5, sticky="w")
-        ctk.CTkLabel(ip, textvariable=self.input_folder).grid(row=0, column=1, padx=5, pady=5, sticky="w")
+        ctk.CTkButton(ip, text="Browse Burst Image Folder", command=self.browse_input_folder).grid(row=0, column=0, padx=5, pady=5, sticky="w")
+        self._in_path_lbl = ctk.CTkLabel(ip, text="")
+        self._in_path_lbl.grid(row=0, column=1, padx=5, pady=5, sticky="w")
+        self._bind_path_label(self._in_path_lbl, self.input_folder, "input")
         ctk.CTkButton(ip, text="Select ROI / Line", command=self.select_bbox).grid(row=0, column=2, padx=5, pady=5)
         ctk.CTkCheckBox(ip, text="Add selector as text", variable=self.add_selector_text,
                         command=self.toggle_selector_entry).grid(row=0, column=3, padx=5, pady=5)
@@ -894,7 +1079,10 @@ class TimestackTool(ctk.CTkToplevel):
         op = ctk.CTkFrame(self.bottom_frame)
         op.pack(fill="x", padx=5, pady=5)
         ctk.CTkButton(op, text="Browse Output Folder", command=self.select_output_folder, fg_color="#8C7738", hover_color="#A18A45").grid(row=0, column=0, padx=5, pady=5, sticky="w")
-        ctk.CTkLabel(op, textvariable=self.output_folder).grid(row=0, column=1, padx=5, pady=5, sticky="w")
+        self._out_path_lbl = ctk.CTkLabel(op, text="")
+        self._out_path_lbl.grid(row=0, column=1, padx=5, pady=5, sticky="w")
+        self._bind_path_label(self._out_path_lbl, self.output_folder, "output",
+                              empty="No output folder selected")
         ctk.CTkButton(op, text="Create Raw Timestack", command=self.create_timestack, fg_color="#0F52BA", hover_color="#2A6BD1").grid(row=0, column=2, padx=5, pady=5)
         self.single_pb = ctk.CTkProgressBar(op)
         self.single_pb.grid(row=0, column=3, padx=5, pady=5)
@@ -907,14 +1095,18 @@ class TimestackTool(ctk.CTkToplevel):
         bp = ctk.CTkFrame(self.bottom_frame)
         bp.pack(fill="x", padx=5, pady=5)
         ctk.CTkButton(bp, text="Select Batch Folder", command=self.browse_batch_folder).grid(row=0, column=0, padx=5, pady=5, sticky="w")
-        ctk.CTkLabel(bp, textvariable=self.batch_folder).grid(row=0, column=1, padx=5, pady=5, sticky="w")
-        ctk.CTkButton(bp, text="Batch Process", command=self.batch_process, fg_color="#0F52BA").grid(row=0, column=2, padx=5, pady=5)
+        self._batch_path_lbl = ctk.CTkLabel(bp, text="")
+        self._batch_path_lbl.grid(row=0, column=1, padx=5, pady=5, sticky="w")
+        self._bind_path_label(self._batch_path_lbl, self.batch_folder, "input")
+        ctk.CTkCheckBox(bp, text="Include sub-folders", variable=self.batch_recursive,
+                        command=self.on_batch_recursive_toggle).grid(row=0, column=2, padx=5, pady=5)
+        ctk.CTkButton(bp, text="Batch Process", command=self.batch_process, fg_color="#0F52BA").grid(row=0, column=3, padx=5, pady=5)
         self.batch_pb = ctk.CTkProgressBar(bp)
-        self.batch_pb.grid(row=0, column=3, padx=5, pady=5)
+        self.batch_pb.grid(row=0, column=4, padx=5, pady=5)
         self.batch_pb.set(0)
         self.batch_lbl = ctk.CTkLabel(bp, text="")
-        self.batch_lbl.grid(row=0, column=4, padx=5, pady=5, sticky="w")
-        ctk.CTkButton(bp, text="Reset", command=self.reset_to_initial, fg_color="#8B0000", hover_color="#A52A2A", text_color="white").grid(row=0, column=5, padx=(15, 5), pady=5)
+        self.batch_lbl.grid(row=0, column=5, padx=5, pady=5, sticky="w")
+        ctk.CTkButton(bp, text="Reset", command=self.reset_to_initial, fg_color="#8B0000", hover_color="#A52A2A", text_color="white").grid(row=0, column=6, padx=(15, 5), pady=5)
 
     def toggle_selector_entry(self):
         self.selector_entry.configure(state="normal" if self.add_selector_text.get() else "disabled")
@@ -923,9 +1115,26 @@ class TimestackTool(ctk.CTkToplevel):
         self.resolution_entry.configure(state="normal" if self.add_resolution_manual.get() else "disabled")
 
     def browse_input_folder(self):
-        f = filedialog.askdirectory(parent=self, title="Select Input Folder with Images")
-        if f:
-            self.input_folder.set(f)
+        f = filedialog.askdirectory(
+            parent=self,
+            title="Select the burst image folder (the folder holding the frames)")
+        if not f:
+            return
+        self.input_folder.set(f)
+        # The folder picker cannot show files, so report what was actually
+        # found rather than leaving the user to guess.
+        n = len(collect_images(f))
+        if n:
+            print(f"Burst image folder selected: {f}  ({n} images found)")
+        else:
+            print(f"Burst image folder selected: {f}  (no supported images found)")
+            messagebox.showwarning(
+                "No images found",
+                "No supported images (jpg, jpeg, png, tif, tiff) sit directly in:\n"
+                f"{f}\n\n"
+                "Pick the folder that holds the burst frames themselves, not a "
+                "folder above it.",
+                parent=self)
 
     def select_output_folder(self):
         f = filedialog.askdirectory(parent=self, title="Select Output Folder for Raw Timestack")
@@ -933,9 +1142,43 @@ class TimestackTool(ctk.CTkToplevel):
             self.output_folder.set(f)
 
     def browse_batch_folder(self):
-        f = filedialog.askdirectory(parent=self, title="Select Main Batch Folder (sub-folders per batch)")
-        if f:
-            self.batch_folder.set(f)
+        f = filedialog.askdirectory(
+            parent=self,
+            title="Select Batch Folder (holds the burst folders, at any depth "
+                  "when 'Include sub-folders' is on)")
+        if not f:
+            return
+        self.batch_folder.set(f)
+        self._report_batch_folder_contents()
+
+    def on_batch_recursive_toggle(self):
+        """Re-scan the chosen batch folder so the count matches the new mode."""
+        if self.batch_folder.get().strip():
+            self._report_batch_folder_contents()
+
+    def _report_batch_folder_contents(self):
+        """Print how many burst folders the current batch settings would find."""
+        folder = self.batch_folder.get().strip()
+        recursive = bool(self.batch_recursive.get())
+        try:
+            candidates = find_burst_folders(folder, recursive,
+                                            exclude=self.output_folder.get().strip() or None)
+        except OSError as exc:
+            print(f"Could not read batch folder {folder}: {exc}")
+            return
+        if recursive:
+            print(f"Batch folder selected: {folder}  "
+                  f"({len(candidates)} burst folders found at any depth; "
+                  "the input folder structure will be mirrored in the output "
+                  "folder)")
+        else:
+            with_imgs = sum(1 for c in candidates if collect_images(c))
+            print(f"Batch folder selected: {folder}  "
+                  f"({with_imgs} of {len(candidates)} immediate sub-folders "
+                  "contain images)")
+            if candidates and not with_imgs:
+                print("  Tick 'Include sub-folders' if the bursts sit deeper "
+                      "than one level down.")
 
     def _first_reference_image(self, folder=None):
         fld = folder or self.input_folder.get().strip()
@@ -1018,10 +1261,26 @@ class TimestackTool(ctk.CTkToplevel):
             messagebox.showerror("Error", "No supported image files found in folder.", parent=self)
             return
         win = tk.Toplevel(self)
+        apply_window_icon(win)
+        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+        # Leave room for the taskbar / window decorations: a window taller
+        # than the usable desktop hides its own bottom strip, which is where
+        # the Confirm button lives.  maxsize also binds the window manager,
+        # so maximising from the title bar stays inside the visible area.
+        usable_h = int(sh * 0.90)
+        win.maxsize(sw, usable_h)
+        win.geometry("%dx%d+%d+%d" % (int(sw * 0.85), usable_h,
+                                      int(sw * 0.07), int(sh * 0.03)))
         sel = ScrollZoomSelector(win, mode_var=self.selector_mode_var, line_width_var=self.line_width_var)
+        # Confirm is packed BEFORE the selector, against the bottom edge, so
+        # the packer reserves its strip first.  Packed afterwards it was the
+        # last in line for space and vanished whenever the window was short.
+        ctk.CTkButton(win, text="Confirm",
+                      command=lambda: self._save_bbox(sel, win)).pack(side="bottom", pady=10)
         sel.pack(fill="both", expand=True)
         sel.load_image(sorted(imgs)[0])
-        ctk.CTkButton(win, text="Confirm", command=lambda: self._save_bbox(sel, win)).pack(pady=10)
+        # Show the whole frame straight away; Zoom In / 100% get the detail back.
+        sel.after(120, sel.fit_to_window)
         bring_child_to_front(win, self, modal=False)
 
     def _save_bbox(self, sel, win):
@@ -1143,6 +1402,7 @@ class TimestackTool(ctk.CTkToplevel):
                 "identified_resolution": self.identified_res_var.get(),
                 "add_resolution_manual": bool(self.add_resolution_manual.get()),
                 "manual_resolution": self.resolution_entry.get(),
+                "batch_recursive": bool(self.batch_recursive.get()),
                 "fill_gaps": bool(self.fill_gaps.get()),
                 "freq_hz": float(self.freq_var.get()),
                 "duration_s": float(self.duration_var.get()),
@@ -1176,6 +1436,7 @@ class TimestackTool(ctk.CTkToplevel):
             self.toggle_resolution_entry()
             self.resolution_entry.delete(0, tk.END)
             self.resolution_entry.insert(0, str(ui_state.get("manual_resolution", "")))
+            self.batch_recursive.set(bool(ui_state.get("batch_recursive", False)))
             self.fill_gaps.set(bool(ui_state.get("fill_gaps", True)))
             self.freq_var.set(float(ui_state.get("freq_hz", 1.0)))
             self.duration_var.set(float(ui_state.get("duration_s", 600.0)))
@@ -1301,6 +1562,7 @@ class TimestackTool(ctk.CTkToplevel):
             return
         freq, dur = self._current_freq_duration()
         fill_gaps = bool(self.fill_gaps.get())
+        recursive = bool(self.batch_recursive.get())
 
         # Mark running now, on the main thread, so the Busy-guard and the
         # close/reset handlers see it immediately.  The sub-folder scan (which
@@ -1324,11 +1586,13 @@ class TimestackTool(ctk.CTkToplevel):
                                       # actually reached the processing stage
             try:
                 # ── Folder scan (moved off the main thread) ──
-                all_subs = [os.path.join(mbf, d) for d in os.listdir(mbf)
-                            if os.path.isdir(os.path.join(mbf, d))]
+                all_subs = find_burst_folders(mbf, recursive, exclude=outf)
                 if not all_subs:
-                    self._ui_message("error", "Error",
-                                     "No sub-folders found in batch folder.")
+                    self._ui_message(
+                        "error", "Error",
+                        "No folders with images found under the batch folder."
+                        if recursive else
+                        "No sub-folders found in batch folder.")
                     return
 
                 for n_sub, sub in enumerate(all_subs, 1):
@@ -1346,10 +1610,14 @@ class TimestackTool(ctk.CTkToplevel):
                         imgs.sort()
                         first_ts = "_".join(os.path.basename(imgs[0]).split("_")[0:5])
                     expected_name = f"{first_ts}_raw_timestack.png"
-                    if os.path.exists(os.path.join(outf, expected_name)):
+                    # In recursive mode each burst writes into a mirror of its
+                    # own place in the input tree, so the skip test has to look
+                    # there and not in the output root.
+                    sub_outf = mirrored_output_dir(mbf, sub, outf, recursive)
+                    if os.path.exists(os.path.join(sub_outf, expected_name)):
                         skipped += 1
                     else:
-                        subs_to_do.append(sub)
+                        subs_to_do.append((sub, sub_outf))
                     if n_sub % 50 == 0:
                         self._ui_batch_progress(
                             0, f"Scanning… {n_sub}/{len(all_subs)} folders")
@@ -1367,8 +1635,10 @@ class TimestackTool(ctk.CTkToplevel):
 
                 total = len(subs_to_do)
                 self._ui_batch_progress(0, f"0 / {total} — ETA {format_eta(None)}")
-                print(f"Batch process has started – {total} new sub-folders "
+                print(f"Batch process has started – {total} new burst folders "
                       f"(skipped {skipped} already done)")
+                if recursive:
+                    print(f"Output structure will mirror {mbf} under {outf}")
 
                 def update_ui(done_cnt: int):
                     frac = done_cnt / total
@@ -1385,7 +1655,8 @@ class TimestackTool(ctk.CTkToplevel):
                     self._batch_executor = pool
                     futures = [pool.submit(
                         _process_subfolder, sub, selector, res_x, freq, dur,
-                        fill_gaps, outf, lambda: self._cancel_requested) for sub in subs_to_do]
+                        fill_gaps, sub_outf, lambda: self._cancel_requested)
+                        for sub, sub_outf in subs_to_do]
 
                     for fut in concurrent.futures.as_completed(futures):
                         if self._cancel_requested:
@@ -1420,7 +1691,7 @@ class TimestackTool(ctk.CTkToplevel):
                     elapsed_str = f"{elapsed/60:.1f} min" if elapsed >= 60 else f"{elapsed:.1f} s"
                     if cancelled or self._cancel_requested:
                         print("Batch process cancelled.")
-                        self._ui_message("info", "Cancelled", f"Batch process cancelled after {done} sub-folders.\nElapsed time: {elapsed_str}")
+                        self._ui_message("info", "Cancelled", f"Batch process cancelled after {done} burst folders.\nElapsed time: {elapsed_str}")
                     else:
                         print(f"Batch process complete in {elapsed_str}")
                         self._ui_message(
@@ -1428,7 +1699,7 @@ class TimestackTool(ctk.CTkToplevel):
                             "Batch Done",
                             f"Newly processed: {done}\n"
                             f"Previously done: {skipped}\n"
-                            f"Total in folder: {len(all_subs)}\n"
+                            f"Total burst folders found: {len(all_subs)}\n"
                             f"Elapsed time: {elapsed_str}\n\n"
                             "Batch process complete"
                         )
@@ -1443,6 +1714,7 @@ class TimestackTool(ctk.CTkToplevel):
         self.input_folder.set("")
         self.output_folder.set("")
         self.batch_folder.set("")
+        self.batch_recursive.set(False)
         self.selector_state = None
         self.bbox = None
         self.selector_text.set("")
