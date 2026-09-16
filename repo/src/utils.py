@@ -596,6 +596,50 @@ def make_selector_payload(
     return payload
 
 
+# Path labels -----------------------------------------------------------------
+# Chosen folders and files are shown as their last two path components, so a
+# label stays short but still distinguishes .../site_A/images from
+# .../site_B/images.  Colour says which side of the job it is, following the
+# convention already used for buttons: a dark shade fills the button, a light
+# tint of the same hue is legible as text on the dark background.
+PATH_INPUT_COLOR = "#81C784"    # light green  (input / source)
+PATH_OUTPUT_COLOR = "#CBB77C"   # light tan    (output / destination)
+PATH_UNSET_COLOR = "gray"
+
+
+def short_path(path: Any, depth: int = 2) -> str:
+    """Return the last `depth` components of `path` (e.g. 'site_A/images').
+
+    Falls back to the whole path when it is shorter than `depth`, and keeps
+    the drive or UNC share on those short paths so 'D:\\' stays meaningful.
+    A trailing separator is ignored rather than producing an empty name.
+    """
+    p = os.path.normpath(str(path))
+    drive, tail = os.path.splitdrive(p)
+    parts = [q for q in tail.split(os.sep) if q]
+    if not parts:
+        return p
+    if len(parts) <= depth:
+        return (drive + os.sep + os.sep.join(parts)) if drive else \
+               (os.sep + os.sep.join(parts) if tail.startswith(os.sep)
+                else os.sep.join(parts))
+    return os.sep.join(parts[-depth:])
+
+
+def show_path(label, path: Any, kind: str = "input",
+              empty: str = "No folder selected", depth: int = 2) -> None:
+    """Show a chosen path on a CTkLabel, or a placeholder when unset.
+
+    `kind` is "input" (green) or "output" (tan); anything else is treated as
+    an input.  Unset paths show `empty` in gray.
+    """
+    if path:
+        colour = PATH_OUTPUT_COLOR if kind == "output" else PATH_INPUT_COLOR
+        label.configure(text=short_path(path, depth), text_color=colour)
+    else:
+        label.configure(text=empty, text_color=PATH_UNSET_COLOR)
+
+
 def describe_saved_path(path: Optional[str]) -> Dict[str, Any]:
     """Return a JSON-safe saved-path record with an existence flag."""
     text = path or ""
