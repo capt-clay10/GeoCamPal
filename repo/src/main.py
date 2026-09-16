@@ -1,5 +1,5 @@
 """
-main.py  —  GeoCamPal Application Entry Point
+main.py  - GeoCamPal Application Entry Point
 ==============================================
 
 Purpose

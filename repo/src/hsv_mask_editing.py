@@ -1898,14 +1898,34 @@ class HSVMaskEditingMixin:
             pass
 
         # 5) Read georeference if any
+        #
+        # Failing to READ the image is not the same as an image that simply
+        # has no georeference: a PNG/JPG opens fine and reports crs=None,
+        # while a locked or missing file raises.  Sharing one silent fallback
+        # between the two writes a GeoJSON that looks perfectly valid but
+        # holds pixel coordinates, which Create DEM cannot use.
+        georef_error = None
         try:
             with rasterio.open(self.image_path) as src:
                 transform = src.transform
                 crs = src.crs
-        except Exception:
+        except Exception as e:
             transform = None
             crs = None
-        if crs is None:
+            georef_error = e
+        if georef_error is not None:
+            print(f"[export_training_data] Could not read georeference from "
+                  f"{base_name}: {type(georef_error).__name__}: {georef_error}")
+            messagebox.showwarning(
+                "Georeference unreadable",
+                f"Could not read georeference information from:\n{base_name}\n\n"
+                f"{type(georef_error).__name__}: {georef_error}\n\n"
+                "The GeoJSON will be written with PIXEL coordinates, which "
+                "tools such as Create DEM cannot use.\n\n"
+                "Close the image in any other program (QGIS, etc.) and export "
+                "again.",
+                parent=self)
+        elif crs is None:
             print(f"[export_training_data] No georeference found on {base_name}; using pixel coords in GeoJSON.")
 
         # 6) Build mask, overlay, COCO annotations, and GeoJSON shapes
