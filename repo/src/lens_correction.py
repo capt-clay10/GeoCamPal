@@ -127,6 +127,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 
 from utils import (
+    show_path, short_path, PATH_INPUT_COLOR,
     fit_geometry, resource_path, setup_console, restore_console,
     save_settings_json, load_settings_json, compute_eta, format_eta,
     imread_safe, __version__, save_lens_calibration,
@@ -596,13 +597,14 @@ class LensCorrectionWindow(ctk.CTkToplevel):
         if d:
             self.input_folder = d
             n = len(self._collect_images(d))
-            self.input_label.configure(text=f"{d}  ({n} images)")
+            self.input_label.configure(text=f"{short_path(d)}  ({n} images)",
+                                       text_color=PATH_INPUT_COLOR)
 
     def _browse_output(self):
         d = filedialog.askdirectory(parent= self,title="Select Output Folder")
         if d:
             self.output_folder = d
-            self.output_label.configure(text=d)
+            show_path(self.output_label, d, "output", empty="No output folder selected")
 
     def _get_settings_dict(self):
         return {
@@ -645,12 +647,12 @@ class LensCorrectionWindow(ctk.CTkToplevel):
             label_text = f"{self.input_folder}  ({n} images)" if n else self.input_folder
             self.input_label.configure(text=label_text)
         else:
-            self.input_label.configure(text="No folder selected")
+            show_path(self.input_label, None, "input")
 
         if self.output_folder:
-            self.output_label.configure(text=self.output_folder)
+            show_path(self.output_label, self.output_folder, "output", empty="No output folder selected")
         else:
-            self.output_label.configure(text="No output folder selected")
+            show_path(self.output_label, None, "output", empty="No output folder selected")
 
         for entry, key, default in (
             (self.cols_entry, "sq_cols", "10"),
@@ -697,8 +699,8 @@ class LensCorrectionWindow(ctk.CTkToplevel):
         self.input_folder = None
         self.output_folder = None
         self.calibration_data = None
-        self.input_label.configure(text="No folder selected")
-        self.output_label.configure(text="No output folder selected")
+        show_path(self.input_label, None, "input")
+        show_path(self.output_label, None, "output", empty="No output folder selected")
         self._update_progress_ui(0, "ETA: --")
         self.cols_entry.delete(0, tk.END)
         self.cols_entry.insert(0, "10")
@@ -831,6 +833,9 @@ class LensCorrectionWindow(ctk.CTkToplevel):
             sample_img = None
             sample_corners = None
             detected_count = 0
+            # Which images contributed nothing, and why.  The console says so
+            # per image; the report kept only the count.
+            no_corners = []
 
             criteria = (cv2.TERM_CRITERIA_EPS +
                         cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
@@ -844,6 +849,7 @@ class LensCorrectionWindow(ctk.CTkToplevel):
                 img = imread_safe(img_path)
                 if img is None:
                     print(f"[WARN] Cannot read: {os.path.basename(img_path)}")
+                    no_corners.append((os.path.basename(img_path), "unreadable"))
                     continue
 
                 gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
@@ -860,6 +866,9 @@ class LensCorrectionWindow(ctk.CTkToplevel):
                     frac = (idx + 1) / len(images)
                     eta = compute_eta(self._job_start_time or time.time(),
                                       idx + 1, len(images))
+                    no_corners.append(
+                        (os.path.basename(img_path),
+                         f"size {gray.shape[::-1]} differs from {img_shape}"))
                     self._ui_progress(frac, f"ETA: {format_eta(eta)}")
                     continue
 
@@ -882,6 +891,8 @@ class LensCorrectionWindow(ctk.CTkToplevel):
                         sample_corners = corners_refined.copy()
                 else:
                     print(f"  ✗ {os.path.basename(img_path)} — corners NOT found")
+                    no_corners.append((os.path.basename(img_path),
+                                       "checkerboard corners not detected"))
 
                 frac = (idx + 1) / len(images)
                 eta = compute_eta(self._job_start_time or time.time(), idx + 1, len(images))
@@ -979,6 +990,10 @@ class LensCorrectionWindow(ctk.CTkToplevel):
                 f.write(f"Input folder: {input_folder}\n")
                 f.write(f"Images found: {len(images)}\n")
                 f.write(f"Images with corners: {detected_count}\n")
+                if no_corners:
+                    f.write(f"Images not used: {len(no_corners)}\n")
+                    for nm, why in no_corners:
+                        f.write(f"  - {nm}: {why}\n")
                 f.write(f"Board: {sq_cols} × {sq_rows} squares\n")
                 f.write(f"Inner corners: {n_cols} × {n_rows}\n")
                 if is_square:
