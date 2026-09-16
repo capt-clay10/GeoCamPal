@@ -139,6 +139,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 
 from utils import (
+    show_path,
     fit_geometry,
     resource_path,
     setup_console,
@@ -1624,13 +1625,13 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
         d = filedialog.askdirectory(parent =self, title="Select Image Folder")
         if d:
             self.input_folder = d
-            self.input_label.configure(text=d)
+            show_path(self.input_label, d, "input")
 
     def _browse_output(self):
         d = filedialog.askdirectory(parent =self, title="Select Output Folder")
         if d:
             self.output_folder = d
-            self.output_label.configure(text=d)
+            show_path(self.output_label, d, "output", empty="No output folder selected")
 
     def _browse_ref_colour(self):
         """Let user pick one reference image for colour harmonisation."""
@@ -1843,8 +1844,8 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
 
             self.input_folder = paths.get("input_folder") or None
             self.output_folder = paths.get("output_folder") or None
-            self.input_label.configure(text=self.input_folder or "No folder selected")
-            self.output_label.configure(text=self.output_folder or "No output folder selected")
+            show_path(self.input_label, self.input_folder, "input")
+            show_path(self.output_label, self.output_folder, "output", empty="No output folder selected")
 
             self.recursive_var.set(bool(ui.get("recursive", False)))
             self.run_filter_var.set(bool(ui.get("run_filter", True)))
@@ -1978,8 +1979,8 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
         self.ref_colour_bgr = None
         self.lens_calib_path = None
         self.lens_calib_data = None
-        self.input_label.configure(text="No folder selected")
-        self.output_label.configure(text="No output folder selected")
+        show_path(self.input_label, None, "input")
+        show_path(self.output_label, None, "output", empty="No output folder selected")
         self.ref_colour_label.configure(text="No reference selected")
         self.lens_calib_label.configure(text="No calibration selected")
         self.bad_json_status_label.configure(text="")
@@ -2976,6 +2977,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
 
             written_count = 0
             skipped_count = 0
+            avg_skipped = []   # (path, reason) for images left out of an average
             start_time = time.time()
             filter_msg = f" (excluded {excluded_total} bad images)" if excluded_total > 0 else ""
             print(f"\nAveraging images for {len(jobs)} folder(s){filter_msg}...")
@@ -2998,6 +3000,8 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
                     img = imread_safe(str(p), cv2.IMREAD_COLOR)
                     if img is None:
                         skipped_local += 1
+                        avg_skipped.append((str(p), "unreadable"))
+                        print(f"  [SKIP] {p.name}: unreadable")
                         continue
                     if ref_shape is None:
                         ref_shape = img.shape
@@ -3009,10 +3013,14 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
                         valid_count += 1
                     else:
                         skipped_local += 1
+                        avg_skipped.append(
+                            (str(p), f"size mismatch (expected {ref_shape})"))
                         print(f"  [SKIP] {p.name}: size mismatch in {folder_path.name}")
 
                 if valid_count == 0 or accum is None:
                     skipped_count += 1
+                    avg_skipped.append((str(folder_path),
+                                        "folder skipped: no valid readable images"))
                     print(f"  [SKIP] {folder_path}: no valid readable images")
                     self._update_progress(idx, len(jobs), start_time)
                     continue
@@ -3039,9 +3047,32 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
 
             elapsed = time.time() - start_time
             print(f"\nAveraging complete ({format_eta(elapsed)} elapsed): {written_count} written, {skipped_count} skipped.")
+            avg_report = None
+            if avg_skipped:
+                try:
+                    avg_report = os.path.join(cfg["output_folder"],
+                                              "averaging_skipped.txt")
+                    with open(avg_report, "w", encoding="utf-8") as fh:
+                        fh.write("Folder averaging - images left out\n")
+                        fh.write(f"Run: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                        fh.write(f"Input folder: {cfg['input_folder']}\n")
+                        fh.write(f"Averages written: {written_count}   "
+                                 f"Folders skipped: {skipped_count}   "
+                                 f"Images left out: {len(avg_skipped)}\n\n")
+                        for name, reason in avg_skipped:
+                            fh.write(f"{name}\t{reason}\n")
+                    print(f"  Skipped list saved to: {avg_report}")
+                except Exception as e:
+                    avg_report = None
+                    print(f"  Could not write skipped list: {e}")
             self._ui_call(self._render_average_results, len(jobs), written_count, skipped_count)
             self._ui_set_eta("Done")
-            self._ui_message("info", "Done", f"Folder averages saved to:\n{cfg['output_folder']}")
+            avg_msg = f"Folder averages saved to:\n{cfg['output_folder']}"
+            if avg_skipped:
+                avg_msg += f"\n\n{len(avg_skipped)} image(s)/folder(s) left out."
+                if avg_report:
+                    avg_msg += f"\n\nDetails: {avg_report}"
+            self._ui_message("info", "Done", avg_msg)
 
         except Exception as e:
             print(f"[ERROR] {e}")
@@ -3149,6 +3180,9 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
 
             input_root = Path(cfg["input_folder"])
             counts = {"corrected": 0, "skipped": 0, "failed": 0}
+            # Names behind the counts.  The console deliberately prints only
+            # the first few, so without this the rest were unrecoverable.
+            not_corrected = []
             start_time = time.time()
             map_cache = {}  # (W, H) -> (mapx, mapy)
 
@@ -3160,6 +3194,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
                 img = imread_safe(str(p))
                 if img is None:
                     counts["failed"] += 1
+                    not_corrected.append((str(p), "unreadable"))
                     print(f"  [SKIP] {p.name}: cannot read")
                     self._update_progress(idx, len(images), start_time)
                     continue
@@ -3189,6 +3224,9 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
                     aspect_img = work_W / work_H
                     if abs(aspect_calib - aspect_img) > 0.01:
                         counts["skipped"] += 1
+                        not_corrected.append(
+                            (str(p), f"aspect mismatch ({iW}x{iH} vs calib "
+                                     f"{calib_W}x{calib_H})"))
                         if counts["skipped"] <= 5:
                             print(f"  [SKIP] {p.name}: aspect mismatch "
                                   f"({iW}x{iH} vs calib {calib_W}x{calib_H})")
@@ -3240,11 +3278,35 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
 
             out_root = self._build_output_root(
                 cfg["output_folder"], input_root, "lens_corrected")
+            report_path = None
+            if not_corrected:
+                try:
+                    report_path = os.path.join(cfg["output_folder"],
+                                               "lens_correction_skipped.txt")
+                    with open(report_path, "w", encoding="utf-8") as fh:
+                        fh.write("Lens correction - images not corrected\n")
+                        fh.write(f"Run: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                        fh.write(f"Input folder: {cfg['input_folder']}\n")
+                        fh.write(f"Corrected: {counts['corrected']}   "
+                                 f"Skipped: {counts['skipped']}   "
+                                 f"Failed: {counts['failed']}\n\n")
+                        for name, reason in not_corrected:
+                            fh.write(f"{name}\t{reason}\n")
+                    print(f"  Skipped-image list saved to: {report_path}")
+                except Exception as e:
+                    report_path = None
+                    print(f"  Could not write skipped-image list: {e}")
             self._ui_call(self._render_lens_results, counts, elapsed,
                           os.path.basename(cfg["calib_path"]))
             self._ui_set_eta("Done")
-            self._ui_message("info", "Done",
-                             f"Lens-corrected images saved to:\n{out_root}")
+            done_msg = f"Lens-corrected images saved to:\n{out_root}"
+            if not_corrected:
+                done_msg += (f"\n\n{counts['corrected']} corrected, "
+                             f"{counts['skipped']} skipped, "
+                             f"{counts['failed']} unreadable.")
+                if report_path:
+                    done_msg += f"\n\nNot corrected: {report_path}"
+            self._ui_message("info", "Done", done_msg)
 
         except Exception as e:
             print(f"[ERROR] {e}")
