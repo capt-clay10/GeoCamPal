@@ -96,6 +96,7 @@ import cv2
 import numpy as np
 
 from utils import (
+    short_path, PATH_INPUT_COLOR,
     fit_geometry, StdoutRedirector,
     save_settings_json, load_settings_json,
     make_selector_payload, describe_saved_path,
@@ -828,7 +829,8 @@ class HSVMaskUIMixin:
         folder = filedialog.askdirectory(parent= self)
         if folder:
             self.ml_mask_folder_path.set(folder)
-            self.ml_mask_folder_disp.set(self._shorten_path(folder))  # show short path
+            self.ml_mask_folder_disp.set(short_path(folder))
+            self.lbl_ml_mask_folder.configure(text_color=PATH_INPUT_COLOR)
 
     # -------------- BBOX TOGGLE --------------
 
@@ -1782,7 +1784,9 @@ class HSVMaskUIMixin:
 
         # refresh label display text
         self.ml_mask_file_disp.set(self._shorten_path(self.ml_mask_file_path.get()))
-        self.ml_mask_folder_disp.set(self._shorten_path(self.ml_mask_folder_path.get()))
+        self.ml_mask_folder_disp.set(short_path(self.ml_mask_folder_path.get())
+                                     if self.ml_mask_folder_path.get() else "")
+        self.lbl_ml_mask_folder.configure(text_color=PATH_INPUT_COLOR)
 
 
         # reflect rows visibility
