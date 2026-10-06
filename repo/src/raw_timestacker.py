@@ -77,6 +77,7 @@ Output
     <timestamp>_raw_timestack.png  — RGB PNG, rows = time steps (newest
                                      at top), columns = transect pixels.
                                      PNG metadata (pixel_resolution,
+                                     time_interval, duration_s,
                                      selector_mode, bounding_box or
                                      selector_points_px) is embedded as
                                      tEXt chunks for downstream tools.
@@ -458,9 +459,17 @@ def _extract_line_from_selector(img, selector):
     raise ValueError(f"Unsupported selector mode: {mode}")
 
 
-def _selector_pnginfo(info, selector, resolution_x_m):
+def _selector_pnginfo(info, selector, resolution_x_m,
+                      time_interval_s=None, duration_s=None):
     mode = _selector_mode(selector)
     info.add_text("pixel_resolution", f"{resolution_x_m:.6f}")
+    # Seconds per row and total stack duration. Wave Run-Up reads
+    # time_interval for its time axis; without it, it assumes 1 s per row,
+    # which is wrong for bursts not captured at 1 Hz.
+    if time_interval_s is not None and time_interval_s > 0:
+        info.add_text("time_interval", f"{time_interval_s:.6f}")
+    if duration_s is not None and duration_s > 0:
+        info.add_text("duration_s", f"{duration_s:.3f}")
     info.add_text("selector_mode", mode)
     if mode == "bbox":
         bbox = _selector_bbox(selector)
@@ -581,13 +590,16 @@ def generate_with_fill(image_files, selector, resolution_x_m, output_path,
         out_img = out_img.resize((expected_len, ts.shape[0]), Image.NEAREST)
 
     info = PngInfo()
-    _selector_pnginfo(info, selector, resolution_x_m)
+    _selector_pnginfo(info, selector, resolution_x_m,
+                      time_interval_s=(1.0 / freq_hz) if freq_hz else None,
+                      duration_s=duration_s)
     out_img.save(output_path, format="PNG", pnginfo=info)
     return output_path
 
 
 def generate_no_fill(image_files, selector, resolution_x_m, output_path,
-                     progress_callback=None, cancel_callback=None):
+                     progress_callback=None, cancel_callback=None,
+                     freq_hz=None):
     files_sorted, _ = collect_dated_files(image_files)
     expected_len = _selector_length(selector)
     if expected_len <= 0:
@@ -622,7 +634,12 @@ def generate_no_fill(image_files, selector, resolution_x_m, output_path,
     if out.width != expected_len:
         out = out.resize((expected_len, ts.shape[0]), Image.NEAREST)
     info = PngInfo()
-    _selector_pnginfo(info, selector, resolution_x_m)
+    # Without gap filling every row is one captured frame, so the nominal
+    # capture frequency gives the seconds per row.
+    dt_s = (1.0 / freq_hz) if freq_hz else None
+    _selector_pnginfo(info, selector, resolution_x_m,
+                      time_interval_s=dt_s,
+                      duration_s=(ts.shape[0] * dt_s) if dt_s else None)
     out.save(output_path, format="PNG", pnginfo=info)
     return output_path
 
@@ -663,7 +680,8 @@ def _process_subfolder(sub_path: str, selector: dict, res_x: float,
                                cancel_callback=cancel_callback)
         else:
             generate_no_fill(imgs, selector, res_x, out_path,
-                             cancel_callback=cancel_callback)
+                             cancel_callback=cancel_callback,
+                             freq_hz=freq)
         return sub_path, "processed", out_name
     except Exception as exc:
         if str(exc) == CANCELLED_ERROR:
@@ -1524,6 +1542,7 @@ class TimestackTool(ctk.CTkToplevel):
                         imgs, selector, res_x, out_path,
                         progress_callback=upd,
                         cancel_callback=lambda: self._cancel_requested,
+                        freq_hz=freq,
                     )
                 self._ui_message("info", "Success", f"Timestack saved to:\n{gen}")
                 self._ui_call(self._apply_single_preview, gen)

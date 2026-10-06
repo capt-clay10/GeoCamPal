@@ -448,6 +448,11 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
             "                         left side of the timestack.\n"
             "     • Manual Resolution — override the embedded pixel\n"
             "                           size (metres per pixel).\n"
+            "     • Manual time interval — seconds per timestack row.\n"
+            "                           Needed when the burst was not\n"
+            "                           captured at 1 Hz and the PNG has\n"
+            "                           no time_interval metadata (older\n"
+            "                           stacks). Otherwise 1 s is assumed.\n"
             "     • IG threshold    — infragravity cutoff frequency\n"
             "                         in Hz (default 0.05 Hz).\n"
             "     • Beach Slope (°) — optional average beach slope.\n"
@@ -516,6 +521,19 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         self.manual_res_entry.grid(row=0, column=2, padx=5, pady=5)
         self.manual_res_label = ctk.CTkLabel(self.resolution_panel, text="m")
         self.manual_res_label.grid(row=0, column=3, padx=5, pady=5)
+
+        # Time per row (seconds). Read from the PNG's time_interval metadata,
+        # which the Burst Images Time-stacker writes; the manual override is
+        # for stacks that lack it and were not captured at 1 Hz.
+        self.time_int_label = ctk.CTkLabel(self.resolution_panel, text="Time per row: N/A")
+        self.time_int_label.grid(row=1, column=0, padx=5, pady=5, sticky="w")
+        self.manual_dt_var = tk.BooleanVar()
+        self.chk_manual_dt = ctk.CTkCheckBox(self.resolution_panel, text="Manual time interval", variable=self.manual_dt_var)
+        self.chk_manual_dt.grid(row=1, column=1, padx=5, pady=5)
+        self.manual_dt_entry = ctk.CTkEntry(self.resolution_panel, width=80)
+        self.manual_dt_entry.grid(row=1, column=2, padx=5, pady=5)
+        self.manual_dt_label = ctk.CTkLabel(self.resolution_panel, text="s")
+        self.manual_dt_label.grid(row=1, column=3, padx=5, pady=5)
 
         ctk.CTkLabel(self.resolution_panel, text="IG threshold (Hz):").grid(
             row=0, column=4, padx=(20, 5), pady=5, sticky="w")
@@ -650,6 +668,8 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
                 "land_left": bool(self.land_left.get()),
                 "manual_resolution": bool(self.manual_res_var.get()),
                 "manual_resolution_value": self.manual_res_entry.get().strip(),
+                "manual_time_interval": bool(self.manual_dt_var.get()),
+                "manual_time_interval_value": self.manual_dt_entry.get().strip(),
                 "ig_threshold_hz": self.ig_threshold_entry.get().strip(),
                 "beach_slope_deg": self.beach_slope_entry.get().strip(),
                 "stockdon_enabled": bool(self.stockdon_enabled.get()),
@@ -689,6 +709,10 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
             self.manual_res_entry.delete(0, tk.END)
             if state.get("manual_resolution_value") not in (None, ""):
                 self.manual_res_entry.insert(0, str(state.get("manual_resolution_value")))
+            self.manual_dt_var.set(bool(state.get("manual_time_interval", False)))
+            self.manual_dt_entry.delete(0, tk.END)
+            if state.get("manual_time_interval_value") not in (None, ""):
+                self.manual_dt_entry.insert(0, str(state.get("manual_time_interval_value")))
             self.ig_threshold_entry.delete(0, tk.END)
             self.ig_threshold_entry.insert(0, str(state.get("ig_threshold_hz", "0.05")))
 
@@ -784,6 +808,9 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         self.land_left.set(False)
         self.manual_res_var.set(False)
         self.manual_res_entry.delete(0, tk.END)
+        self.manual_dt_var.set(False)
+        self.manual_dt_entry.delete(0, tk.END)
+        self.time_int_label.configure(text="Time per row: N/A")
         self.beach_slope_entry.delete(0, tk.END)
 
         # Reset Stockdon fields
@@ -980,14 +1007,47 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
                 print("Warning: Invalid metadata resolution; defaulting to 0.25 m/pixel.")
         self.pixel_res_label.configure(text=f"Identified Pixel Resolution: {resolution_x_m} m")
 
-        try:
-            time_interval_sec = float(self.raw_image.info.get("time_interval", 1))
-        except:
-            time_interval_sec = 1
+        time_interval_sec = self._get_time_interval(self.raw_image, announce=True)
 
         for child in self.image_panel.winfo_children(): 
             child.destroy()
         self.display_image_with_axes(combined, resolution_x_m, time_interval_sec)
+
+    def _get_time_interval(self, img, announce=False, warn=True):
+        """
+        Seconds per timestack row.
+
+        Priority: the 'Manual time interval' entry when ticked, then the
+        PNG's ``time_interval`` metadata written by the Burst Images
+        Time-stacker, then 1 s with a console warning.  With ``announce``
+        the resolution-panel label is updated to say which source was used.
+        """
+        if self.manual_dt_var.get():
+            try:
+                dt = float(self.manual_dt_entry.get())
+            except (TypeError, ValueError):
+                dt = 0.0
+            if dt > 0:
+                if announce:
+                    self.time_int_label.configure(text=f"Time per row: {dt:g} s (manual)")
+                return dt
+            print("Warning: invalid manual time interval; using the image metadata instead.")
+        dt = None
+        if img is not None:
+            try:
+                dt = float(img.info.get("time_interval"))
+            except (TypeError, ValueError):
+                dt = None
+        if dt is not None and dt > 0:
+            if announce:
+                self.time_int_label.configure(text=f"Time per row: {dt:g} s (from PNG metadata)")
+            return dt
+        if announce:
+            self.time_int_label.configure(text="Time per row: 1 s (assumed - no metadata)")
+        if warn:
+            print("Warning: this timestack has no time_interval metadata; assuming 1 s per row. "
+                  "Tick 'Manual time interval' if the burst was not captured at 1 Hz.")
+        return 1.0
 
     def display_image_with_axes(self, combined_image, resolution_x_m, time_interval_sec):
         width, height = combined_image.size
@@ -1108,10 +1168,7 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         else:
             resolution_x_m = float(self.raw_image.info.get("pixel_resolution", 0.25))
 
-        try:
-            time_interval_sec = float(self.raw_image.info.get("time_interval", 1))
-        except:
-            time_interval_sec = 1
+        time_interval_sec = self._get_time_interval(self.raw_image, warn=False)
 
         flip_horizontal = self.land_left.get()
         
@@ -1568,10 +1625,7 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
             else:
                 resolution_x_m = float(raw_img.info.get("pixel_resolution", 0.25))
 
-            try:
-                time_interval_sec = float(raw_img.info.get("time_interval", 1))
-            except:
-                time_interval_sec = 1
+            time_interval_sec = self._get_time_interval(raw_img)
 
             flip_horizontal = self.land_left.get()
             image_height = raw_img.height
