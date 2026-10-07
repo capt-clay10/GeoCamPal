@@ -75,7 +75,7 @@ The software is designed for practical fixed-camera and coastal image-analysis w
 
 The recommended option for most users is to download the latest Windows release from the [Releases](https://github.com/capt-clay10/GeoCamPal/releases) page.
 
-The release is a single-file executable for 64-bit Windows (about 293 MB for v1.0.2, built on Windows 11). It bundles Python and every dependency, including GDAL, PROJ, OpenCV and scikit-image with their data files, so no Python installation, environment variable or separate GDAL installation is required. The executable is unsigned, so Windows SmartScreen may show a warning on first launch; choose **More info → Run anyway**. The bundle is unpacked to a temporary folder at each start, so start-up takes a few seconds.
+The release is a single-file executable for 64-bit Windows (about 293 MB for v1.0.3, built on Windows 11). It bundles Python and every dependency, including GDAL, PROJ, OpenCV and scikit-image with their data files, so no Python installation, environment variable or separate GDAL installation is required. The executable is unsigned, so Windows SmartScreen may show a warning on first launch; choose **More info → Run anyway**. The bundle is unpacked to a temporary folder at each start, so start-up takes a few seconds.
 
 Settings files written by earlier releases load unchanged; see the release notes for what changed in each version.
 
@@ -705,7 +705,7 @@ pyproj
 scikit-image
 ```
 
-The v1.0.2 Windows executable bundles Python 3.12.9, OpenCV 4.11.0, GDAL 3.10.3, Rasterio 1.4.3, NumPy 2.2.4, SciPy 1.15.2, scikit-image 0.25.2, GeoPandas 1.0.1, Shapely 2.1.0 and PyProj 3.7.1.
+The v1.0.3 Windows executable bundles Python 3.12.9, OpenCV 4.11.0, GDAL 3.10.3, Rasterio 1.4.3, NumPy 2.2.4, SciPy 1.15.2, scikit-image 0.25.2, GeoPandas 1.0.1, Shapely 2.1.0 and PyProj 3.7.1.
 
 > **Note:** GDAL can require special installation steps on some platforms. Using `conda install -c conda-forge gdal` or pre-built wheels is often the easiest approach if `pip install GDAL` fails. Install `scikit-image` with the other requirements; without it, histogram-based brightness and colour harmonisation and mask skeletonisation fall back to simpler methods.
 
