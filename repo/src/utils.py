@@ -40,7 +40,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 #  Import this everywhere the version is shown or recorded (launcher
 #  footer, calibration reports, saved-settings provenance) so the
 #  number can never drift between the GUI, the code, and the paper.
-__version__ = "1.0.2"
+__version__ = "1.0.3"
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -324,8 +324,12 @@ def save_settings_json(
     if not path:
         return None
 
+    # Record which release wrote the file (provenance for reproducibility).
+    # The key is additive: earlier releases ignore unknown keys on load.
+    payload = {"geocampal_version": __version__}
+    payload.update({k: v for k, v in data.items() if k != "geocampal_version"})
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+        json.dump(payload, f, indent=2, ensure_ascii=False)
 
     return path
 
@@ -447,6 +451,13 @@ def load_settings_json(
 
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
+
+    written_by = data.get("geocampal_version")
+    if written_by:
+        print(f"[Settings] {os.path.basename(path)} written by GeoCamPal {written_by}")
+    else:
+        print(f"[Settings] {os.path.basename(path)} carries no version stamp "
+              f"(written before v1.0.3)")
 
     # Validate file/directory paths — clears missing ones in-place
     validate_settings_paths(data, parent=parent)

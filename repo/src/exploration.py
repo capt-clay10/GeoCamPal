@@ -981,7 +981,7 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
             self.axes = np.array([self.axes])
         for ax in self.axes:
             ax.set_facecolor("#2b2b2b")
-            ax.tick_params(colors="white", labelsize=8)
+            ax.tick_params(colors="white", labelsize=11)
             for spine in ax.spines.values():
                 spine.set_color("#555555")
         self.fig.tight_layout()
@@ -1548,7 +1548,7 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
         self.hover_annotations = []
         for ax in self.axes:
             ax.set_facecolor("#2b2b2b")
-            ax.tick_params(axis="both", colors="white", labelsize=8,
+            ax.tick_params(axis="both", colors="white", labelsize=11,
                            which="both")
             ax.xaxis.label.set_color("white")
             ax.yaxis.label.set_color("white")
@@ -1591,8 +1591,8 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
         img_dots = image_list if image_list is not None \
             else self.preview_image_list
 
-        series_colors = ["#3498db", "#e67e22", "#2ecc71",
-                         "#9b59b6", "#e74c3c"]
+        series_colors = ["#BDBDBD", "#56B4E9", "#E69F00",
+                         "#CC79A7", "#009E73"]   # Okabe-Ito, colour-blind safe
 
         for ax_idx, ax in enumerate(self.axes):
             if ax_idx < len(active):
@@ -1608,7 +1608,7 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
                 unit = widgets["unit_entry"].get().strip() \
                     if "unit_entry" in widgets else ""
                 ylab = f"{label} ({unit})" if unit else label
-                ax.set_ylabel(ylab, fontsize=9, color="white")
+                ax.set_ylabel(ylab, fontsize=12, color="white")
                 ax.grid(True, alpha=0.3, color="#555555")
 
                 # ── green dots: ALL images (preview) ──
@@ -1636,7 +1636,8 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
 
                     if gx:
                         sc_g = ax.scatter(
-                            gx, gy, c="#2ecc71", s=8, alpha=0.5,
+                            gx, gy, c="#0072B2", s=14, alpha=0.9,
+                            edgecolors="white", linewidths=0.4,
                             zorder=4, picker=True, label="Images")
                         self.plot_scatter_list.append(
                             (ax_idx, sc_g, gmeta))
@@ -1659,11 +1660,11 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
                         # colour by classification if present
                         cls = r.get(f"{label}_classification")
                         if cls == "spring":
-                            cs.append("#e74c3c")
+                            cs.append("#E69F00")
                         elif cls == "neap":
-                            cs.append("#2ecc71")
+                            cs.append("#CC79A7")
                         else:
-                            cs.append("#e74c3c")
+                            cs.append("#E69F00")
 
                         crit = r.get(f"{label}_criterion", "")
                         offset = r.get(f"{label}_offset_min", 0.0)
@@ -1680,7 +1681,8 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
                         })
 
                     if xs:
-                        sc = ax.scatter(xs, ys, c=cs, s=12,
+                        sc = ax.scatter(xs, ys, c=cs, s=36, marker="^",
+                                        edgecolors="white", linewidths=0.5,
                                         zorder=5, picker=True,
                                         label="Matched")
                         self.plot_scatter_list.append(
@@ -1696,7 +1698,7 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
                         pad = span * 0.05 + timedelta(hours=1)
                         ax.set_xlim(dt_first - pad, dt_last + pad)
 
-                ax.legend(fontsize="small", loc="upper right",
+                ax.legend(fontsize="medium", loc="upper right",
                           facecolor="#333333", edgecolor="#555555",
                           labelcolor="white")
             else:
@@ -1735,7 +1737,7 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
         # Re-apply white tick colors after autofmt_xdate (it can reset them)
         for ax in self.axes:
             if ax.get_visible():
-                ax.tick_params(axis="both", colors="white", labelsize=8,
+                ax.tick_params(axis="both", colors="white", labelsize=11,
                                which="both")
                 for label in ax.get_xticklabels():
                     label.set_color("white")
@@ -1989,13 +1991,13 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
         self._ui_call(self.eta_label.configure, text=text)
 
     def _show_warning_safe(self, title, message):
-        self._ui_call(messagebox.showwarning, title, message)
+        self._ui_call(messagebox.showwarning, title, message, parent=self)
 
     def _show_info_safe(self, title, message):
-        self._ui_call(messagebox.showinfo, title, message)
+        self._ui_call(messagebox.showinfo, title, message, parent=self)
 
     def _show_error_safe(self, title, message):
-        self._ui_call(messagebox.showerror, title, message)
+        self._ui_call(messagebox.showerror, title, message, parent=self)
 
     def _collect_run_config(self):
         n = self._get_active_count()

@@ -1413,10 +1413,10 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
 
     def _check_folders_ui(self):
         if not self.input_folder:
-            messagebox.showwarning("Warning", "Select an image folder first.")
+            messagebox.showwarning("Warning", "Select an image folder first.", parent=self)
             return False
         if not self.output_folder:
-            messagebox.showwarning("Warning", "Select an output folder first.")
+            messagebox.showwarning("Warning", "Select an output folder first.", parent=self)
             return False
         # In recursive mode, an output folder nested inside the input folder
         # means the next run re-ingests previously written images as new inputs
@@ -1431,7 +1431,8 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
                         "Output inside input",
                         "The output folder is inside the input folder while "
                         "'recursive' is enabled.\n\nA later run may re-process "
-                        "images written by this one. Continue anyway?")
+                        "images written by this one. Continue anyway?",
+                        parent=self)
                     if not proceed:
                         return False
         except Exception:
@@ -1485,7 +1486,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
         if not self._check_folders_ui():
             return None
         if self.ref_colour_bgr is None:
-            messagebox.showwarning("Warning", "Select a reference image for colour first.")
+            messagebox.showwarning("Warning", "Select a reference image for colour first.", parent=self)
             return None
         exclude_bad = bool(self.exclude_bad_colour_var.get())
         bad_list = []
@@ -1645,7 +1646,8 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
             img = imread_safe(f)
             if img is None:
                 messagebox.showerror("Error",
-                                      f"Cannot read image:\n{f}")
+                                      f"Cannot read image:\n{f}",
+                                      parent=self)
                 return
             self.ref_colour_path = f
             self.ref_colour_bgr = img
@@ -2221,7 +2223,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
         self.axes[0].axvline(ref_mean, color="red", linestyle="--",
                              label=f"Ref={ref_mean:.1f}")
         self.axes[0].axvspan(ref_mean - tol, ref_mean + tol,
-                             alpha=0.15, color="green",
+                             alpha=0.25, color="#56B4E9",
                              label=f"+/-{tol} tolerance")
         self.axes[0].set_title("Luminance Distribution")
         self.axes[0].set_xlabel("Mean L-channel")
@@ -2314,7 +2316,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
         try:
             cfg = self._collect_filter_config()
         except Exception as e:
-            messagebox.showerror("Error", str(e))
+            messagebox.showerror("Error", str(e), parent=self)
             return
         if cfg is None:
             return
@@ -2528,7 +2530,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
         try:
             cfg = self._collect_brightness_config()
         except Exception as e:
-            messagebox.showerror("Error", str(e))
+            messagebox.showerror("Error", str(e), parent=self)
             return
         if cfg is None:
             return
@@ -2632,7 +2634,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
         try:
             cfg = self._collect_brightness_config()
         except Exception as e:
-            messagebox.showerror("Error", str(e))
+            messagebox.showerror("Error", str(e), parent=self)
             return
         if cfg is None:
             return
@@ -3088,7 +3090,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
         try:
             cfg = self._collect_lens_config()
         except Exception as e:
-            messagebox.showerror("Error", str(e))
+            messagebox.showerror("Error", str(e), parent=self)
             return
         if cfg is None:
             return

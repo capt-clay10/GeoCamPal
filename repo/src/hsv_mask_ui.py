@@ -1047,16 +1047,16 @@ class HSVMaskUIMixin:
         fig = Figure(figsize=(8, 3.5), dpi=100)
         ax = fig.add_subplot(111)
         ax.plot(profile, color="steelblue", linewidth=0.8, label="Intensity")
-        ax.axhline(plot_min, color="red", linestyle="--", linewidth=1, label=f"Min: {plot_min}")
-        ax.axhline(plot_max, color="green", linestyle="--", linewidth=1, label=f"Max: {plot_max}")
+        ax.axhline(plot_min, color="#E69F00", linestyle="--", linewidth=1, label=f"Min: {plot_min}")
+        ax.axhline(plot_max, color="#0072B2", linestyle="--", linewidth=1, label=f"Max: {plot_max}")
         ax.fill_between(range(len(profile)), plot_min, plot_max,
                         alpha=0.15, color="orange", label="Your AOI band")
 
         # Show auto-suggestion as thin dotted lines if they differ from user values
         if auto_min is not None and (auto_min != plot_min or auto_max != plot_max):
-            ax.axhline(auto_min, color="red", linestyle=":", linewidth=0.7, alpha=0.5,
+            ax.axhline(auto_min, color="#E69F00", linestyle=":", linewidth=0.7, alpha=0.5,
                        label=f"Auto min: {auto_min}")
-            ax.axhline(auto_max, color="green", linestyle=":", linewidth=0.7, alpha=0.5,
+            ax.axhline(auto_max, color="#0072B2", linestyle=":", linewidth=0.7, alpha=0.5,
                        label=f"Auto max: {auto_max}")
 
         ax.set_xlabel("Distance along profile (px)")
