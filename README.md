@@ -3,6 +3,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/license-MIT-green?style=for-the-badge" alt="License">
   <img src="https://img.shields.io/badge/python-3.10%2B-blue?style=for-the-badge" alt="Python 3.10+">
+  <a href="https://doi.org/10.5281/zenodo.23082278"><img src="https://img.shields.io/badge/DOI-10.5281%2Fzenodo.23082278-blue?style=for-the-badge" alt="DOI"></a>
 </p>
 
 <p align="center">
@@ -35,6 +36,7 @@ The software is designed for practical fixed-camera and coastal image-analysis w
 - [Overview](#overview)
 - [Main Capabilities](#main-capabilities)
 - [Installation](#installation)
+- [Examples and tutorials](#examples-and-tutorials)
 - [Tools](#modules)
   - [Launcher](#launcher)
   - [Pre-processing Tools](#pre-processing-tools)
@@ -45,6 +47,7 @@ The software is designed for practical fixed-camera and coastal image-analysis w
   - [Time-stacking Tools](#time-stacking-tools)
 - [Typical Outputs](#typical-outputs)
 - [Dependencies](#dependencies)
+- [Citation](#citation)
 - [Contributing](#contributing)
 - [License](#license)
 - [Disclaimer](#disclaimer)
@@ -72,7 +75,9 @@ The software is designed for practical fixed-camera and coastal image-analysis w
 
 The recommended option for most users is to download the latest Windows release from the [Releases](https://github.com/capt-clay10/GeoCamPal/releases) page.
 
-No Python installation is required when using the stand-alone executable.
+The release is a single-file executable for 64-bit Windows (about 293 MB for v1.0.2, built on Windows 11). It bundles Python and every dependency, including GDAL, PROJ, OpenCV and scikit-image with their data files, so no Python installation, environment variable or separate GDAL installation is required. The executable is unsigned, so Windows SmartScreen may show a warning on first launch; choose **More info → Run anyway**. The bundle is unpacked to a temporary folder at each start, so start-up takes a few seconds.
+
+Settings files written by earlier releases load unchanged; see the release notes for what changed in each version.
 
 ### Option 2 — Run from source
 
@@ -81,14 +86,29 @@ git clone https://github.com/capt-clay10/GeoCamPal.git
 cd GeoCamPal
 
 python -m venv .venv
-source .venv/bin/activate
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
 
 pip install -r requirements.txt
 
-python main.py
+python repo/src/main.py
 ```
 
-GeoCamPal targets **Python 3.8 or newer**.
+GeoCamPal requires **Python 3.10 or newer**; the executable is built with Python 3.12. If `pip install GDAL` fails, install GDAL (and, if needed, Rasterio) from conda-forge first, as described under [Dependencies](#dependencies). macOS and Linux are supported by running from source.
+
+---
+
+## Examples and tutorials
+
+The `examples/` folder contains a worked example for every module, numbered in pipeline order (`01_fov_generator` … `13_wave_runup`). Each folder has the same layout:
+
+| Sub-folder / file | Contents |
+|---|---|
+| `input/` | example input files for the module |
+| `settings/` | a `.json` settings file with the parameters used |
+| `expected_outputs/` | the outputs produced with those settings |
+| `GUI_screenshot_*.png` | the module interface configured for the example |
+
+To run an example, open the module, load its settings file, update the input and output paths to your own folders, run, and compare the result with `expected_outputs/`. Step-by-step instructions are in [`examples/README_tutorial.txt`](examples/README_tutorial.txt).
 
 ---
 
@@ -105,7 +125,7 @@ The launcher is the central hub for GeoCamPal. It groups the available tools int
 - DEM Generator Tools
 - Time-stacking Tools
 
-Only one tool window is opened at a time to keep console output and GUI state manageable.
+Only one tool window is opened at a time to keep console output and GUI state manageable. Every module can save its full configuration as a `.json` settings file and reload it later.
 
 ---
 
@@ -144,7 +164,7 @@ The **FOV Generator** visualises single- or multi-camera field-of-view footprint
 
 ### Lens Correction
 
-The **Lens Correction** module computes camera intrinsic parameters from checkerboard calibration images using OpenCV. It supports rectangular checkerboards where the cell width and cell height may differ.
+The **Lens Correction** module computes camera intrinsic parameters from checkerboard calibration images using OpenCV. It supports rectangular checkerboards where the cell width and cell height may differ. At least three images with detected corners are required; the module reports the frame coverage of the detected corners and grades the calibration from its reprojection error.
 
 **Typical inputs**
 
@@ -155,7 +175,7 @@ The **Lens Correction** module computes camera intrinsic parameters from checker
 
 **Typical outputs**
 
-- `lens_calibration.pkl`
+- `lens_calibration.pkl` (with a plain-text JSON sidecar)
 - `calibration_report.txt`
 - Detected-corner preview
 - Undistorted-image preview
@@ -200,6 +220,8 @@ Colour harmonisation supports:
 - Iterative distribution transfer
 
 Both brightness and colour harmonisation include a preview-first workflow. A random sample is processed before committing changes to the full dataset.
+
+Batch operations never drop a file silently: images or folders that could not be processed are listed, with the reason, in a report next to the outputs (for example `averaging_skipped.txt` and `lens_correction_skipped.txt`).
 
 **Typical inputs**
 
@@ -332,7 +354,7 @@ Available analyses include:
 
 ### Pixel-to-GCP Converter
 
-The **Pixel-to-GCP Converter** allows users to select image pixel coordinates corresponding to known ground-control points. The tool supports flexible GCP CSV column names and optional conversion from latitude/longitude to UTM coordinates.
+The **Pixel-to-GCP Converter** allows users to select image pixel coordinates corresponding to known ground-control points. The tool supports flexible GCP CSV column names and optional conversion from latitude/longitude to UTM coordinates, with the EPSG code detected automatically (or entered manually for surveys that are already projected).
 
 **Typical inputs**
 
@@ -411,7 +433,9 @@ Supported methods include:
 - Polynomial Order 1
 - Polynomial Order 2
 
-The required inputs depend on the selected method. Homography uses a precomputed matrix, while camera projection and GCP-based methods require appropriate GCP and calibration information.
+The required inputs depend on the selected method. Homography uses a precomputed matrix, while camera projection and GCP-based methods require appropriate GCP and calibration information. All methods work in a projected coordinate reference system identified by an EPSG code; the code is read from the GCP CSV or the homography file when present.
+
+Batch runs validate every written GeoTIFF and retry failed files automatically. Tick **Skip existing** to resume an interrupted batch: images whose outputs are already present and valid are skipped. Files that still fail after the retries are listed in `georef_failures.txt`.
 
 **Typical inputs**
 
@@ -429,6 +453,7 @@ The required inputs depend on the selected method. Homography uses a precomputed
 
 - Georeferenced `.tif` files
 - Batch outputs for single folders or subfolders
+- `georef_failures.txt`, written only when a batch has failures
 - Preview outputs inside the GUI before final processing
 
 <p align="center">
@@ -466,6 +491,8 @@ Feature identification tools include:
 - Undo/redo during editing
 - Georeferenced export where spatial information is available
 
+GeoJSON exports carry the coordinate reference system of the source GeoTIFF; for inputs without one, the GeoJSON contains pixel coordinates and a warning is printed. Batch processing lists any image it could not process in `batch_skipped.txt`.
+
 **Typical inputs**
 
 - Image or image folder
@@ -500,7 +527,7 @@ For batch workflows, outputs commonly include:
 
 The **DEM Generator** creates digital elevation models from shoreline GeoJSON files and water-level data.
 
-The module uses PCA-aligned cross-shore transect interpolation to reduce artefacts that can occur with direct triangulation at contour edges. It supports both daily and composite DEM workflows.
+The module uses PCA-aligned cross-shore transect interpolation to reduce artefacts that can occur with direct triangulation at contour edges. It supports both daily and composite DEM workflows. The DEM inherits the coordinate reference system of the shoreline files and the vertical datum of the water-level record; no datum transformations are applied, so all inputs must share one projected CRS and one vertical datum.
 
 **Typical inputs**
 
@@ -573,11 +600,14 @@ Selection modes include:
 - Straight-line selector
 - Freehand-line selector
 
+Batch mode processes every burst folder under a root folder; with **Include sub-folders** on, folders at any depth are found and the input folder structure is mirrored in the output.
+
 **Typical inputs**
 
 - Image folder or batch subfolders
 - ROI, line, or freehand selector
 - Pixel resolution
+- Capture frequency and burst duration
 - Optional gap-filling settings
 - Output folder
 
@@ -585,7 +615,7 @@ Selection modes include:
 
 - `<first_timestamp>_raw_timestack.png`
 
-The output PNG stores timestack metadata such as selector information and pixel-resolution/time-interval metadata where available.
+The output PNG stores timestack metadata such as selector information, pixel resolution, the time interval per row (`time_interval`) and the stack duration (`duration_s`), which the Wave Run-up Calculator reads automatically.
 
 <p align="center">
   <img src="https://github.com/user-attachments/assets/5a207098-7601-49df-b39b-222aadbb72cb" width="90%" alt="Raw Timestacker">
@@ -607,7 +637,7 @@ Supported annotation inputs:
 - GeoJSON annotation
 - COCO-style JSON annotation
 
-The module can use embedded metadata from raw timestack PNGs when available, including pixel resolution and time interval.
+The module uses the pixel resolution and time interval embedded in timestack PNGs when available. A **Time per row** readout states which value is in use and where it came from; a **Manual time interval** option overrides it, which is needed for timestacks made with versions before v1.0.2, which carry no time interval and are otherwise read as 1 s per row. Batch mode pairs each timestack in one folder with its annotation in another and lists unpaired or failed files in `wave_runup_skipped.txt`.
 
 **Typical inputs**
 
@@ -648,14 +678,14 @@ Depending on the selected module, GeoCamPal can generate:
 | **Vector data** | GeoJSON feature exports |
 | **Tables** | CSV, TXT, XYZ, matched-image tables, profile tables, run-up tables |
 | **Calibration files** | Lens calibration `.pkl` files |
-| **Reports** | Bad-image logs, calibration summaries, FOV reports, processing summaries |
+| **Reports** | Bad-image logs, skipped-file reports, calibration summaries, FOV reports, processing summaries |
 | **Plots** | FOV maps, colour-space plots, DEM previews, Hovmöller plots, run-up plots, PSD plots |
 
 ---
 
 ## Dependencies
 
-Core dependencies include:
+Core dependencies (see `requirements.txt` for minimum versions):
 
 ```text
 customtkinter
@@ -672,11 +702,22 @@ matplotlib
 tifffile
 scipy
 pyproj
+scikit-image
 ```
 
-Some workflows may require additional packages listed in `requirements.txt`.
+The v1.0.2 Windows executable bundles Python 3.12.9, OpenCV 4.11.0, GDAL 3.10.3, Rasterio 1.4.3, NumPy 2.2.4, SciPy 1.15.2, scikit-image 0.25.2, GeoPandas 1.0.1, Shapely 2.1.0 and PyProj 3.7.1.
 
-> **Note:** GDAL can require special installation steps on some platforms. Using `conda install -c conda-forge gdal` or pre-built wheels is often the easiest approach if `pip install GDAL` fails.
+> **Note:** GDAL can require special installation steps on some platforms. Using `conda install -c conda-forge gdal` or pre-built wheels is often the easiest approach if `pip install GDAL` fails. Install `scikit-image` with the other requirements; without it, histogram-based brightness and colour harmonisation and mask skeletonisation fall back to simpler methods.
+
+---
+
+## Citation
+
+If you use GeoCamPal, please cite the archived release:
+
+> Soares, C. C., Noronha, A., & Winter, C. (2026). GeoCamPal (Version v1.0.2) [Computer software]. Zenodo. https://doi.org/10.5281/zenodo.23185492
+
+The DOI [10.5281/zenodo.23082278](https://doi.org/10.5281/zenodo.23082278) represents all versions and always resolves to the latest release. Citation metadata is also provided in [`CITATION.cff`](CITATION.cff).
 
 ---
 
