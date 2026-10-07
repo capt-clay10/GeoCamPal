@@ -12,7 +12,7 @@
   },
   "series": [
     {
-      "csv_path": "C:/02_Camera/02_Data/Water_level/wangeooge_wl_UTC.csv",
+      "csv_path": "C:/02_Camera/02_Data/Water_level/wangerooge_nord_wl_2024-04-15_to_2024-06-15_UTC_m",
       "label": "Water_Level",
       "criterion": "Troughs (Minima)",
       "threshold": "",
