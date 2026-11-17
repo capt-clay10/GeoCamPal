@@ -7,7 +7,7 @@ Purpose
 Extracts a pixel-intensity profile along a user-defined line from
 every image in a folder, then stacks the profiles in time to produce
 Hovmöller diagrams.  The tool is aimed at coastal and environmental
-monitoring applications where recurring spatial features (wave runup,
+monitoring applications where recurring spatial features (wave run-up,
 waterlines, dune crests) need to be tracked through time.
 
 Profile extraction
@@ -564,19 +564,20 @@ class ProfileHovmullerWindow(ctk.CTkToplevel):
     # ——— browse callbacks ———
 
     def _browse_folder(self):
-        d = filedialog.askdirectory(title="Select Image Folder")
+        d = filedialog.askdirectory(parent=self, title="Select Image Folder")
         if d:
             self.image_folder = d
             show_path(self.folder_label, d, "input")
 
     def _browse_output(self):
-        d = filedialog.askdirectory(title="Select Output Folder")
+        d = filedialog.askdirectory(parent=self, title="Select Output Folder")
         if d:
             self.output_folder = d
             show_path(self.output_label, d, "output", empty="No output folder selected")
 
     def _load_sample(self):
         p = filedialog.askopenfilename(
+            parent=self,
             title="Select Sample Image",
             filetypes=[("Images", "*.jpg *.jpeg *.png *.bmp *.tif *.tiff")])
         if not p:
