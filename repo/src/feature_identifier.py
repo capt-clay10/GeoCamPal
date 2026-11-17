@@ -48,10 +48,12 @@ Three modes are selected at construction time via the `mode` argument:
 
 Detection pipeline (individual / ml)
 -------------------------------------
-    1. AOI / Profile filter (optional)
-       Restricts detection to a rectangular bounding box, a drawn
-       polygon, or a cross-shore profile band.  Pixels outside the
-       AOI are excluded before any masking.
+    1. Area of Interest (AOI) (optional)
+       Restricts detection to a drawn polygon or to the pixels whose
+       intensity lies in a range chosen on a profile.  HSV colour
+       masking and the colour class picker then look only inside the
+       AOI.  The AOI detects nothing itself, and an ML prediction mask
+       is not limited by it.
 
     2. HSV colour masking (optional, default on)
        Applies a user-configured hue / saturation / value range to
@@ -78,8 +80,9 @@ Keyboard shortcuts (individual / ml mode)
     Left / Right    — previous / next image in a folder
     E               — extract boundary (polyline)
     P               — extract polygon
-    R               — cut / refine detected feature
-    Enter           — export training data
+    R               — cut / refine detected feature (shape editor)
+    Enter           — export training data (in the editor: confirm)
+    Esc             — cancel editing (in the editor)
 
 Export formats
 --------------
@@ -156,13 +159,14 @@ ctk.set_default_color_theme("green")
 from hsv_mask_ui import BBoxSelectorWindow, HSVMaskUIMixin
 from hsv_mask_processing import HSVMaskProcessingMixin
 from hsv_mask_editing import HSVMaskEditingMixin
+from feature_model import LabelCatalog
 
 
 class FeatureIdentifier(HSVMaskEditingMixin, HSVMaskProcessingMixin, HSVMaskUIMixin, ctk.CTkToplevel):
     """
     Feature Identifier tool — modular detection workflow.
 
-    AOI / Profile filter        (narrow search region)
+    Area of Interest (AOI)      (narrow search region)
     HSV colour masking          (within AOI if active)
     Colour picker detection     (multi-sample remove / keep class selection)
     Boundary / polygon tools    (polyline / polygon / freehand editing)
@@ -218,11 +222,18 @@ class FeatureIdentifier(HSVMaskEditingMixin, HSVMaskProcessingMixin, HSVMaskUIMi
         self.ml_mask_file_disp = tk.StringVar(master=self, value="")
         self.ml_mask_folder_disp = tk.StringVar(master=self, value="")
 
-        # >>> Dropdown 1: AOI / Profile filter <<<
+        # >>> Dropdown 1: Area of Interest (AOI) <<<
         self.use_aoi_filter = tk.BooleanVar(master=self, value=False)
         self.aoi_mask = None           # binary mask (0/255) limiting detection region
         self.aoi_method = tk.StringVar(master=self, value="Threshold")
         self.aoi_click_points = []     # [(x,y), (x,y)] for profile line
+        self._aoi_applied = False      # Apply AOI pressed (and not cleared): rebuilt per image
+        self._aoi_preview_rgb = None   # picture of the AOI for the middle panel
+        # Middle panel of the image window: what was asked for last ("aoi"
+        # after Apply AOI, "mask" after a detector) and what it shows now
+        self._center_view = "mask"
+        self._center_shows = None
+        self._panel_titles = {}        # title labels above the three panels
 
         # >>> Dropdown 2: HSV masking  <<<
         self.use_hsv_masking = tk.BooleanVar(master=self, value=True)
@@ -249,7 +260,7 @@ class FeatureIdentifier(HSVMaskEditingMixin, HSVMaskProcessingMixin, HSVMaskUIMi
 
 
         if self.mode in ("individual", "ml"):
-            self.title("Feature Identifier- Configuration")
+            self.title("Feature Identifier — Configuration")
             # self.geometry("1100x850")
             # self.resizable(True, True)
             # self.minsize(900, 600)
@@ -329,7 +340,21 @@ class FeatureIdentifier(HSVMaskEditingMixin, HSVMaskProcessingMixin, HSVMaskUIMi
             self.top_frame.grid_columnconfigure(2, weight=1, minsize=400, uniform="panels")
 
 
-            self.top_frame.grid_rowconfigure(0, weight=1)
+            # Row 0: a title above each panel that says what the panel shows.
+            # The middle and right titles follow the state of the tool
+            # (see _update_panel_titles in hsv_mask_processing.py).
+            self.top_frame.grid_rowconfigure(0, weight=0)
+            self.top_frame.grid_rowconfigure(1, weight=1)
+            for _col, (_key, _text) in enumerate((
+                    ("left", "Original"),
+                    ("center", "Mask (not calculated yet)"),
+                    ("right", "Detected feature (none yet)"))):
+                _title = ctk.CTkLabel(
+                    self.top_frame, text=_text, font=("Arial", 13, "bold"),
+                    text_color="gray90", fg_color="gray17", corner_radius=0,
+                    height=26, anchor="center")
+                _title.grid(row=0, column=_col, sticky="ew", padx=1, pady=(0, 1))
+                self._panel_titles[_key] = _title
 
             self.top_left_frame = ctk.CTkFrame(self.top_frame, fg_color="black")
             self.top_left_frame.grid_propagate(False)
@@ -339,9 +364,9 @@ class FeatureIdentifier(HSVMaskEditingMixin, HSVMaskProcessingMixin, HSVMaskUIMi
             self.top_right_frame = ctk.CTkFrame(
                 self.top_frame, fg_color="black")
 
-            self.top_left_frame.grid(row=0, column=0, sticky="nsew")
-            self.top_center_frame.grid(row=0, column=1, sticky="nsew")
-            self.top_right_frame.grid(row=0, column=2, sticky="nsew")
+            self.top_left_frame.grid(row=1, column=0, sticky="nsew")
+            self.top_center_frame.grid(row=1, column=1, sticky="nsew")
+            self.top_right_frame.grid(row=1, column=2, sticky="nsew")
 
             self.image_label = ctk.CTkLabel(
                 self.top_left_frame, text="", anchor="center")
@@ -355,6 +380,7 @@ class FeatureIdentifier(HSVMaskEditingMixin, HSVMaskProcessingMixin, HSVMaskUIMi
             self._overlay_zoom = 1.0
             zoom_bar = ctk.CTkFrame(self.top_right_frame, fg_color="transparent")
             zoom_bar.pack(side="bottom", fill="x", pady=2)
+            self._overlay_zoom_bar = zoom_bar   # the shape editor's toolbar goes below it
             ctk.CTkButton(zoom_bar, text="−", width=30,
                           command=self._overlay_zoom_out
                           ).pack(side="left", padx=3)
@@ -408,6 +434,9 @@ class FeatureIdentifier(HSVMaskEditingMixin, HSVMaskProcessingMixin, HSVMaskUIMi
 
             self.top_center_frame.grid_propagate(False)
             self.top_right_frame.grid_propagate(False)
+            # The middle panel is redrawn for its new size when the window
+            # is resized (Single Image mode had no such binding before)
+            self.top_center_frame.bind("<Configure>", self.update_mask_display)
 
             self.image_display_window.protocol(
                 "WM_DELETE_WINDOW", self.on_all_close)
@@ -595,6 +624,13 @@ class FeatureIdentifier(HSVMaskEditingMixin, HSVMaskProcessingMixin, HSVMaskUIMi
         # list of (feature_type, [(x,y), (x,y), ...]) for polylines or polygons
         self.features = []
         self._edit_session_features = []  # temporary store during edit sessions
+        self._edit_session_open = False   # True while the shape editor is open
+        self._features_before_edit = []   # restored by Cancel
+        self._edge_points_before_edit = []
+        self._edit_initial_state = None   # snapshot used by Reset
+        self._active_label = ""           # label of the active (red-vertex) shape
+        # label -> category ID, kept across images and saved in settings
+        self.label_catalog = LabelCatalog()
         self.is_polygon_mode = False
         self.creation_mode = False
 
@@ -713,6 +749,11 @@ class FeatureIdentifier(HSVMaskEditingMixin, HSVMaskProcessingMixin, HSVMaskUIMi
         self._batch_running = False
         self._batch_cancel = True
 
+        # Close the shape editor if it is open (its edits are discarded).
+        # The label catalogue is kept: it describes the dataset, not the image.
+        if getattr(self, "_edit_session_open", False):
+            self._abort_edit_session(prompt=False, refresh=False)
+
         # Clear overlay zoom
         self._overlay_zoom = 1.0
         if hasattr(self, '_overlay_zoom_label'):
@@ -748,6 +789,10 @@ class FeatureIdentifier(HSVMaskEditingMixin, HSVMaskProcessingMixin, HSVMaskUIMi
         # Clear AOI
         self.aoi_mask = None
         self.aoi_click_points = []
+        self._aoi_applied = False
+        self._aoi_preview_rgb = None
+        self._center_view = "mask"
+        self._center_shows = None
 
         # Clear color picker
         self.color_pick_points = {"remove": [], "keep": []}
@@ -819,6 +864,10 @@ class FeatureIdentifier(HSVMaskEditingMixin, HSVMaskProcessingMixin, HSVMaskUIMi
         # Re-enable buttons in case a batch was cancelled
         for w in self.winfo_children():
             self._set_button_state(w, "normal")
+
+        if hasattr(self, "_refresh_label_summary"):
+            self._refresh_label_summary()
+        self._update_panel_titles()
 
         print("Session reset.\n================================")
 
