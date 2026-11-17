@@ -15,10 +15,11 @@ Workflow
     1. Browse to a folder of GCP photographs.
        Filenames must contain a GCP number recognisable by the pattern
        GCP_N, GCPN, or GCP-N (e.g. GCP_01.jpg, mysite_GCP_7_cam1.png).
-    2. Load a GCP ID file (CSV) with the real-world coordinates.
+    2. Load a GCP ID file (CSV) with the real-world coordinates, either
+       geographic (latitude/longitude) or projected (Easting/Northing).
        Column names are normalised automatically; accepted variants
-       include lat/latitude, lon/longitude/lng, GCP_ID/id/gcp_id,
-       and elevation/elev/height/z/alt.
+       include lat/latitude, lon/longitude/lng, easting/x, northing/y,
+       GCP_ID/id/gcp_id, and elevation/elev/height/z/alt.
     3. Optionally enter GCP numbers to skip (Bad GCPs field).
     4. Click Start Process — the tool opens each image in turn.
     5. Left-click the precise pixel location of the GCP target.
@@ -27,20 +28,33 @@ Workflow
 
 GCP ID file format
 ------------------
-A CSV (any delimiter) with at minimum:
+A CSV (any delimiter) with a GCP_ID column (identifier matching the
+number in the image filenames) and the coordinates in one of two forms:
 
-    GCP_ID      — identifier matching the number in the image filenames
-    latitude    — WGS-84 latitude in decimal degrees
-    longitude   — WGS-84 longitude in decimal degrees
+    Geographic
+        latitude    — WGS-84 latitude in decimal degrees
+        longitude   — WGS-84 longitude in decimal degrees
+
+    Projected
+        easting  / x  — Easting in the survey's projected CRS
+        northing / y  — Northing in the survey's projected CRS
+        plus the EPSG code of that CRS, given either in an EPSG column
+        of the file or in the EPSG field of the window
 
 Optional columns:
     elevation / elev / height / z / alt  — written to Real_Z (default 0)
-    EPSG                                  — overrides auto-detected CRS
 
-When "Convert to UTM" is checked (default), lat/lon are converted to
-the appropriate UTM zone and the EPSG code is auto-detected.  When
-unchecked, longitude is written as Real_X and latitude as Real_Y with
-EPSG = 0.
+Geographic input: when "Convert to UTM" is checked (default), lat/lon
+are converted to the appropriate WGS-84 / UTM zone and the EPSG code is
+auto-detected.  When unchecked, longitude is written as Real_X and
+latitude as Real_Y with EPSG = 0.
+
+Projected input: Easting/Northing are written to Real_X/Real_Y
+unchanged, together with the supplied EPSG code; "Convert to UTM" does
+not apply.  Enter 0 as the EPSG code for a local coordinate system that
+has no code.  If the file and the window both give a code they must
+agree.  A file holding both latitude/longitude and Easting/Northing is
+read as geographic.
 
 Image viewer
 ------------
@@ -70,6 +84,7 @@ Output
 Dependencies
 ------------
     numpy, pandas, Pillow, utm, customtkinter, utils, csv_utils
+    pyproj (optional — used to check the EPSG code of projected input)
 """
 
 
@@ -122,6 +137,250 @@ def convert_to_utm(lat, lon):
     easting, northing, zone_number, _zone_letter = utm.from_latlon(lat, lon)
     epsg = 32600 + zone_number if lat >= 0 else 32700 + zone_number
     return easting, northing, epsg
+
+
+class GCPInputError(ValueError):
+    """A GCP ID file that cannot be used; the message is shown to the user."""
+
+
+def parse_epsg_code(text):
+    """
+    Read an EPSG code as typed by a user: "25832", "EPSG:25832", "epsg 25832".
+    Returns an int, or None when the text is empty.
+    """
+    s = str(text if text is not None else "").strip()
+    if not s:
+        return None
+    m = re.fullmatch(r"(?i)(?:epsg)?\s*[:=]?\s*(\d+)", s)
+    if not m:
+        raise GCPInputError(
+            f"'{s}' is not a valid EPSG code. Enter the number only, e.g. 25832."
+        )
+    return int(m.group(1))
+
+
+def detect_coordinate_input(df):
+    """
+    Tell which coordinates a normalised GCP ID table holds:
+    "geographic" (latitude + longitude), "projected" (Easting + Northing,
+    normalised to Real_X + Real_Y) or None.  Geographic wins when both are
+    present, as in earlier releases.
+    """
+    if "latitude" in df.columns and "longitude" in df.columns:
+        return "geographic"
+    if "Real_X" in df.columns and "Real_Y" in df.columns:
+        return "projected"
+    return None
+
+
+def _restore_exact_coordinates(df, path):
+    """
+    Make the Easting/Northing of a projected GCP ID table bit-exact.
+
+    pandas' number parser can be off in the last digit for values written
+    with 16-17 significant digits (a full-precision export from a GIS),
+    which would show up as a changed digit in the output CSV.  Projected
+    coordinates are promised to be written unchanged, so the two columns
+    are read again as text and converted with Python's float(), which
+    always returns the nearest double.  The pandas values are kept
+    whenever the second read does not line up with the first.
+    """
+    try:
+        raw = pd.read_csv(path, sep=None, engine="python",
+                          encoding="utf-8-sig", dtype=str)
+        raw.columns = [c.strip() for c in raw.columns]
+        raw = normalise_columns(raw, verbose=False)
+        if len(raw) != len(df):
+            return df
+        for col in ("Real_X", "Real_Y"):
+            if not pd.api.types.is_float_dtype(df[col]):
+                continue  # whole numbers and text need no repair
+            exact = raw[col].map(
+                lambda v: float(v) if isinstance(v, str) else float("nan")
+            ).to_numpy(dtype=float)
+            current = df[col].to_numpy(dtype=float)
+            same_gaps = bool((pd.isna(exact) == pd.isna(current)).all())
+            filled = ~pd.isna(current)
+            close = abs(exact[filled] - current[filled]) <= 1e-9 * abs(current[filled])
+            if same_gaps and bool(close.all()):
+                df[col] = exact
+    except Exception:
+        pass
+    return df
+
+
+def load_gcp_id_table(path):
+    """Read a GCP ID file and normalise its column names (see module docstring)."""
+    df = read_gcp_id_csv(path)
+    df = normalise_columns(df, verbose=False)
+    if detect_coordinate_input(df) == "projected":
+        df = _restore_exact_coordinates(df, path)
+    return df
+
+
+def _epsg_codes_in_column(series):
+    """Sorted distinct EPSG codes in a column; empty cells and 0 are ignored."""
+    codes = set()
+    for value in series.dropna():
+        if isinstance(value, str):
+            code = parse_epsg_code(value)
+        else:
+            if float(value) != int(value):
+                raise GCPInputError(
+                    f"'{value}' in the EPSG column is not a valid EPSG code."
+                )
+            code = int(value)
+        if code:
+            codes.add(code)
+    return sorted(codes)
+
+
+def _check_projected_epsg(code):
+    """
+    Look up an EPSG code and make sure it is a projected CRS.
+    Returns (CRS name, axis unit); (None, None) when pyproj is unavailable.
+    """
+    try:
+        import pyproj
+    except ImportError:
+        return None, None
+    try:
+        crs = pyproj.CRS.from_epsg(code)
+    except Exception:
+        raise GCPInputError(f"EPSG:{code} is not a known EPSG code.") from None
+    if not crs.is_projected:
+        raise GCPInputError(
+            f"EPSG:{code} ({crs.name}) is not a projected coordinate system.\n\n"
+            f"Easting/Northing input needs the code of a projected system "
+            f"(e.g. 25832). If the file holds longitude/latitude, name the "
+            f"columns longitude and latitude so they are converted to UTM."
+        )
+    unit = crs.axis_info[0].unit_name if crs.axis_info else None
+    return crs.name, unit
+
+
+def prepare_gcp_coordinates(df, convert_to_utm_flag=True, user_epsg=""):
+    """
+    Add the easting / northing / EPSG columns that the output CSV is
+    written from to a normalised GCP ID table.
+
+    Geographic input (latitude + longitude) is converted to UTM, or passed
+    through as degrees with EPSG 0 when convert_to_utm_flag is False.
+
+    Projected input (Easting + Northing) is passed through unchanged with
+    the EPSG code from the file's EPSG column or from user_epsg (the EPSG
+    field of the window).  A code of 0 stands for a local coordinate
+    system without an EPSG code.
+
+    Returns (df, info); info holds "input" ("geographic" or "projected"),
+    "epsg" and "notes" (lines for the console).  Raises GCPInputError
+    with a message for the user when the table cannot be used.
+    """
+    kind = detect_coordinate_input(df)
+    df = df.copy()
+    notes = []
+
+    if kind == "geographic":
+        if convert_to_utm_flag:
+            df[["easting", "northing", "EPSG"]] = df.apply(
+                lambda row: pd.Series(convert_to_utm(row["latitude"], row["longitude"])),
+                axis=1,
+            )
+            epsg_val = int(df["EPSG"].iloc[0])
+            notes.append(f"UTM conversion applied — detected EPSG:{epsg_val}")
+        else:
+            # X = longitude (east-west), Y = latitude (north-south)
+            df["easting"] = df["longitude"]
+            df["northing"] = df["latitude"]
+            df["EPSG"] = 0
+            epsg_val = 0
+            notes.append("Using geographic coordinates without UTM conversion: Real_X = longitude, Real_Y = latitude, EPSG = 0")
+        if "Real_X" in df.columns and "Real_Y" in df.columns:
+            notes.append(
+                "Note: the file holds both latitude/longitude and Easting/Northing; "
+                "latitude/longitude were used. Remove those two columns to have "
+                "the Easting/Northing written unchanged."
+            )
+        if str(user_epsg if user_epsg is not None else "").strip():
+            notes.append(
+                "Note: the EPSG field applies to Easting/Northing input only "
+                "and was not used for this latitude/longitude file."
+            )
+        return df, {"input": "geographic", "epsg": epsg_val, "notes": notes}
+
+    if kind != "projected":
+        raise GCPInputError(
+            "The GCP file needs latitude + longitude columns, or "
+            "Easting + Northing columns with an EPSG code."
+        )
+
+    x, y = df["Real_X"], df["Real_Y"]
+    if isinstance(x, pd.DataFrame) or isinstance(y, pd.DataFrame):
+        raise GCPInputError(
+            "The GCP file has more than one Easting or Northing column "
+            "(for example both 'x' and 'easting'). Keep one of each."
+        )
+    if not (pd.api.types.is_numeric_dtype(x) and pd.api.types.is_numeric_dtype(y)):
+        raise GCPInputError(
+            "The Easting/Northing columns must hold numbers written with a "
+            "decimal point (e.g. 453870.48)."
+        )
+    incomplete = x.isna() | y.isna()
+    if incomplete.any():
+        ids = df.loc[incomplete, "GCP_ID"] if "GCP_ID" in df.columns else df.index[incomplete]
+        shown = ", ".join(str(v) for v in list(ids)[:10])
+        raise GCPInputError(f"Easting or Northing is missing for: {shown}")
+
+    file_codes = _epsg_codes_in_column(df["EPSG"]) if "EPSG" in df.columns else []
+    if len(file_codes) > 1:
+        raise GCPInputError(
+            f"The EPSG column holds more than one code ({file_codes}). "
+            f"All GCPs must be in one coordinate system."
+        )
+    file_code = file_codes[0] if file_codes else None
+    user_code = parse_epsg_code(user_epsg)
+
+    if file_code is not None and user_code not in (None, file_code):
+        raise GCPInputError(
+            f"The GCP file gives EPSG:{file_code} but the EPSG field says "
+            f"EPSG:{user_code}. Clear the field or make the two agree."
+        )
+    code = file_code if file_code is not None else user_code
+    if code is None:
+        raise GCPInputError(
+            "The GCP file holds projected Easting/Northing coordinates but "
+            "no EPSG code.\n\n"
+            "Enter the code of their coordinate system in the EPSG field "
+            "(e.g. 25832), or add an EPSG column to the file. Enter 0 for a "
+            "local coordinate system that has no EPSG code."
+        )
+
+    if code > 0:
+        crs_name, unit = _check_projected_epsg(code)
+        if (x.abs() <= 180).all() and (y.abs() <= 90).all():
+            raise GCPInputError(
+                f"The Easting/Northing values all lie within ±180 / ±90 and "
+                f"look like degrees, but EPSG:{code} is a projected system.\n\n"
+                f"If they are longitude/latitude, name the columns longitude "
+                f"and latitude so they are converted to UTM."
+            )
+        label = f"EPSG:{code}" + (f" ({crs_name})" if crs_name else "")
+        notes.append(f"Easting/Northing used unchanged (no UTM conversion) — {label}")
+        if unit and unit != "metre":
+            notes.append(
+                f"Note: EPSG:{code} is in {unit}; the georeferencing modules "
+                f"assume metres."
+            )
+    else:
+        notes.append(
+            "Easting/Northing used unchanged (no UTM conversion) — local "
+            "coordinate system, EPSG = 0"
+        )
+
+    df["easting"] = x
+    df["northing"] = y
+    df["EPSG"] = code
+    return df, {"input": "projected", "epsg": code, "notes": notes}
 
 
 _IMAGE_EXTS = {".bmp", ".jpg", ".jpeg", ".png", ".tif", ".tiff"}
@@ -299,21 +558,28 @@ class PixelToGCPWindow(ctk.CTkToplevel):
         self.label_gcp_file = ctk.CTkLabel(pnl_gcp_file, text="No file selected")
         self.label_gcp_file.pack(side="left", padx=5)
 
-        self.label_gcp_note = ctk.CTkLabel(
-            pnl_gcp_file,
-            text="Accepts: latitude/lat, longitude/lon/lng, GCP_ID/id, elevation/elev (any case, any delimiter)",
-            fg_color="white",
-            text_color="black",
-            corner_radius=0,
-        )
-        self.label_gcp_note.pack(side="left", padx=5)
-
+        # The two coordinate options come before the note so that, in a
+        # narrow window, the note is what gets cut off and not a control.
         self.checkbox_utm = ctk.CTkCheckBox(
             pnl_gcp_file,
             text="Convert to UTM",
             variable=self.convert_to_utm_var,
         )
         self.checkbox_utm.pack(side="left", padx=5)
+
+        # EPSG code of a survey supplied as projected Easting/Northing
+        ctk.CTkLabel(pnl_gcp_file, text="EPSG for Easting/Northing:").pack(side="left", padx=(8, 2))
+        self.entry_epsg = ctk.CTkEntry(pnl_gcp_file, width=90, placeholder_text="e.g. 25832")
+        self.entry_epsg.pack(side="left", padx=(0, 5))
+
+        self.label_gcp_note = ctk.CTkLabel(
+            pnl_gcp_file,
+            text="Accepts: GCP_ID, latitude/longitude or Easting/Northing, elevation (any case, any delimiter)",
+            fg_color="white",
+            text_color="black",
+            corner_radius=0,
+        )
+        self.label_gcp_note.pack(side="left", padx=5)
 
         pnl_bad_gcps = ctk.CTkFrame(config_panel)
         pnl_bad_gcps.pack(side="top", fill="x", padx=5, pady=2)
@@ -431,6 +697,7 @@ class PixelToGCPWindow(ctk.CTkToplevel):
         self.entry_bad_gcps.delete(0, tk.END)
         self.entry_output_filename.delete(0, tk.END)
         self.convert_to_utm_var.set(True)
+        self.entry_epsg.delete(0, tk.END)
 
         try:
             self.main_canvas.delete("all")
@@ -457,6 +724,7 @@ class PixelToGCPWindow(ctk.CTkToplevel):
                 "bad_gcps": self.entry_bad_gcps.get().strip(),
                 "output_filename": self.entry_output_filename.get().strip(),
                 "convert_to_utm": bool(self.convert_to_utm_var.get()),
+                "projected_epsg": self.entry_epsg.get().strip(),
             },
         }
 
@@ -495,6 +763,10 @@ class PixelToGCPWindow(ctk.CTkToplevel):
                 self.entry_output_filename.insert(0, str(state.get("output_filename")))
 
             self.convert_to_utm_var.set(bool(state.get("convert_to_utm", True)))
+
+            self.entry_epsg.delete(0, tk.END)
+            if state.get("projected_epsg"):
+                self.entry_epsg.insert(0, str(state.get("projected_epsg")))
             self.log(f"Settings loaded: {path}")
         except Exception as e:
             messagebox.showerror("Load Settings", f"Failed to load settings:\n{e}", parent=self)
@@ -577,17 +849,19 @@ class PixelToGCPWindow(ctk.CTkToplevel):
         self.gcp_df = None
         if self.gcp_file:
             try:
-                df = read_gcp_id_csv(self.gcp_file)
-                df = normalise_columns(df, verbose=False)
+                df = load_gcp_id_table(self.gcp_file)
 
-                required_cols = ["latitude", "longitude", "GCP_ID"]
-                missing = [c for c in required_cols if c not in df.columns]
+                missing = [c for c in ["GCP_ID"] if c not in df.columns]
+                if detect_coordinate_input(df) is None:
+                    missing.append("latitude + longitude, or Easting + Northing")
                 if missing:
                     messagebox.showerror(
                         "Error",
                         f"GCP file missing columns: {missing}\n\n"
                         f"Found columns: {list(df.columns)}\n\n"
-                        f"Accepted names include: lat/latitude, lon/longitude/lng, GCP_ID/id/gcp_id",
+                        f"Accepted names include: GCP_ID/id/gcp_id, and either "
+                        f"lat/latitude + lon/longitude/lng or "
+                        f"easting/x + northing/y (with an EPSG code)",
                          parent=self
                     )
                     return
@@ -601,19 +875,17 @@ class PixelToGCPWindow(ctk.CTkToplevel):
                     messagebox.showerror("Error", "No usable GCP rows remained after filtering.", parent=self)
                     return
 
-                if self.convert_to_utm_var.get():
-                    df[["easting", "northing", "EPSG"]] = df.apply(
-                        lambda row: pd.Series(convert_to_utm(row["latitude"], row["longitude"])),
-                        axis=1,
+                try:
+                    df, coord_info = prepare_gcp_coordinates(
+                        df,
+                        convert_to_utm_flag=bool(self.convert_to_utm_var.get()),
+                        user_epsg=self.entry_epsg.get(),
                     )
-                    epsg_val = int(df["EPSG"].iloc[0])
-                    self.log(f"UTM conversion applied — detected EPSG:{epsg_val}")
-                else:
-                    # X = longitude (east-west), Y = latitude (north-south)
-                    df["easting"] = df["longitude"]
-                    df["northing"] = df["latitude"]
-                    df["EPSG"] = 0
-                    self.log("Using geographic coordinates without UTM conversion: Real_X = longitude, Real_Y = latitude, EPSG = 0")
+                except GCPInputError as e:
+                    messagebox.showerror("Error", str(e), parent=self)
+                    return
+                for note in coord_info["notes"]:
+                    self.log(note)
 
                 self.gcp_df = df
                 self.log(f"GCP file loaded: {os.path.basename(self.gcp_file)}")
