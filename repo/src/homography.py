@@ -37,9 +37,22 @@ Individual GCPs can be excluded by entering their numeric suffixes
 
 Accuracy
 --------
-After the matrix is computed, Compute Accuracy projects every pixel
-point through H and reports the per-GCP residual in map units (metres).
-Mean error across all GCPs is also printed to the console.
+After the matrix is computed, Compute Accuracy reports two distances
+per GCP in map units (metres), each with its mean, median, RMS and
+maximum:
+
+    All GCPs  — every pixel point is projected through H, the matrix
+                fitted on all GCPs.  The matrix has seen these points,
+                so this is the residual of the fit.
+    Left out  — leave-one-out: the matrix is refitted without the GCP
+                (same normalisation and RANSAC fit as Compute Matrix)
+                and the distance is measured at that GCP.  This
+                estimates the error at a point the matrix has not seen.
+                It needs at least 5 GCPs.
+
+Both columns use the GCPs the matrix was computed from, that is after
+the Exclude GCPs list.  The table is printed to the console and saved
+as <name>_accuracy.csv next to the matrix.
 
 Simulated annealing (Advanced)
 -------------------------------
@@ -62,6 +75,10 @@ Outputs
     <name>.txt             — 3×3 homography matrix (space-delimited),
                              optional EPSG comment on the first line
     <name>_bestsubset.txt  — SA-optimised matrix (Advanced mode only)
+    <name>_accuracy.csv    — per-GCP distance for the matrix fitted on
+                             all GCPs and for leave-one-out, followed
+                             by "# key,value" summary rows
+                             (Compute Accuracy)
 
 Dependencies
 ------------
@@ -73,6 +90,7 @@ import numpy as np
 import cv2
 import pandas as pd
 import os
+import csv
 import tkinter as tk
 from tkinter import filedialog, messagebox
 import customtkinter as ctk
@@ -115,6 +133,151 @@ ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("green")
 
 
+# %% Homography fit and accuracy (independent of the window)
+
+def normalize_point_set(points):
+    """Scale points to a mean distance of sqrt(2) from their centroid.
+
+    Returns the normalised points in homogeneous form and the 3x3
+    transform that produced them.
+    """
+    centroid = points.mean(axis=0)
+    shifted = points - centroid
+    dists = np.sqrt((shifted**2).sum(axis=1))
+    scale = np.sqrt(2) / dists.mean()
+    T = np.array([[scale, 0, -scale * centroid[0]], [0, scale, -scale * centroid[1]], [0, 0, 1]])
+    ones = np.ones((points.shape[0], 1))
+    pts_h = np.hstack([points, ones])
+    norm_h = (T @ pts_h.T).T
+    return norm_h, T
+
+
+def fit_homography(pixel_points, utm_points, ransac_thresh=0.5):
+    """Fit the pixel-to-map homography on normalised points with RANSAC.
+
+    This is the fit behind Compute Matrix; leave-one-out calls it again
+    for every GCP so both use exactly the same procedure.  Returns the
+    3x3 matrix, or None when OpenCV finds no solution.
+    """
+    p_norm, T_p = normalize_point_set(pixel_points)
+    u_norm, T_u = normalize_point_set(utm_points)
+    H_norm, _ = cv2.findHomography(p_norm[:, :2], u_norm[:, :2], cv2.RANSAC, ransac_thresh)
+    if H_norm is None:
+        return None
+    H_final = np.linalg.inv(T_u) @ H_norm @ T_p
+    if abs(H_final[2, 2]) > 1e-6 and abs(H_final[2, 2] - 1) > 1e-3:
+        H_final /= H_final[2, 2]
+    return H_final
+
+
+def leave_one_out_errors(pixel_points, utm_points, ransac_thresh=0.5):
+    """Distance at each GCP when the matrix is fitted without that GCP.
+
+    Returns one value per GCP (NaN where no matrix could be fitted), or
+    None with fewer than 5 GCPs, because every refit needs 4.
+    """
+    n = len(pixel_points)
+    if n < 5:
+        return None
+    errors = np.full(n, np.nan)
+    for i in range(n):
+        keep = np.ones(n, dtype=bool)
+        keep[i] = False
+        try:
+            H = fit_homography(pixel_points[keep], utm_points[keep], ransac_thresh)
+        except cv2.error:
+            H = None
+        if H is None:
+            continue
+        est = cv2.perspectiveTransform(pixel_points[i].reshape(1, 1, 2), H).reshape(2)
+        errors[i] = np.linalg.norm(est - utm_points[i])
+    return errors
+
+
+def error_summary(errors):
+    """Mean, median, RMS and maximum of the finite values, or None if there are none."""
+    if errors is None:
+        return None
+    valid = np.asarray(errors, dtype=float)
+    valid = valid[np.isfinite(valid)]
+    if valid.size == 0:
+        return None
+    return {
+        "mean": float(valid.mean()),
+        "median": float(np.median(valid)),
+        "rms": float(np.sqrt((valid**2).mean())),
+        "max": float(valid.max()),
+        "n": int(valid.size),
+    }
+
+
+def format_accuracy_report(gcp_ids, errors_all, errors_loo):
+    """Console table: per-GCP distance for the fit on all GCPs and for leave-one-out."""
+    ids = [str(g) for g in gcp_ids]
+    has_loo = errors_loo is not None
+    w = max([len("Median")] + [len(s) for s in ids])
+
+    def _num(v):
+        return f"{v:>10.3f}" if np.isfinite(v) else f"{'n/a':>10}"
+
+    def _row(label, a, b=None):
+        line = f"{label:<{w}}  {a}"
+        return line + (f"  {b}" if has_loo else "")
+
+    lines = [
+        "Distance between estimated and surveyed position (m)",
+        f"  All GCPs : matrix fitted on all {len(ids)} GCPs",
+    ]
+    if has_loo:
+        lines.append("  Left out : matrix refitted without that GCP (leave-one-out)")
+    lines.append("")
+    lines.append(_row("GCP_ID", f"{'All GCPs':>10}", f"{'Left out':>10}"))
+    for i, gid in enumerate(ids):
+        lines.append(_row(gid, _num(errors_all[i]), _num(errors_loo[i]) if has_loo else None))
+    lines.append("-" * (w + (24 if has_loo else 12)))
+    # Column titles again, so the summary can be read without scrolling up.
+    lines.append(_row("", f"{'All GCPs':>10}", f"{'Left out':>10}"))
+
+    all_s = error_summary(errors_all)
+    loo_s = error_summary(errors_loo)
+    for label, key in (("Mean", "mean"), ("Median", "median"), ("RMS", "rms"), ("Max", "max")):
+        a = _num(all_s[key]) if all_s else f"{'n/a':>10}"
+        b = (_num(loo_s[key]) if loo_s else f"{'n/a':>10}") if has_loo else None
+        lines.append(_row(label, a, b))
+
+    if not has_loo:
+        lines.append("")
+        lines.append("Leave-one-out needs at least 5 GCPs, so only the fit on all GCPs is reported.")
+    elif loo_s is not None and loo_s["n"] < len(ids):
+        lines.append("")
+        lines.append(f"n/a: no matrix could be fitted without that GCP "
+                     f"({len(ids) - loo_s['n']} of {len(ids)}); these are left out of the summary.")
+    return "\n".join(lines) + "\n"
+
+
+def write_accuracy_csv(path, gcp_ids, errors_all, errors_loo, matrix_file="", gcp_file=""):
+    """Save the accuracy table: one row per GCP, then "# key,value" summary rows."""
+    def _txt(v):
+        return f"{v:.3f}" if np.isfinite(v) else ""
+
+    all_s = error_summary(errors_all)
+    loo_s = error_summary(errors_loo)
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["GCP_ID", "error_all_gcps_m", "error_left_out_m"])
+        for i, gid in enumerate(gcp_ids):
+            loo_txt = _txt(errors_loo[i]) if errors_loo is not None else ""
+            writer.writerow([str(gid), _txt(errors_all[i]), loo_txt])
+        writer.writerow(["# matrix_file", matrix_file])
+        writer.writerow(["# gcp_file", gcp_file])
+        writer.writerow(["# n_gcps", len(gcp_ids)])
+        for key in ("mean", "median", "rms", "max"):
+            writer.writerow([f"# {key}_all_gcps_m", _txt(all_s[key]) if all_s else ""])
+        for key in ("mean", "median", "rms", "max"):
+            writer.writerow([f"# {key}_left_out_m", _txt(loo_s[key]) if loo_s else ""])
+        writer.writerow(["# n_left_out", loo_s["n"] if loo_s else 0])
+
+
 class CreateHomographyMatrixWindow(ctk.CTkToplevel):
     def __init__(self, master=None, *args, **kwargs):
         super().__init__(master=master, *args, **kwargs)
@@ -134,6 +297,7 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
         self.input_file = None
         self.output_folder = None
         self.H_final = None
+        self.matrix_path = None  # file written by Compute Matrix; the accuracy table goes next to it
         self.pixel_points = None
         self.utm_points = None
         self.gcp_ids = None
@@ -388,6 +552,7 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
         self.input_file = None
         self.output_folder = None
         self.H_final = None
+        self.matrix_path = None
         self.pixel_points = None
         self.utm_points = None
         self.gcp_ids = None
@@ -435,15 +600,7 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
 
     @staticmethod
     def normalize_points(points: np.ndarray):
-        centroid = points.mean(axis=0)
-        shifted = points - centroid
-        dists = np.sqrt((shifted**2).sum(axis=1))
-        scale = np.sqrt(2) / dists.mean()
-        T = np.array([[scale, 0, -scale * centroid[0]], [0, scale, -scale * centroid[1]], [0, 0, 1]])
-        ones = np.ones((points.shape[0], 1))
-        pts_h = np.hstack([points, ones])
-        norm_h = (T @ pts_h.T).T
-        return norm_h, T
+        return normalize_point_set(points)
 
 # %% Core function
     def compute_matrix(self):
@@ -491,6 +648,7 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
                     self.log(f"Error parsing excluded GCPs: {e}")
 
         # -------------- store arrays ----------------
+        self.matrix_path = None  # set again once the new matrix is saved
         self.gcp_ids = gcp_data["GCP_ID"].values
         # float64 (not float32): UTM northings are ~6-7 significant digits, so
         # float32 quantises coordinates by up to ~0.5 m before any computation,
@@ -518,17 +676,11 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
 
         # -------------- normalize & RANSAC ----------------
         self.log("Normalizing points…")
-        p_norm, T_p = self.normalize_points(self.pixel_points)
-        u_norm, T_u = self.normalize_points(self.utm_points)
-        H_norm, _ = cv2.findHomography(p_norm[:, :2], u_norm[:, :2], cv2.RANSAC, 0.5)
-        if H_norm is None:
+        H_final = fit_homography(self.pixel_points, self.utm_points)
+        if H_final is None:
             self.log("Failed to compute homography matrix.")
             messagebox.showerror("Error", "Failed to compute homography matrix. Check input data.", parent=self)
             return
-
-        H_final = np.linalg.inv(T_u) @ H_norm @ T_p
-        if abs(H_final[2, 2]) > 1e-6 and abs(H_final[2, 2] - 1) > 1e-3:
-            H_final /= H_final[2, 2]
         self.H_final = H_final
 
         # -------------- save ----------------
@@ -542,6 +694,7 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
             self.log(f"Error saving homography matrix: {e}")
             messagebox.showerror("Error", f"Error saving homography matrix: {e}", parent=self)
             return
+        self.matrix_path = out_path
 
         self.log("\nHomography Matrix Computed and Saved!")
         self.log(f"Output Path: {out_path}")
@@ -549,7 +702,13 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
         messagebox.showinfo("Success", "Homography matrix computed and saved successfully.", parent=self)
 
     def compute_accuracy(self):
-        """Apply H to each pixel point and report the per-GCP reprojection distance."""
+        """Report the per-GCP distance of the matrix and the leave-one-out distance.
+
+        "All GCPs" applies the computed matrix to every GCP it was fitted
+        on.  "Left out" refits the matrix without each GCP in turn and
+        measures the distance at that GCP.  The table is logged and saved
+        next to the matrix as <name>_accuracy.csv.
+        """
         if self.H_final is None or self.pixel_points is None:
             messagebox.showerror("Error", "Please compute the homography matrix first!", parent=self)
             return
@@ -565,11 +724,26 @@ class CreateHomographyMatrixWindow(ctk.CTkToplevel):
         utm_est2 = utm_est2[:, :2] / utm_est2[:, 2][:, None]
         max_diff = np.abs(utm_est - utm_est2).max()
 
+        errors_loo = leave_one_out_errors(self.pixel_points, self.utm_points)
+
         report = f"Max difference CV vs. manual: {max_diff:.3f}\n"
-        for gid, err in zip(self.gcp_ids, errors):
-            report += f"{gid}: reprojection distance = {err:.3f} m\n"
-        report += f"Mean reprojection distance: {errors.mean():.3f} m\n"
+        report += format_accuracy_report(self.gcp_ids, errors, errors_loo)
         self.log(report)
+
+        if not self.matrix_path:
+            self.log("Accuracy table not saved: the matrix file was not written.")
+            return
+        csv_path = os.path.splitext(self.matrix_path)[0] + "_accuracy.csv"
+        try:
+            write_accuracy_csv(
+                csv_path, self.gcp_ids, errors, errors_loo,
+                matrix_file=os.path.basename(self.matrix_path),
+                gcp_file=os.path.basename(self.input_file) if self.input_file else "",
+            )
+        except Exception as e:
+            self.log(f"Error saving accuracy table: {e}")
+            return
+        self.log(f"Accuracy table saved: {csv_path}")
 
     # %%             Simulated-annealing helpers
 
