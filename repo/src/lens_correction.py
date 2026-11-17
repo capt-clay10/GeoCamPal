@@ -46,6 +46,29 @@ keep, simplify, or (for a near-zero result) skip correction — based on
 this lens's own coefficient significance and the RMS cost of dropping
 the highest term, not on a focal-length rule of thumb.
 
+The console and calibration_report.txt open with a Result block that
+keeps two things apart:
+  • the lens distortion, given as the distance the correction moves
+    pixels: at the image centre, for half of all pixels, and the
+    largest movement with its place in the image.  Each value carries
+    a ±: the calibration is repeated once per photo, each time without
+    that photo, and the ± is the standard error of the value over these
+    runs (it reflects errors that differ from photo to photo);
+  • the checkerboard fit — the GOOD / MARGINAL / POOR grade of the RMS
+    reprojection error — with the RMS obtained without any distortion
+    model, the reduction by the model, and the RMS as a share of the
+    image width (which, unlike the value in pixels, does not change
+    with the image size).  The grade says how well the detected corners
+    match the camera model; it is not the amount of lens distortion.
+
+calibration_report.txt ends with an Interpretation section, marked as
+such.  It compares the largest movement with its ± and says whether the
+photos show a lens distortion, do not show one, or only point to one;
+it gives no interpretation where that comparison was not reliable in
+tests (fewer than 10 photos, corners covering less than 60 % of the
+frame, a tangential or 5-term model, contradictory values).  The console
+holds values and definitions only.
+
 A minimum of 3 images with successfully detected corners is required
 for a reliable calibration.  More images with diverse checkerboard
 poses (different angles, distances, positions in the frame) give a
@@ -85,11 +108,13 @@ Outputs  (saved to the user-selected output folder)
                                  quality_warnings— diagnostic warnings (list)
 
     calibration_report.txt   — human-readable summary: board dimensions,
-                                 distortion model, RMS error and quality
-                                 verdict with warnings, K matrix, focal
-                                 length, principal point, distortion
+                                 distortion model, the Result block (pixel
+                                 movement of the correction with its ±,
+                                 checkerboard fit) with warnings, K matrix,
+                                 focal length, principal point, distortion
                                  coefficients (each ± 1σ), frame coverage,
-                                 and per-image RMS + planarity diagnostics
+                                 per-image RMS + planarity diagnostics, and
+                                 the Interpretation section
 
 Preview
 -------
@@ -111,6 +136,7 @@ import sys
 import os
 import glob
 import pickle
+import textwrap
 import threading
 import time
 
@@ -251,6 +277,602 @@ def quality_verdict(rms):
     return "POOR"
 
 
+# %% ——————————————— result block: distortion in pixels ———————————————
+#
+# The pixel movement of a distortion model is evaluated at the centres of
+# this many equal cells (across, down), at every pixel along the four
+# image edges, and at the image centre.
+MOVEMENT_GRID = (301, 201)
+
+# Limits of the Interpretation section of the report.  The three verdicts
+# compare the largest pixel movement with its leave-one-photo-out standard
+# error (±).  The limits come from tests on calibrations with a known lens
+# (about 2,000 real, modified and simulated calibrations, 2026-11-16); no
+# verdict is given outside the conditions in which the comparison proved
+# reliable there.
+INTERPRET_NOT_SHOWN = 2.0            # movement below this many ±: not shown
+INTERPRET_SHOWN = 3.0                # movement of this many ± or more: shown
+INTERPRET_MIN_PHOTOS = 10            # fewer photos: no interpretation
+INTERPRET_CONTRADICTION_PCT = 10.0   # "not shown", yet the model removes
+                                     # this share of the misfit or more
+EXAMPLE_PIXEL_CM = 10.0              # ground size of one pixel in the example
+
+
+def no_distortion_rms(obj_points, img_points, img_shape):
+    """RMS reprojection error (px) of the same corners when every
+    distortion coefficient is fixed at zero, i.e. for a camera without
+    lens distortion.  Compared with the RMS of the chosen model it shows
+    how much of the misfit the distortion model accounts for."""
+    flags = (cv2.CALIB_FIX_K1 | cv2.CALIB_FIX_K2 | cv2.CALIB_FIX_K3
+             | cv2.CALIB_ZERO_TANGENT_DIST)
+    return float(cv2.calibrateCamera(obj_points, img_points, img_shape,
+                                     None, None, flags=flags)[0])
+
+
+def _distort_pixels(pix, K, D):
+    """Where the distortion model puts pixels whose distortion-free
+    positions are ``pix`` (N × 2): the model itself, no iteration."""
+    rays = np.column_stack([(pix[:, 0] - K[0, 2]) / K[0, 0],
+                            (pix[:, 1] - K[1, 2]) / K[1, 1],
+                            np.ones(len(pix))])
+    # Identity pose: projectPoints then applies the distortion model and K.
+    out, _ = cv2.projectPoints(rays.reshape(-1, 1, 3), np.zeros(3),
+                               np.zeros(3), K, D)
+    return out.reshape(-1, 2)
+
+
+def _movement_positions(img_shape):
+    """The pixels at which the movement is evaluated: the centres of
+    MOVEMENT_GRID equal cells, every pixel along the four image edges,
+    and the image centre (last).  Returns (positions N × 2, number of
+    cell centres)."""
+    W, H = int(img_shape[0]), int(img_shape[1])
+    nx, ny = min(W, MOVEMENT_GRID[0]), min(H, MOVEMENT_GRID[1])
+    gx, gy = np.meshgrid((np.arange(nx) + 0.5) * W / nx - 0.5,
+                         (np.arange(ny) + 0.5) * H / ny - 0.5)
+    cells = np.column_stack([gx.ravel(), gy.ravel()])
+    ex = np.arange(W, dtype=np.float64)
+    ey = np.arange(H, dtype=np.float64)
+    edges = np.vstack([
+        np.column_stack([ex, np.zeros(W)]),
+        np.column_stack([ex, np.full(W, H - 1.0)]),
+        np.column_stack([np.zeros(H), ey]),
+        np.column_stack([np.full(H, W - 1.0), ey])])
+    centre = np.array([[(W - 1) / 2.0, (H - 1) / 2.0]])
+    return np.vstack([cells, edges, centre]), len(cells)
+
+
+def _movement_vectors(K, D, pix):
+    """Corrected position minus original position of the pixels ``pix``.
+
+    The model gives the original position from the corrected one, so it
+    has to be inverted; OpenCV does that by iteration.  Putting the result
+    back through the model must return the starting pixel.  If it does not
+    (coefficients too strong for the iteration), the model is used the
+    other way round: minus the movement of the pixel that ends up at each
+    position.
+    """
+    other = None                     # the corrected position of each pixel
+    try:
+        other = cv2.undistortPointsIter(
+            pix.reshape(-1, 1, 2), K, D, None, K,
+            (cv2.TERM_CRITERIA_COUNT + cv2.TERM_CRITERIA_EPS, 100, 1e-10)
+        ).reshape(-1, 2)
+        if not (np.all(np.isfinite(other)) and
+                np.abs(_distort_pixels(other, K, D) - pix).max() < 1e-3):
+            other = None
+    except cv2.error:
+        other = None
+    if other is None:
+        return pix - _distort_pixels(pix, K, D)
+    return other - pix
+
+
+def pixel_movement(camera_matrix, dist_coeffs, img_shape):
+    """How far the correction moves the pixels of a W × H image.
+
+    For pixels spread over the whole frame, the place a pixel has in the
+    original image is compared with the place the correction gives it,
+    with the same camera matrix on both sides.  The distance between the
+    two is the lens distortion at that pixel, in pixels.  It is the
+    movement by the distortion model itself: the rescaling that "Crop to
+    valid pixels" adds when a correction is applied in Harmonise Images
+    is not part of it.
+
+    The pixels looked at are the centres of MOVEMENT_GRID equal cells
+    (they give the median), every pixel along the four image edges, and
+    the image centre.
+
+    Returns a dict with
+        centre         movement at the image centre (px)
+        median         half of the pixels move no more than this (px)
+        largest        largest movement (px)
+        largest_xy     pixel position (x, y) of the largest movement
+        largest_index  its index among the pixels looked at
+    """
+    K = np.asarray(camera_matrix, dtype=np.float64)
+    D = np.asarray(dist_coeffs, dtype=np.float64).ravel()
+    pix, n_cells = _movement_positions(img_shape)
+    moved = np.linalg.norm(_movement_vectors(K, D, pix), axis=1)
+    i = int(np.argmax(moved[:-1]))
+    return {
+        "centre": float(moved[-1]),
+        "median": float(np.median(moved[:n_cells])),
+        "largest": float(moved[i]),
+        "largest_xy": (float(pix[i, 0]), float(pix[i, 1])),
+        "largest_index": i,
+    }
+
+
+def movement_uncertainty(obj_points, img_points, img_shape, flags, movement,
+                         progress=None):
+    """Leave-one-photo-out standard errors (±) of the pixel movement.
+
+    The calibration is repeated once for every photo, each time without
+    that photo and with the same distortion model.  How much the movement
+    of a pixel differs between these runs gives its standard error (the
+    jackknife).  It reflects errors that differ from photo to photo; an
+    error that is the same in every photo, such as an inexact printed
+    pattern, is not part of it.
+
+    ``progress(i, n)`` is called before each run; if it returns False the
+    work stops.  Returns None with fewer than 4 photos, when one of the
+    runs fails, or when the work was stopped; otherwise a dict with
+        n        number of repeated calibrations
+        centre   ± of the movement at the image centre (px)
+        median   half of the pixels have a ± no larger than this (px)
+        largest  ± at the pixel of the largest movement (px)
+    """
+    n = len(img_points)
+    if n < 4:
+        return None
+    obj_points, img_points = list(obj_points), list(img_points)
+    pix, n_cells = _movement_positions(img_shape)
+    total = np.zeros_like(pix)
+    total_sq = np.zeros(len(pix))
+    for i in range(n):
+        if progress is not None and progress(i, n) is False:
+            return None
+        try:
+            _rms, K, D, _rv, _tv = cv2.calibrateCamera(
+                obj_points[:i] + obj_points[i + 1:],
+                img_points[:i] + img_points[i + 1:],
+                img_shape, None, None, flags=flags)
+        except cv2.error:
+            return None
+        vec = _movement_vectors(np.asarray(K, dtype=np.float64),
+                                np.asarray(D, dtype=np.float64).ravel(), pix)
+        if not np.all(np.isfinite(vec)):
+            return None
+        total += vec
+        total_sq += (vec * vec).sum(axis=1)
+    spread = np.maximum(total_sq - (total * total).sum(axis=1) / n, 0.0)
+    se = np.sqrt((n - 1) / n * spread)
+    return {
+        "n": n,
+        "centre": float(se[-1]),
+        "median": float(np.median(se[:n_cells])),
+        "largest": float(se[movement["largest_index"]]),
+    }
+
+
+def board_error_split(objp, img_points, rvecs, tvecs, camera_matrix,
+                      dist_coeffs):
+    """Where the remaining misfit sits on the board, in millimetres.
+
+    The reprojection residual of every corner (detected minus fitted
+    position) is taken back from pixels to the plane of the board.  The
+    part of it that is the same in every photo belongs to the pattern
+    itself (printing, assembly); the part that changes from photo to
+    photo comes from bending, blur or corner finding.  The chance share
+    that the changing part leaves in the mean over the photos is taken
+    out.  Object points are expected in metres.
+
+    Returns a dict with total, fixed and changing (RMS, mm), or None with
+    fewer than 2 photos.
+    """
+    n = len(img_points)
+    if n < 2:
+        return None
+    base = np.asarray(objp, dtype=np.float64).reshape(-1, 3)
+    K = np.asarray(camera_matrix, dtype=np.float64)
+    D = np.asarray(dist_coeffs, dtype=np.float64)
+    step = 0.001                                         # 1 mm on the board
+    res = []
+    for pts, rvec, tvec in zip(img_points, rvecs, tvecs):
+        def project(b):
+            return cv2.projectPoints(b, rvec, tvec, K, D)[0].reshape(-1, 2)
+        p0 = project(base)
+        jx = project(base + [step, 0.0, 0.0]) - p0       # px per mm, along x
+        jy = project(base + [0.0, step, 0.0]) - p0       # px per mm, along y
+        r = np.asarray(pts, dtype=np.float64).reshape(-1, 2) - p0
+        det = jx[:, 0] * jy[:, 1] - jx[:, 1] * jy[:, 0]
+        res.append(np.column_stack([
+            (r[:, 0] * jy[:, 1] - r[:, 1] * jy[:, 0]) / det,
+            (-r[:, 0] * jx[:, 1] + r[:, 1] * jx[:, 0]) / det]))
+    res = np.array(res)                                  # photo × corner × 2
+    mean = res.mean(axis=0)
+    changing_sq = float(((res - mean) ** 2).sum(axis=(0, 2)).mean() / (n - 1))
+    fixed_sq = float((mean ** 2).sum(axis=1).mean()) - changing_sq / n
+    return {
+        "total": float(np.sqrt((res ** 2).sum(axis=2).mean())),
+        "fixed": float(np.sqrt(max(fixed_sq, 0.0))),
+        "changing": float(np.sqrt(changing_sq)),
+    }
+
+
+def movement_place(xy, img_shape):
+    """Say where in the image a pixel position is: one of the corners,
+    one of the edges (within 2 % of the frame), or its coordinates."""
+    W, H = int(img_shape[0]), int(img_shape[1])
+    x, y = xy
+    tol_x, tol_y = 0.02 * (W - 1), 0.02 * (H - 1)
+    side = "left" if x <= tol_x else "right" if x >= (W - 1) - tol_x else ""
+    level = "top" if y <= tol_y else "bottom" if y >= (H - 1) - tol_y else ""
+    if side and level:
+        return f"at the {level}-{side} corner"
+    if side or level:
+        return f"at the {side or level} edge"
+    return f"at pixel ({x:.0f}, {y:.0f})"
+
+
+def reduction_by_model(rms, rms_no_distortion):
+    """How much of the misfit the distortion model removes: the difference
+    of the two RMS values in px, and as a percentage of the RMS without a
+    distortion model.  (None, None) when that RMS is not available."""
+    if rms_no_distortion is None or rms_no_distortion <= 0:
+        return None, None
+    diff = rms_no_distortion - rms
+    if abs(diff) < 5e-5:
+        diff = 0.0
+    return diff, diff / rms_no_distortion * 100.0
+
+
+def headline_lines(movement, rms, verdict, uncertainty=None):
+    """The two statements a run comes down to: how far the correction
+    moves pixels, and how well the checkerboard images fit.  They open
+    the Result block and are repeated in the closing pop-up."""
+    pm = f" ± {uncertainty['largest']:.2f} px" if uncertainty else ""
+    return [
+        "Lens distortion:   the correction moves pixels by up to "
+        f"{movement['largest']:.2f} px{pm}",
+        f"Checkerboard fit:  {verdict}  (RMS reprojection error {rms:.4f} px)",
+    ]
+
+
+def result_lines(model_label, img_shape, movement, rms, verdict,
+                 rms_no_distortion, n_warnings, uncertainty=None):
+    """The Result block.  The same lines go to the console and to
+    calibration_report.txt.  Values and their definitions only.
+
+    Two statements first (``headline_lines``), then each in detail: the
+    lens distortion as the distance the correction moves pixels, with the
+    leave-one-photo-out ± of every value; and the checkerboard fit, with
+    the RMS reprojection error without and with the distortion model, the
+    reduction by the model, and the RMS as a share of the image width.
+    """
+    W, H = int(img_shape[0]), int(img_shape[1])
+
+    def pm(key):
+        return f"  ± {uncertainty[key]:.2f} px" if uncertainty else ""
+
+    largest = f"    Largest movement:    {movement['largest']:.2f} px{pm('largest')}"
+    if movement["largest"] >= 0.005:
+        largest += ", " + movement_place(movement["largest_xy"], img_shape)
+    lines = ["=== Result ==="]
+    lines += headline_lines(movement, rms, verdict, uncertainty)
+    lines += [
+        "",
+        f"Lens distortion  ({W} × {H} px image, model: {model_label})",
+        "  If the correction is applied, each pixel moves by its own amount,",
+        "  depending on where it is in the image:",
+        f"    Image centre:        {movement['centre']:.2f} px{pm('centre')}",
+        f"    Half of all pixels:  no more than {movement['median']:.2f} px"
+        f"{pm('median')}",
+        largest,
+    ]
+    if uncertainty:
+        lines += [
+            "  The ± is how much the value changes when one photo is left out",
+            f"  (standard error from {uncertainty['n']} repeated calibrations).",
+        ]
+    else:
+        lines += [
+            "  No ± is given: it needs at least 4 photos and a calibration that",
+            "  succeeds without each one of them.",
+        ]
+    lines += [
+        "  This is the movement by the distortion model itself. \"Crop to valid",
+        "  pixels\" in Harmonise Images also rescales the image; that is not",
+        "  included.",
+        "",
+        f"Checkerboard fit  (GOOD: RMS below {RMS_GOOD} px; MARGINAL: below "
+        f"{RMS_MARGINAL} px; POOR: {RMS_MARGINAL} px or more)",
+        "  The fit says how well the detected corners match the camera model.",
+        "  It is not the amount of lens distortion.",
+    ]
+    diff, percent = reduction_by_model(rms, rms_no_distortion)
+    if rms_no_distortion is not None:
+        lines.append("    RMS reprojection error without a distortion model:  "
+                     f"{rms_no_distortion:.4f} px")
+    lines.append("    RMS reprojection error with the distortion model:   "
+                 f"{rms:.4f} px  ({rms / W * 100:.3f} % of the image width)")
+    if diff is not None:
+        lines.append("    Reduction by the distortion model:                  "
+                     f"{diff:.4f} px  ({percent:.2f} %)")
+    if n_warnings:
+        lines += ["", f"Warnings: {n_warnings} (listed below)"]
+    return lines
+
+
+# %% ——————————————— interpretation (report only) ———————————————
+def interpretation_scenario(flags, movement, uncertainty, rms,
+                            rms_no_distortion, coverage, n_images):
+    """Which case of the Interpretation section applies.
+
+    Returns (scenario, reasons).  scenario is
+        "not shown"   largest movement below INTERPRET_NOT_SHOWN × its ±
+        "indicated"   between INTERPRET_NOT_SHOWN and INTERPRET_SHOWN × its ±
+        "shown"       INTERPRET_SHOWN × its ± or more
+        "none"        no interpretation; ``reasons`` then lists why:
+                      "no ±", "photos", "coverage", "model", "contradiction"
+    """
+    reasons = []
+    if uncertainty is None:
+        reasons.append("no ±")
+    if n_images < INTERPRET_MIN_PHOTOS:
+        reasons.append("photos")
+    if coverage < COVERAGE_WARN_FRACTION:
+        reasons.append("coverage")
+    if not (flags & cv2.CALIB_ZERO_TANGENT_DIST) or not (flags & cv2.CALIB_FIX_K3):
+        reasons.append("model")
+    ratio = 0.0
+    if uncertainty is not None and movement["largest"] >= 0.005:
+        se = uncertainty["largest"]
+        ratio = movement["largest"] / se if se > 0 else float("inf")
+        _diff, percent = reduction_by_model(rms, rms_no_distortion)
+        if (ratio < INTERPRET_NOT_SHOWN and percent is not None
+                and percent >= INTERPRET_CONTRADICTION_PCT):
+            reasons.append("contradiction")
+    if reasons:
+        return "none", reasons
+    if ratio < INTERPRET_NOT_SHOWN:
+        return "not shown", []
+    if ratio < INTERPRET_SHOWN:
+        return "indicated", []
+    return "shown", []
+
+
+def _bullet(text):
+    return textwrap.wrap(text, width=78, initial_indent="  - ",
+                         subsequent_indent="    ", break_long_words=False,
+                         break_on_hyphens=False)
+
+
+def _example_cm(px):
+    cm = px * EXAMPLE_PIXEL_CM
+    return f"{cm:.0f} cm" if cm >= 10 else f"{cm:.1f} cm"
+
+
+def _short_label(model_label):
+    """'k1 + k2 (recommended)' → 'k1 + k2'."""
+    return model_label.split(" (")[0]
+
+
+def interpretation_lines(model_label, flags, img_shape, movement, uncertainty,
+                         rms, rms_no_distortion, coverage, n_images,
+                         board=None, warned_target=False,
+                         warned_coverage=False, simpler_label=None):
+    """The Interpretation section at the end of calibration_report.txt.
+
+    Unlike the rest of the report this is not a calculated value but a
+    reading of the values, chosen by fixed rules (``interpretation_scenario``)
+    and marked as such in its first lines.
+    """
+    W = int(img_shape[0])
+    H = int(img_shape[1])
+    scenario, reasons = interpretation_scenario(
+        flags, movement, uncertainty, rms, rms_no_distortion, coverage,
+        n_images)
+    lines = [
+        "=== Interpretation ===",
+        "Note: this section is an interpretation of the numbers above, written by",
+        "GeoCamPal from fixed rules. It is not a measurement. Check it against your",
+        "own use before acting on it.",
+        "",
+    ]
+    M = movement["largest"]
+    place = (" " + movement_place(movement["largest_xy"], img_shape)
+             if M >= 0.005 else "")
+    _diff, percent = reduction_by_model(rms, rms_no_distortion)
+
+    if scenario == "none":
+        lines.append("No interpretation is given for this calibration.")
+        lines.append("Reason:" if len(reasons) == 1 else "Reasons:")
+        for reason in reasons:
+            if reason == "no ±":
+                lines += _bullet(
+                    "The ± of the pixel movement could not be calculated. It "
+                    "needs at least 4 photos and a calibration that succeeds "
+                    "without each one of them.")
+            elif reason == "photos":
+                lines += _bullet(
+                    f"Only {n_images} photos were used. With fewer than "
+                    f"{INTERPRET_MIN_PHOTOS} photos the ± is not reliable. "
+                    f"Take at least {INTERPRET_MIN_PHOTOS} photos.")
+            elif reason == "coverage":
+                lines += _bullet(
+                    f"The detected corners cover {coverage * 100:.0f} % of "
+                    f"the frame. Below {COVERAGE_WARN_FRACTION * 100:.0f} %, "
+                    "the movement near the image edges is not measured but "
+                    "extended from the middle. Include photos in which the "
+                    "board reaches the edges and corners of the frame.")
+            elif reason == "model":
+                lines += _bullet(
+                    f"The model \"{model_label}\" was chosen. With this "
+                    "model, an error of the board that is the same in every "
+                    "photo can appear as lens distortion, and the ± does not "
+                    f"show it. Calibrate again with \"{DIST_MODEL_DEFAULT}\" "
+                    "to get an interpretation.")
+            elif reason == "contradiction":
+                richer = None
+                if model_label in DIST_MODEL_ORDER:
+                    k = DIST_MODEL_ORDER.index(model_label)
+                    if k + 1 < len(DIST_MODEL_ORDER):
+                        richer = DIST_MODEL_ORDER[k + 1]
+                lines += _bullet(
+                    f"The largest movement ({M:.2f} px) is smaller than "
+                    f"{INTERPRET_NOT_SHOWN:g} times its ± "
+                    f"({uncertainty['largest']:.2f} px), but the distortion "
+                    f"model removes {percent:.0f} % of the misfit. These two "
+                    "do not fit together; the model may be too simple for "
+                    "this lens."
+                    + (f" Try \"{richer}\"." if richer else ""))
+        lines.append("The values in the Result block are valid as calculated.")
+    else:
+        se = uncertainty["largest"]
+        lines.append("Does the lens distort the image?")
+        if scenario == "not shown":
+            bound = M + 2.0 * se
+            bound_txt = f"{bound:.0f}" if bound >= 10 else f"{bound:.1f}"
+            lines += _bullet(
+                f"The largest movement ({M:.2f} px) is smaller than "
+                f"{INTERPRET_NOT_SHOWN:g} times its ± ({se:.2f} px). These "
+                "photos do not show a lens distortion.")
+            lines += _bullet(
+                "They also cannot rule one out. A distortion of up to about "
+                f"{bound_txt} px{place} would not have been noticed (largest "
+                "movement + 2 × its ±). For half of all pixels the ± is "
+                f"{uncertainty['median']:.2f} px or less.")
+        elif scenario == "indicated":
+            lines += _bullet(
+                f"The largest movement ({M:.2f} px) is between "
+                f"{INTERPRET_NOT_SHOWN:g} and {INTERPRET_SHOWN:g} times its ± "
+                f"({se:.2f} px). These photos point to a lens distortion of "
+                f"about {M:.2f} px{place}, but do not fix it. Better photos "
+                "are needed to decide.")
+        else:
+            lines += _bullet(
+                f"The largest movement ({M:.2f} px) is at least "
+                f"{INTERPRET_SHOWN:g} times its ± ({se:.2f} px). These photos "
+                f"show a lens distortion of up to {M:.2f} px{place}, fixed to "
+                f"about ± {se:.2f} px.")
+
+        lines += ["", "Where does the misfit come from?"]
+        if percent is not None:
+            percent_txt = f"{percent:.0f}" if percent >= 10 else f"{percent:.2f}"
+            lines += _bullet(
+                f"The distortion model removes {percent_txt} % of the misfit. "
+                f"The remaining {rms:.2f} px ({rms / W * 100:.3f} % of the "
+                "image width) comes from the board or the photos, not from "
+                "lens distortion that this model can describe.")
+        if board is not None:
+            lines += _bullet(
+                f"On the board, the remaining misfit is {board['total']:.2f} "
+                f"mm on average. {board['fixed']:.2f} mm of that is the same "
+                "in every photo, which points to the pattern itself. "
+                f"{board['changing']:.2f} mm changes from photo to photo, "
+                "which points to the board bending, to blur, or to how "
+                "exactly the corners were found.")
+
+        lines += ["", f"What it means for your images ({W} × {H} px)"]
+        lines += _bullet(
+            f"If this file is applied, pixels move by at most {M:.2f} px "
+            f"({M / W * 100:.2f} % of the image width), and half of all "
+            f"pixels by no more than {movement['median']:.2f} px.")
+        cm = f"{EXAMPLE_PIXEL_CM:g} cm"
+        if scenario == "not shown":
+            lines += _bullet(
+                "Applying the file and not applying it are both consistent "
+                "with these photos.")
+            lines += _bullet(
+                f"Example: if one pixel covers {cm} on the ground, {M:.2f} px "
+                f"is {_example_cm(M)} and the {bound_txt} px that cannot be "
+                f"ruled out is {_example_cm(float(bound_txt))}"
+                + (f", both{place}" if place else "")
+                + ". For half of all pixels the ± is "
+                f"{_example_cm(uncertainty['median'])} or less.")
+        elif scenario == "indicated":
+            lines += _bullet(
+                "Whether applying the file improves the images cannot be "
+                "decided from these photos.")
+            lines += _bullet(
+                f"Example: if one pixel covers {cm} on the ground, {M:.2f} px "
+                f"is {_example_cm(M)} and its ± of {se:.2f} px is "
+                f"{_example_cm(se)}" + (f", both{place}" if place else "")
+                + ".")
+        else:
+            lines += _bullet(
+                f"Applying the file removes a lens distortion of up to "
+                f"{M:.2f} px; about ± {se:.2f} px of it stays uncertain.")
+            lines += _bullet(
+                f"Example: if one pixel covers {cm} on the ground, {M:.2f} px "
+                f"is {_example_cm(M)} and its ± of {se:.2f} px is "
+                f"{_example_cm(se)}" + (f", both{place}" if place else "")
+                + ".")
+        lines += _bullet(
+            "The grade limits are in pixels. A smaller image size gives a "
+            "smaller RMS in pixels for the same board, so the grade can "
+            "improve without a better calibration. The share of the image "
+            f"width ({rms / W * 100:.3f} %) does not change with the image "
+            "size; use it to compare calibrations.")
+
+        lines += ["", "Limits of this interpretation"]
+        lines += _bullet(
+            f"The ± comes from repeating the calibration {uncertainty['n']} "
+            "times, each time without one photo. An error that is the same "
+            "in every photo, such as an inexact printed pattern, is not part "
+            "of it. In tests with such an error, the true error was up to 4 "
+            "times the ±.")
+        lines += _bullet(
+            "More photos make the ± smaller, but not an error of the board.")
+
+    suggestions = []
+    if warned_target:
+        suggestions += _bullet(
+            ("For a more exact result" if scenario == "shown"
+             else "To find out whether this lens distorts")
+            + ", use a pattern on a flat, stiff backing and check the "
+            "printed cell size with a ruler.")
+        suggestions += _bullet(
+            "Turn the board by 90° and 180° in some of the photos and place "
+            "it in all parts of the frame. A board error then no longer "
+            "looks like lens distortion.")
+    if warned_coverage and "coverage" not in reasons:
+        suggestions += _bullet(
+            "Include photos in which the board reaches the edges and "
+            "corners of the frame.")
+    # not next to a reason that already names the model to use
+    if simpler_label and not {"model", "contradiction"} & set(reasons):
+        suggestions += _bullet(
+            f"Use \"{_short_label(simpler_label)}\", as the model guidance "
+            "suggests.")
+    if scenario != "none":
+        suggestions += _bullet(
+            "If you apply the file, check that straight lines near the image "
+            "edges stay straight in the corrected images.")
+    if suggestions:
+        lines += ["", "Suggestions"] + suggestions
+    return lines
+
+
+def coefficient_lines(dist_coeffs, std):
+    """Each distortion coefficient with its standard deviation (± 1σ).
+    ``std`` is the intrinsics vector of cv2.calibrateCameraExtended:
+    fx, fy, cx, cy, k1, k2, p1, p2, k3."""
+    dvals = np.zeros(5)
+    dr = np.asarray(dist_coeffs, dtype=np.float64).ravel()
+    dvals[:min(5, dr.size)] = dr[:5]
+    return [
+        f"  k1 = {dvals[0]: .6f} ± {std[4]:.6f}",
+        f"  k2 = {dvals[1]: .6f} ± {std[5]:.6f}",
+        f"  p1 = {dvals[2]: .6f} ± {std[6]:.6f}",
+        f"  p2 = {dvals[3]: .6f} ± {std[7]:.6f}",
+        f"  k3 = {dvals[4]: .6f} ± {std[8]:.6f}",
+        "  (fixed coefficients have sigma = 0)",
+    ]
+
+
 def model_guidance(flags, dvals, std, rms, rms_simpler):
     """Recommend a distortion model based on this lens's actual fit.
 
@@ -322,13 +944,23 @@ def model_guidance(flags, dvals, std, rms, rms_simpler):
 
 
 def calibrate_and_diagnose(obj_points, img_points, img_shape, flags,
-                           pattern_size, cell_w_m):
+                           pattern_size, cell_w_m, progress=None):
     """cv2.calibrateCameraExtended plus quality diagnostics.
 
     Returns a dict with the calibration result, parameter standard
     deviations, true per-image RMS errors, target-planarity residuals,
-    frame coverage, a GOOD/MARGINAL/POOR verdict and a list of warning
-    strings.  Pure computation — no GUI dependencies.
+    frame coverage, a GOOD/MARGINAL/POOR verdict, the pixel movement of
+    the correction with its leave-one-photo-out ±, the RMS without a
+    distortion model, the split of the remaining misfit on the board and
+    a list of warning strings.  Pure computation — no GUI dependencies.
+
+    ``progress(i, n)`` is passed on to ``movement_uncertainty``, which
+    repeats the calibration once per photo.
+
+    The verdict is not repeated as a warning: the Result block states it
+    together with what it means (see ``result_lines``).  The warnings
+    name the specific findings — target accuracy, frame coverage,
+    outlying images, suspect coefficients.
     """
     (rms, camera_matrix, dist_coeffs, rvecs, tvecs,
      std_intrinsics, _std_extr, _per_view) = cv2.calibrateCameraExtended(
@@ -348,30 +980,42 @@ def calibrate_and_diagnose(obj_points, img_points, img_shape, flags,
     dr = dist_coeffs.ravel()
     dvals[:min(5, dr.size)] = dr[:5]
 
+    # What the correction does to an image, in pixels, and the misfit of
+    # the same corners for a camera without distortion.  The second is one
+    # more calibrateCamera run; best-effort, never fatal.
+    movement = pixel_movement(camera_matrix, dist_coeffs, img_shape)
+    try:
+        rms_no_dist = no_distortion_rms(obj_points, img_points, img_shape)
+    except Exception:                # noqa: BLE001 — an extra, not required
+        rms_no_dist = None
+    # How firmly the photos fix that movement: the calibration repeated
+    # once per photo, each time without it.
+    uncertainty = movement_uncertainty(obj_points, img_points, img_shape,
+                                       flags, movement, progress)
+    try:
+        board = board_error_split(obj_points[0], img_points, rvecs, tvecs,
+                                  camera_matrix, dist_coeffs)
+    except Exception:                # noqa: BLE001 — an extra, not required
+        board = None
+
     warnings = []
-    if verdict == "POOR":
-        warnings.append(
-            f"RMS reprojection error {rms:.2f} px is far above the "
-            f"~{RMS_GOOD} px expected of a sound calibration. "
-            "DO NOT apply this file to imagery — fix the causes below "
-            "and recalibrate.")
-    elif verdict == "MARGINAL":
-        warnings.append(
-            f"RMS reprojection error {rms:.2f} px is higher than expected "
-            f"(good calibrations are typically < {RMS_GOOD} px). "
-            "Use with caution.")
 
     finite_mm = [mm for _, mm in planarity if np.isfinite(mm)]
-    if finite_mm and max(finite_mm) > PLANARITY_WARN_MM:
+    warned_target = bool(finite_mm and max(finite_mm) > PLANARITY_WARN_MM)
+    if warned_target:
         worst = int(np.nanargmax([mm for _, mm in planarity])) + 1
+        # The value is a shift of the corners within the plane of the
+        # board.  It cannot tell a sheet that is not flat from a pattern
+        # that is not exact, so the warning names both.
         warnings.append(
-            f"Target planarity: the corner grid deviates from a flat plane "
-            f"by up to ~{max(finite_mm):.1f} mm (image {worst}). "
-            "calibrateCamera assumes a rigid plane — mount the pattern on "
-            "a flat, stiff backing (foam board / dibond / glass) and "
-            "re-shoot.")
+            f"Target accuracy: the detected corners lie up to "
+            f"~{max(finite_mm):.1f} mm from where a flat, exact pattern "
+            f"would be seen (image {worst}). The calibration assumes such "
+            "a pattern. Mount it on a flat, stiff backing (foam board / "
+            "dibond / glass), check the printed cell size, and re-shoot.")
 
-    if coverage < COVERAGE_WARN_FRACTION:
+    warned_coverage = coverage < COVERAGE_WARN_FRACTION
+    if warned_coverage:
         warnings.append(
             f"Detected corners cover only {coverage * 100:.0f}% of the "
             "frame. Distortion outside the covered region is extrapolated "
@@ -417,6 +1061,14 @@ def calibrate_and_diagnose(obj_points, img_points, img_shape, flags,
         except Exception:            # noqa: BLE001 — guidance is optional
             rms_simpler = None
     guidance = model_guidance(flags, dvals, std, rms, rms_simpler)
+    # The model that the guidance points to, when it advises a simpler one.
+    simpler_label = None
+    if guidance and ("prefer the next-simpler model" in guidance
+                     or "prefer a simpler model" in guidance):
+        for label, f in DIST_MODEL_OPTIONS.items():
+            if f == flags and DIST_MODEL_ORDER.index(label) > 0:
+                simpler_label = DIST_MODEL_ORDER[
+                    DIST_MODEL_ORDER.index(label) - 1]
 
     return {
         "rms": float(rms),
@@ -431,6 +1083,13 @@ def calibrate_and_diagnose(obj_points, img_points, img_shape, flags,
         "verdict": verdict,
         "warnings": warnings,
         "guidance": guidance,
+        "movement": movement,
+        "rms_no_distortion": rms_no_dist,
+        "uncertainty": uncertainty,
+        "board_error": board,
+        "warned_target": warned_target,
+        "warned_coverage": warned_coverage,
+        "simpler_label": simpler_label,
     }
 
 
@@ -734,6 +1393,25 @@ class LensCorrectionWindow(ctk.CTkToplevel):
     def _ui_progress(self, value, eta_text=None):
         self._ui_call(self._update_progress_ui, value, eta_text)
 
+    def _finish_run(self, kind, title, message):
+        """Closing pop-up of a finished run; afterwards the console is
+        brought back to the Result block."""
+        getattr(messagebox, f"show{kind}")(title, message, parent=self)
+        # after the console has taken in the last lines (it polls every 50 ms)
+        self.after(200, self._show_result_in_console)
+
+    def _show_result_in_console(self):
+        """Scroll the console so that the latest Result block starts at
+        its first visible line.  The console follows the output to the
+        last line, which would leave the result above the visible part."""
+        try:
+            idx = self.console_text.search("=== Result ===", tk.END,
+                                           backwards=True)
+            if idx:
+                self.console_text.yview(idx)
+        except tk.TclError:
+            pass
+
     def _apply_preview(self, vis_bgr, undist_bgr):
         self.axes[0].clear()
         self.axes[0].imshow(cv2.cvtColor(vis_bgr, cv2.COLOR_BGR2RGB))
@@ -915,9 +1593,23 @@ class LensCorrectionWindow(ctk.CTkToplevel):
             calib_flags = DIST_MODEL_OPTIONS[model_label]
 
             print(f"Running calibration …  (distortion model: {model_label})")
+            if detected_count >= 4:
+                print(f"It is then repeated {detected_count} times, each time "
+                      "without one photo, for the ± values …")
+
+            def pm_progress(i, n):
+                if self._cancel_requested:
+                    return False
+                self._ui_progress(None, f"± run {i + 1}/{n}")
+                return True
+
             diag = calibrate_and_diagnose(
                 obj_points, img_points, img_shape, calib_flags,
-                pattern_size, cell_w_m)
+                pattern_size, cell_w_m, progress=pm_progress)
+            if self._cancel_requested:
+                print("Calibration cancelled.")
+                self._ui_progress(0, "ETA: Cancelled")
+                return
             ret = diag["rms"]
             camera_matrix = diag["camera_matrix"]
             dist_coeffs = diag["dist_coeff"]
@@ -928,24 +1620,42 @@ class LensCorrectionWindow(ctk.CTkToplevel):
             verdict = diag["verdict"]
             q_warnings = diag["warnings"]
             guidance = diag.get("guidance")
+            movement = diag["movement"]
+            uncertainty = diag["uncertainty"]
 
-            print(f"\nCalibration RMS reprojection error: {ret:.4f} px")
-            print(f"Calibration quality: {verdict}  "
-                  f"(GOOD < {RMS_GOOD} px, MARGINAL < {RMS_MARGINAL} px)")
-            print(f"\nCamera matrix:\n{camera_matrix}")
-            print(f"\nDistortion coefficients:\n{dist_coeffs.ravel()}")
+            # Result first — what the correction does to an image, then how
+            # well the checkerboard images support it.  The details follow.
+            result_block = result_lines(
+                model_label, img_shape, movement, ret, verdict,
+                diag["rms_no_distortion"], len(q_warnings), uncertainty)
+            print("\n" + "\n".join(result_block))
+            print("An interpretation of these numbers is at the end of "
+                  "calibration_report.txt.")
+            # The console holds values and definitions; the reading of them
+            # is kept to one marked section at the end of the report.
+            interpretation = interpretation_lines(
+                model_label, calib_flags, img_shape, movement, uncertainty,
+                ret, diag["rms_no_distortion"], coverage, detected_count,
+                board=diag["board_error"],
+                warned_target=diag["warned_target"],
+                warned_coverage=diag["warned_coverage"],
+                simpler_label=diag["simpler_label"])
 
             fx = camera_matrix[0, 0]
             fy = camera_matrix[1, 1]
             cx = camera_matrix[0, 2]
             cy = camera_matrix[1, 2]
             W, H = img_shape
+            print("\n=== Details ===")
+            print(f"Distortion coefficients:\n{dist_coeffs.ravel()}")
+            print("\n".join(coefficient_lines(dist_coeffs, std_i)))
             print(f"\nFocal length:  fx={fx:.2f} ± {std_i[0]:.2f} px,  "
                   f"fy={fy:.2f} ± {std_i[1]:.2f} px")
             print(f"Principal point:  cx={cx:.2f} ± {std_i[2]:.2f} px,  "
                   f"cy={cy:.2f} ± {std_i[3]:.2f} px")
             print(f"Image size: {W} × {H} px")
             print(f"Corner coverage of frame: {coverage * 100:.0f}%")
+            print(f"\nCamera matrix:\n{camera_matrix}")
 
             if not is_square:
                 print(f"\n[NOTE] Rectangular cells used ({cell_w_mm} × {cell_h_mm} mm). Object points have been scaled accordingly.")
@@ -1002,9 +1712,8 @@ class LensCorrectionWindow(ctk.CTkToplevel):
                     f.write(f"Cell width: {cell_w_mm} mm\n")
                     f.write(f"Cell height: {cell_h_mm} mm\n")
                 f.write(f"Distortion model: {model_label}\n\n")
-                f.write(f"RMS reprojection error: {ret:.4f} px\n")
-                f.write(f"Calibration quality: {verdict}  "
-                        f"(GOOD < {RMS_GOOD} px, MARGINAL < {RMS_MARGINAL} px)\n\n")
+                # the same Result block as in the console
+                f.write("\n".join(result_block) + "\n\n")
                 if q_warnings:
                     f.write("Warnings:\n")
                     for w in q_warnings:
@@ -1012,6 +1721,7 @@ class LensCorrectionWindow(ctk.CTkToplevel):
                     f.write("\n")
                 if guidance:
                     f.write(f"{guidance}\n\n")
+                f.write("=== Details ===\n")
                 f.write(f"Camera matrix:\n{camera_matrix}\n\n")
                 f.write(f"Focal length: fx={fx:.2f} ± {std_i[0]:.2f} px, "
                         f"fy={fy:.2f} ± {std_i[1]:.2f} px\n")
@@ -1020,15 +1730,8 @@ class LensCorrectionWindow(ctk.CTkToplevel):
                 f.write(f"Image size: {W} × {H} px\n")
                 f.write(f"Corner coverage of frame: {coverage * 100:.0f}%\n\n")
                 f.write(f"Distortion coefficients:\n{dist_coeffs.ravel()}\n")
-                dvals = np.zeros(5)
-                dr = dist_coeffs.ravel()
-                dvals[:min(5, dr.size)] = dr[:5]
-                f.write(f"  k1 = {dvals[0]: .6f} ± {std_i[4]:.6f}\n")
-                f.write(f"  k2 = {dvals[1]: .6f} ± {std_i[5]:.6f}\n")
-                f.write(f"  p1 = {dvals[2]: .6f} ± {std_i[6]:.6f}\n")
-                f.write(f"  p2 = {dvals[3]: .6f} ± {std_i[7]:.6f}\n")
-                f.write(f"  k3 = {dvals[4]: .6f} ± {std_i[8]:.6f}\n")
-                f.write("  (fixed coefficients have sigma = 0)\n\n")
+                f.write("\n".join(coefficient_lines(dist_coeffs, std_i))
+                        + "\n\n")
                 f.write("Per-image diagnostics\n")
                 f.write("  (RMS is the true per-image RMS, |residuals|/sqrt(N);\n")
                 f.write("   plane-fit is the deviation of the detected grid "
@@ -1037,6 +1740,7 @@ class LensCorrectionWindow(ctk.CTkToplevel):
                     p_px, p_mm = planarity[i]
                     f.write(f"  Image {i + 1}: RMS {err:.4f} px | "
                             f"plane-fit {p_px:.2f} px (~{p_mm:.2f} mm)\n")
+                f.write("\n" + "\n".join(interpretation) + "\n")
             print(f"Saved: {txt_path}")
 
             if sample_img is not None:
@@ -1056,13 +1760,18 @@ class LensCorrectionWindow(ctk.CTkToplevel):
                 self._ui_call(self._apply_preview, vis, undist)
 
             self._ui_progress(1.0, "ETA: Completed")
-            summary = (f"Calibration complete — quality: {verdict}\n"
-                       f"RMS error: {ret:.4f} px\n")
+            summary = ("Calibration complete\n\n"
+                       + "\n".join(headline_lines(movement, ret, verdict,
+                                                 uncertainty))
+                       + "\n")
             if q_warnings:
                 summary += (f"\n{len(q_warnings)} warning(s) — "
                             "see console / report for details.\n")
+            summary += ("\nAn interpretation of these numbers is at the end "
+                        "of calibration_report.txt.\n")
             summary += f"\nFiles saved to:\n{output_folder}"
-            self._ui_message(
+            self._ui_call(
+                self._finish_run,
                 "warning" if verdict == "POOR" else "info",
                 "Done", summary)
 
