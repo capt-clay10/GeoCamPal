@@ -914,7 +914,7 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
 
     def __init__(self, master=None, **kw):
         super().__init__(master=master, **kw)
-        self.title("Time-Series Analysis Module")
+        self.title("Time Series Analysis Module")
         fit_geometry(self, 1400, 900, resizable=True)
         self.after(200, lambda: self.iconphoto(
             False, tk.PhotoImage(file=resource_path("launch_logo.png"))))
