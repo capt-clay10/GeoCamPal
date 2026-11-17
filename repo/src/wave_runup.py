@@ -1,5 +1,5 @@
 """
-wave_runup.py  —  GeoCamPal Wave Run-Up Calculator
+wave_runup.py  —  GeoCamPal Wave Run-up Calculator
 ===================================================
 
 Purpose
@@ -9,10 +9,10 @@ annotation marking the swash edge, then analyses the signal in the
 frequency domain and optionally compares it against the Stockdon et al.
 (2006) empirical 2 % exceedance run-up formula.
 
-The tool accepts timestack images produced by the Raw Timestack Tool
-(raw_timestacker.py).  Pixel resolution and time interval are read from
-PNG metadata embedded by that tool; they can be overridden manually
-when processing images from other sources.
+The tool accepts timestack images produced by the Burst Images
+Timestacker (raw_timestacker.py).  Pixel resolution and time interval
+are read from PNG metadata embedded by that tool; they can be
+overridden manually when processing images from other sources.
 
 Annotation formats
 ------------------
@@ -41,8 +41,16 @@ units using the pixel resolution (m/px) and time interval (s/row).
 Time origin is at the bottom row (t = 0); the top row corresponds to
 the end of the recording.
 
+Distance is measured along the timestack transect from its seaward
+end, so it grows towards land for every annotation format: from the
+left edge of the image by default, and from the right edge when "Land
+on left" is checked.  It is a cross-shore distance only when the
+transect was drawn shore-normal.
+
 An optional beach slope (degrees) converts horizontal swash excursion
-to a vertical run-up signal:  z = d × tan(slope).
+to a vertical run-up signal:  z = d × tan(slope).  The slope has to be
+the slope along the transect; for a transect that is not shore-normal,
+tan(slope) = tan(beach slope) × cos(angle off shore-normal).
 
 Spectral analysis
 -----------------
@@ -71,6 +79,16 @@ three user-supplied parameters:
 
     where L₀ = g T₀² / 2π.
 
+The Stockdon R₂% is a vertical height.  The observed R₂% (98th
+percentile of the detrended swash) is vertical only when a beach slope
+is entered; without one it is a horizontal distance.  The exported
+files state which of the two it is, and for a horizontal value no
+difference from the Stockdon R₂% is computed.
+
+The observed swash height S is reported as well: 4 × the standard
+deviation of the detrended swash, which is how Stockdon et al. (2006)
+define S.  It carries the same vertical / horizontal label.
+
 Batch mode
 ----------
 Batch process pairs every raw timestack in one folder with the
@@ -85,7 +103,8 @@ Outputs  (saved to the user-selected output folder)
                                    horizontal_distance_detrended,
                                    vertical_distance,
                                    vertical_distance_detrended
-    stockdon_comparison.txt     — Stockdon R₂% vs observed R₂% per image
+    stockdon_comparison.txt     — Stockdon R₂% vs observed R₂% per image,
+                                   with the observed swash height S
                                    (batch mode only)
 
 Dependencies
@@ -112,6 +131,7 @@ import datetime
 import csv
 import re
 import json
+import textwrap
 from collections import defaultdict
 from pathlib import Path
 
@@ -130,13 +150,29 @@ from utils import (
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("green")
 
-# %% Runup Extraction Functions - Supporting Multiple Formats
+# %% Run-up Extraction Functions - Supporting Multiple Formats
 
 # =============================================================================
 
+def distance_along_transect(cols, resolution_x_m, image_width, flip_horizontal=False):
+    """
+    Distance (m) along the timestack transect for pixel column(s) *cols*.
+
+    Zero is at the seaward end of the timestack and the distance grows
+    towards land, so a higher run-up is always a larger number.  The
+    seaward end is the left edge of the image, or the right edge when the
+    land is on the left (*flip_horizontal*).  The zero point depends only
+    on the image width, so it is the same for every annotation of a
+    timestack and for all three annotation formats.
+    """
+    if flip_horizontal:
+        return (image_width - 1 - cols) * resolution_x_m
+    return cols * resolution_x_m
+
+
 def extract_runup_from_mask(mask_path, resolution_x_m, time_interval_sec, flip_horizontal=False):
     """
-    Extract runup from PNG mask image (legacy method - one point per row).
+    Extract run-up from PNG mask image (legacy method - one point per row).
     
     Returns:
         time_array (s), distance_array (m), pixel_coords [(row, col), ...]
@@ -168,7 +204,11 @@ def extract_runup_from_mask(mask_path, resolution_x_m, time_interval_sec, flip_h
 
         # Bottom-origin time: bottom row (H-1) → t=0 ; top row (0) → t=max
         time_val = (H - 1 - r) * time_interval_sec
-        distance_val = runup_col * resolution_x_m
+        # With land on the left the distance is counted from the right
+        # edge.  Until v1.0.3 it was counted from the left edge in both
+        # cases, which made it grow seaward and put the observed R₂% on
+        # the backwash side.
+        distance_val = distance_along_transect(runup_col, resolution_x_m, W, flip_horizontal)
 
         time_array.append(time_val)
         distance_array.append(distance_val)
@@ -177,15 +217,21 @@ def extract_runup_from_mask(mask_path, resolution_x_m, time_interval_sec, flip_h
     return np.array(time_array), np.array(distance_array), pixel_coords
 
 
-def extract_runup_from_geojson(geojson_path, resolution_x_m, time_interval_sec, 
-                                image_height, flip_horizontal=False):
+def extract_runup_from_geojson(geojson_path, resolution_x_m, time_interval_sec,
+                                image_height, flip_horizontal=False, image_width=None):
     """
-    Extract EXACT runup coordinates from GeoJSON LineString.
+    Extract EXACT run-up coordinates from GeoJSON LineString.
     Preserves the full hand-picked shape without losing any detail.
-    
+
+    *image_width* is the width of the timestack in pixels.  It is needed
+    when the land is on the left, where distance is counted from the
+    right edge of the image.
+
     Returns:
         time_array (s), distance_array (m), pixel_coords [(row, col), ...]
     """
+    if flip_horizontal and image_width is None:
+        raise ValueError("The timestack width is needed when the land is on the left.")
     with open(geojson_path, 'r') as f:
         data = json.load(f)
     
@@ -210,24 +256,28 @@ def extract_runup_from_geojson(geojson_path, resolution_x_m, time_interval_sec,
     # Time: bottom row (H-1) = t=0, top row (0) = t=max
     time_array = (image_height - 1 - rows) * time_interval_sec
     
-    # Distance: column * resolution, optionally flipped
-    if flip_horizontal:
-        distance_array = (cols.max() - cols) * resolution_x_m
-    else:
-        distance_array = cols * resolution_x_m
-    
+    # Distance from the seaward end of the timestack.  Until v1.0.3 the
+    # flipped case used the annotation's own largest column as zero, so
+    # the zero point moved from one annotation to the next.
+    distance_array = distance_along_transect(cols, resolution_x_m, image_width, flip_horizontal)
+
     # Pixel coordinates as (row, col) for compatibility
     pixel_coords = [(int(r), int(c)) for r, c in zip(rows, cols)]
     
     return time_array, distance_array, pixel_coords
 
 
-def extract_runup_from_coco_json(json_path, resolution_x_m, time_interval_sec, 
-                                  flip_horizontal=False):
+def extract_runup_from_coco_json(json_path, resolution_x_m, time_interval_sec,
+                                  flip_horizontal=False, timestack_width=None):
     """
-    Extract EXACT runup coordinates from COCO annotation JSON.
+    Extract EXACT run-up coordinates from COCO annotation JSON.
     The segmentation polygon contains the exact hand-picked coordinates.
-    
+
+    *timestack_width* is the width of the timestack in pixels.  With the
+    land on the left, distance is counted from the right edge of the
+    image; the width stored in the JSON is used only when the caller does
+    not pass the real one.
+
     Returns:
         time_array (s), distance_array (m), pixel_coords [(row, col), ...], image_height
     """
@@ -258,14 +308,15 @@ def extract_runup_from_coco_json(json_path, resolution_x_m, time_interval_sec,
     
     # Convert to physical units
     time_array = (image_height - 1 - rows) * time_interval_sec
-    
-    if flip_horizontal:
-        distance_array = (cols.max() - cols) * resolution_x_m
-    else:
-        distance_array = cols * resolution_x_m
-    
+
+    # Same zero point as the mask and GeoJSON readers (see
+    # distance_along_transect); until v1.0.3 the flipped case used the
+    # annotation's own largest column.
+    distance_array = distance_along_transect(
+        cols, resolution_x_m, timestack_width or image_width, flip_horizontal)
+
     pixel_coords = [(int(r), int(c)) for r, c in zip(rows, cols)]
-    
+
     return time_array, distance_array, pixel_coords, image_height, image_width
 
 
@@ -348,10 +399,44 @@ def compute_stockdon_r2(beta, H0, T0):
             "beta": beta, "H0": H0, "T0": T0, "regime": regime}
 
 
+# The Stockdon R₂% is a vertical height.  The observed R₂% is vertical only
+# when a Beach Slope was entered; otherwise it is a horizontal distance and
+# the two cannot be compared.  This text is shown wherever that happens.
+HORIZONTAL_R2_NOTE = (
+    "No Beach Slope was entered, so the observed R₂% is a horizontal swash "
+    "excursion. The Stockdon R₂% is a vertical height, so the two values are "
+    "not comparable. Enter a Beach Slope to convert the observed value to a "
+    "vertical run-up."
+)
+
+
+def observed_r2_kind(vertical):
+    """Label for the observed R₂%: 'vertical' or 'horizontal'."""
+    return "vertical" if vertical else "horizontal"
+
+
+def observed_swash_height(detrended):
+    """
+    Swash height S of a detrended swash series: 4 × its standard deviation.
+
+    Stockdon et al. (2006) define S this way, so it is the observed
+    counterpart of the S their formula gives.  It has the unit and the
+    direction of the series passed in (vertical or horizontal).
+    """
+    return 4.0 * float(np.std(detrended))
+
+
+def _write_horizontal_r2_note(f):
+    """Append HORIZONTAL_R2_NOTE, wrapped and indented, to an open text file."""
+    f.write("\nNote\n")
+    f.write(textwrap.fill(HORIZONTAL_R2_NOTE, width=66,
+                          initial_indent="  ", subsequent_indent="  ") + "\n")
+
+
 def create_mask_from_coordinates(pixel_coords, image_width, image_height):
     """
     Create a binary mask image from pixel coordinates for visualization.
-    Draws the runup contour as a thick line, not a filled polygon.
+    Draws the run-up contour as a thick line, not a filled polygon.
     """
     # Create blank mask
     mask = Image.new('L', (image_width, image_height), 0)
@@ -370,7 +455,7 @@ def create_mask_from_coordinates(pixel_coords, image_width, image_height):
 class WaveRunUpCalculator(ctk.CTkToplevel):
     def __init__(self, master=None):
         super().__init__(master=master)
-        self.title("Wave Run-Up Calculation")
+        self.title("Wave Run-up Module")
         #self.geometry("1200x800")
         fit_geometry(self, 1400, 870, resizable=True)
         try:
@@ -408,7 +493,7 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         self.top_frame = ctk.CTkFrame(self, fg_color="black")
         self.top_frame.pack(side="top", fill="both", expand=True)
         self.top_frame.columnconfigure(0, weight=1)   # image – narrower
-        self.top_frame.columnconfigure(1, weight=2)   # runup contour
+        self.top_frame.columnconfigure(1, weight=2)   # run-up contour
         self.top_frame.columnconfigure(2, weight=2)   # stats
         self.top_frame.rowconfigure(0, weight=1)
 
@@ -416,7 +501,7 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         self.image_panel = ctk.CTkFrame(self.top_frame)
         self.image_panel.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
 
-        # Runup contour panel
+        # Run-up contour panel
         self.plot_panel = ctk.CTkFrame(self.top_frame)
         self.plot_panel.grid(row=0, column=1, sticky="nsew", padx=5, pady=5)
         self.fig, self.ax = plt.subplots(figsize=(5, 3))
@@ -436,16 +521,18 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         self.console_text = tk.Text(self.console_frame, wrap="word", height=6)
         self.console_text.pack(fill="both", expand=True, padx=5, pady=5)
         self._console_help = (
-            "Wave Run-Up Tool ready.\n"
+            "Wave Run-up Tool ready.\n"
             "────────────────────────────────────────────\n"
             "Workflow:\n"
-            "  1. Load Raw Time-Stack Image (PNG with embedded\n"
+            "  1. Load Raw Timestack Image (PNG with embedded\n"
             "     pixel_resolution and time_interval metadata).\n"
             "  2. Load Annotation — PNG mask, GeoJSON, or COCO JSON\n"
             "     exported from the Feature Identifier.\n"
             "  3. Set options:\n"
             "     • Land on left    — tick if the shoreline is on the\n"
             "                         left side of the timestack.\n"
+            "                         Distance is counted from the\n"
+            "                         seaward end and grows towards land.\n"
             "     • Manual Resolution — override the embedded pixel\n"
             "                           size (metres per pixel).\n"
             "     • Manual time interval — seconds per timestack row.\n"
@@ -455,12 +542,15 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
             "                           stacks). Otherwise 1 s is assumed.\n"
             "     • IG threshold    — infragravity cutoff frequency\n"
             "                         in Hz (default 0.05 Hz).\n"
-            "     • Beach Slope (°) — optional average beach slope.\n"
-            "                         When set, vertical runup is\n"
+            "     • Beach Slope (°) — optional slope along the transect.\n"
+            "                         When set, vertical run-up is\n"
             "                         computed as d × tan(slope).\n"
-            "  4. Click 'Calculate Runup' → extracts the swash\n"
+            "                         If the transect is not shore-\n"
+            "                         normal: tan(slope) = tan(beach\n"
+            "                         slope) × cos(angle off shore-normal).\n"
+            "  4. Click 'Calculate Run-up' → extracts the swash\n"
             "     excursion signal and computes Welch PSD.\n"
-            "  5. Export Runup → saves a (time, distance) CSV.\n"
+            "  5. Export Run-up → saves a (time, distance) CSV.\n"
             "\n"
             "Stockdon (2006) R₂% comparison  (optional):\n"
             "  Tick the checkbox and fill in:\n"
@@ -473,6 +563,12 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
             "     T₀   — peak wave period (s).\n"
             "  The tool also computes L₀ = g·T₀²/2π internally.\n"
             "  Leave any field blank to skip the comparison.\n"
+            "  The Stockdon R₂% is a vertical height: set Beach\n"
+            "  Slope (°) above so the observed R₂% is vertical too.\n"
+            "  Without it the observed value is a horizontal\n"
+            "  distance and no difference is computed.\n"
+            "  The observed swash height S is reported as well:\n"
+            "  4 × the standard deviation of the detrended swash.\n"
             "────────────────────────────────────────────\n"
         )
         self._console_redir = setup_console(
@@ -487,12 +583,12 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         self.controls_panel = ctk.CTkFrame(self.bottom_panel)
         self.controls_panel.pack(side="top", fill="x", padx=5, pady=2)
         
-        self.btn_load_raw = ctk.CTkButton(self.controls_panel, text="Load Raw Time-Stack Image", command=self.load_raw_image)
+        self.btn_load_raw = ctk.CTkButton(self.controls_panel, text="Load Raw Timestack Image", command=self.load_raw_image)
         self.btn_load_raw.grid(row=0, column=0, padx=5, pady=5)
         
         self.btn_load_mask = ctk.CTkButton(
             self.controls_panel, 
-            text="Load Runup (Mask/GeoJSON/COCO)", 
+            text="Load Run-up (Mask/GeoJSON/COCO)",
             command=self.load_annotation,
             width=220
         )
@@ -523,7 +619,7 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         self.manual_res_label.grid(row=0, column=3, padx=5, pady=5)
 
         # Time per row (seconds). Read from the PNG's time_interval metadata,
-        # which the Burst Images Time-stacker writes; the manual override is
+        # which the Burst Images Timestacker writes; the manual override is
         # for stacks that lack it and were not captured at 1 Hz.
         self.time_int_label = ctk.CTkLabel(self.resolution_panel, text="Time per row: N/A")
         self.time_int_label.grid(row=1, column=0, padx=5, pady=5, sticky="w")
@@ -555,7 +651,7 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
             variable=self.stockdon_enabled,
             command=self._toggle_stockdon,
         ).grid(row=0, column=0, padx=5, pady=5, sticky="w")
-        ctk.CTkLabel(self.stockdon_panel, text="Compare to Stockdon Runup",
+        ctk.CTkLabel(self.stockdon_panel, text="Compare to Stockdon Run-up",
                      text_color="gray").grid(
             row=0, column=1, padx=(0, 10), pady=5, sticky="w")
         ctk.CTkLabel(self.stockdon_panel, text="Slope (°):").grid(
@@ -575,7 +671,7 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         self.stockdon_T0_entry.grid(row=0, column=7, padx=3, pady=5)
 
         self.btn_calculate = ctk.CTkButton(
-            self.stockdon_panel, text="Calculate Runup",
+            self.stockdon_panel, text="Calculate Run-up",
             command=self.calculate_runup,
             fg_color="#0F52BA", hover_color="#2A6BD1")
         self.btn_calculate.grid(row=0, column=8, padx=(20, 5), pady=5)
@@ -587,7 +683,7 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         self.btn_select_out_folder.grid(row=0, column=0, padx=5, pady=5)
         self.out_folder_label = ctk.CTkLabel(self.export_panel, text="No folder selected")
         self.out_folder_label.grid(row=0, column=1, padx=5, pady=5, sticky="w")
-        self.btn_export_runup = ctk.CTkButton(self.export_panel, text="Export Runup", command=self.export_runup, fg_color="#8C7738", hover_color="#A18A45")
+        self.btn_export_runup = ctk.CTkButton(self.export_panel, text="Export Run-up", command=self.export_runup, fg_color="#8C7738", hover_color="#A18A45")
         self.btn_export_runup.grid(row=0, column=2, padx=5, pady=5)
         self.btn_save_settings = ctk.CTkButton(self.export_panel, text="Save Settings",fg_color="#4F5D75",hover_color="#61708A", command=self.save_settings)
         self.btn_save_settings.grid(row=0, column=3, padx=5, pady=5)
@@ -783,9 +879,9 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         
         # Clear plots
         self.ax.clear()
-        self.ax.set_xlabel("Cross-shore distance (m)")
+        self.ax.set_xlabel("Distance along transect (m)")
         self.ax.set_ylabel("Time (s)")
-        self.ax.set_title("Runup Contour")
+        self.ax.set_title("Run-up Contour")
         self.ax.grid(True)
         self.canvas_plot.draw()
         
@@ -829,7 +925,7 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
 
     def load_raw_image(self, file_path=None):
         if not file_path:
-            file_path = filedialog.askopenfilename(parent=self, title="Select Raw Time-Stack Image", filetypes=[("PNG Images", "*.png")])
+            file_path = filedialog.askopenfilename(parent=self, title="Select Raw Timestack Image", filetypes=[("PNG Images", "*.png")])
         if file_path:
             self.raw_image_path = file_path
             self.raw_image = Image.open(file_path)
@@ -841,13 +937,13 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
 
     def load_annotation(self, file_path=None):
         """
-        Load runup annotation from mask PNG, GeoJSON, or COCO JSON file.
+        Load run-up annotation from mask PNG, GeoJSON, or COCO JSON file.
         Automatically detects format based on file extension.
         """
         if not file_path:
             file_path = filedialog.askopenfilename(
                 parent=self,
-                title="Select Runup Annotation", 
+                title="Select Run-up Annotation",
             filetypes=[
                 ("All Supported", "*.png *.geojson *.json"),
                 ("PNG Mask", "*.png"),
@@ -1019,7 +1115,7 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
 
         Priority: the 'Manual time interval' entry when ticked, then the
         PNG's ``time_interval`` metadata written by the Burst Images
-        Time-stacker, then 1 s with a console warning.  With ``announce``
+        Timestacker, then 1 s with a console warning.  With ``announce``
         the resolution-panel label is updated to say which source was used.
         """
         if self.manual_dt_var.get():
@@ -1175,30 +1271,30 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         # Get image height
         image_height = self.raw_image.height
 
-        # Extract runup based on annotation format
+        # Extract run-up based on annotation format
         if self.annotation_format == 'geojson' and self.annotation_coords is not None:
-            print("Extracting runup from GeoJSON (exact coordinates)...")
+            print("Extracting run-up from GeoJSON (exact coordinates)...")
             t_arr, d_arr, pixel_coords = extract_runup_from_geojson(
                 self.mask_image_path, resolution_x_m, time_interval_sec,
-                image_height, flip_horizontal
+                image_height, flip_horizontal, image_width=self.raw_image.width
             )
         elif self.annotation_format == 'coco_json' and self.annotation_coords is not None:
-            print("Extracting runup from COCO JSON (exact coordinates)...")
+            print("Extracting run-up from COCO JSON (exact coordinates)...")
             t_arr, d_arr, pixel_coords, _, _ = extract_runup_from_coco_json(
                 self.mask_image_path, resolution_x_m, time_interval_sec,
-                flip_horizontal
+                flip_horizontal, timestack_width=self.raw_image.width
             )
         else:
-            print("Extracting runup from mask (1 point per row)...")
+            print("Extracting run-up from mask (1 point per row)...")
             t_arr, d_arr, pixel_coords = extract_runup_from_mask(
                 self.mask_image_path, resolution_x_m, time_interval_sec, flip_horizontal
             )
         
         if t_arr.size == 0:
-            messagebox.showerror("Error", "Annotation contains no runup data.", parent=self)
+            messagebox.showerror("Error", "Annotation contains no run-up data.", parent=self)
             return
 
-        print(f"Extracted {len(t_arr)} runup points")
+        print(f"Extracted {len(t_arr)} run-up points")
 
         # Sort by time ascending
         sort_idx = np.argsort(t_arr)
@@ -1208,22 +1304,22 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         # Store for export
         self.runup_time, self.runup_distance = t_sorted, d_sorted
 
-        # Compute vertical runup if beach slope is given
+        # Compute vertical run-up if beach slope is given
         beach_slope_rad = self._get_beach_slope_rad()
         if beach_slope_rad is not None:
             self.runup_vertical = d_sorted * np.tan(beach_slope_rad)
             slope_deg = np.degrees(beach_slope_rad)
-            print(f"Beach slope {slope_deg:.2f}° → vertical runup computed "
+            print(f"Beach slope {slope_deg:.2f}° → vertical run-up computed "
                   f"(tan {slope_deg:.2f}° = {np.tan(beach_slope_rad):.4f})")
         else:
             self.runup_vertical = None
 
-        # Plot the extracted runup contour
+        # Plot the extracted run-up contour
         self.ax.clear()
-        self.ax.plot(d_sorted, t_sorted, 'bo-', markersize=1, linewidth=0.5, label="Runup Contour")
-        self.ax.set_xlabel("Cross-shore distance (m)")
+        self.ax.plot(d_sorted, t_sorted, 'bo-', markersize=1, linewidth=0.5, label="Run-up Contour")
+        self.ax.set_xlabel("Distance along transect (m)")
         self.ax.set_ylabel("Time (s)")
-        self.ax.set_title(f"Extracted Runup ({len(t_sorted)} pts)", fontsize=9)
+        self.ax.set_title(f"Extracted Run-up ({len(t_sorted)} pts)", fontsize=9)
         self.ax.grid(True)
         self.ax.legend(fontsize="x-small", loc="upper right")
         self.fig.tight_layout()
@@ -1297,6 +1393,9 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
                   f"Swash S = {sk['S']:.3f} m")
             print(f"   Stockdon R₂%  = {sk['R2']:.3f} m")
             print(f"   Observed R₂%  = {obs_r2:.3f} m{unit_note}")
+            print(f"   Observed S    = {observed_swash_height(detr):.3f} m{unit_note}")
+            if self.runup_vertical is None:
+                print(f"   [Warning] {HORIZONTAL_R2_NOTE}")
 
         self.ax_stats_swash.set_title(signal_label, fontsize=9)
         self.ax_stats_swash.set_xlabel('Time (s)', fontsize=8)
@@ -1314,7 +1413,7 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
 
     def export_runup(self):
         if self.runup_time is None or self.runup_distance is None:
-            messagebox.showerror("Error", "No runup data to export.", parent=self)
+            messagebox.showerror("Error", "No run-up data to export.", parent=self)
             return
         if not self.output_folder:
             messagebox.showerror("Error", "Select an output folder.", parent=self)
@@ -1352,8 +1451,12 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
                 else:
                     detr = self.runup_distance - np.mean(self.runup_distance)
                 obs_r2 = np.percentile(detr, 98)
+                kind = observed_r2_kind(self.runup_vertical is not None)
                 csvfile.write(f"# Stockdon_R2%,{sk['R2']:.4f}\n")
                 csvfile.write(f"# observed_R2%,{obs_r2:.4f}\n")
+                csvfile.write(f"# observed_R2%_type,{kind}\n")
+                csvfile.write(f"# observed_S,{observed_swash_height(detr):.4f}\n")
+                csvfile.write(f"# observed_S_type,{kind}\n")
                 csvfile.write(f"# regime,{sk.get('regime', 'intermediate')}\n")
                 csvfile.write(f"# slope_deg,{sk.get('slope_deg', '')}\n")
                 csvfile.write(f"# beta,{sk['beta']:.4f}\n")
@@ -1361,7 +1464,7 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
                 csvfile.write(f"# T0_s,{sk['T0']}\n")
                 csvfile.write(f"# L0_m,{sk['L0']:.2f}\n")
 
-        print(f"Runup CSV saved: {out_name}")
+        print(f"Run-up CSV saved: {out_name}")
 
         # ── Export PSD CSV ────────────────────────────────────────
         if self.psd_freq is not None and self.psd_power is not None:
@@ -1377,7 +1480,7 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         # ── Export clean plot PNG (legends below each subplot) ───
         self._export_clean_plot(out_name)
 
-        messagebox.showinfo("Export Runup", f"Exported to:\n{self.output_folder}", parent=self)
+        messagebox.showinfo("Export Run-up", f"Exported to:\n{self.output_folder}", parent=self)
 
         # Write Stockdon comparison text file if available
         sk = self._stockdon_result
@@ -1388,9 +1491,11 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
                 detr = self.runup_distance - np.mean(self.runup_distance)
             obs_r2 = np.percentile(detr, 98)
             diff = obs_r2 - sk["R2"]
+            vertical = self.runup_vertical is not None
+            kind = observed_r2_kind(vertical)
             txt_name = os.path.splitext(out_name)[0] + "_stockdon_comparison.txt"
             txt_path = os.path.join(self.output_folder, txt_name)
-            with open(txt_path, "w") as f:
+            with open(txt_path, "w", encoding="utf-8") as f:
                 f.write("Stockdon et al. (2006) R₂% Comparison\n")
                 f.write("=" * 50 + "\n\n")
                 regime_str = sk.get("regime", "intermediate")
@@ -1410,9 +1515,17 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
                 f.write("Results\n")
                 f.write(f"  Stockdon R₂%     : {sk['R2']:.4f} m\n")
                 f.write(f"  Observed R₂%     : {obs_r2:.4f} m  "
-                        f"(98th percentile of detrended swash)\n")
-                f.write(f"  Difference       : {diff:+.4f} m  "
-                        f"(observed − predicted)\n")
+                        f"({kind}; 98th percentile of detrended swash)\n")
+                if vertical:
+                    f.write(f"  Difference       : {diff:+.4f} m  "
+                            f"(observed − predicted)\n")
+                else:
+                    f.write("  Difference       : not computed  "
+                            "(horizontal distance vs vertical height)\n")
+                f.write(f"  Observed S       : {observed_swash_height(detr):.4f} m  "
+                        f"({kind}; 4 × standard deviation of detrended swash)\n")
+                if not vertical:
+                    _write_horizontal_r2_note(f)
             print(f"Stockdon comparison saved to: {txt_name}")
 
     def _export_clean_plot(self, csv_name):
@@ -1426,11 +1539,11 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         t = self.runup_time
         d = self.runup_distance
 
-        # 1) Runup contour
-        ax_contour.plot(d, t, 'bo-', markersize=1, linewidth=0.5, label="Runup Contour")
-        ax_contour.set_xlabel("Cross-shore distance (m)")
+        # 1) Run-up contour
+        ax_contour.plot(d, t, 'bo-', markersize=1, linewidth=0.5, label="Run-up Contour")
+        ax_contour.set_xlabel("Distance along transect (m)")
         ax_contour.set_ylabel("Time (s)")
-        ax_contour.set_title(f"Extracted Runup ({len(t)} pts)")
+        ax_contour.set_title(f"Extracted Run-up ({len(t)} pts)")
         ax_contour.grid(True)
         ax_contour.legend(fontsize="small", loc="upper center",
                           bbox_to_anchor=(0.5, -0.25), ncol=1)
@@ -1598,7 +1711,7 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
 
         # Pre-compute Stockdon R₂% (same wave conditions for all images)
         batch_stockdon = self._try_stockdon()
-        stockdon_rows = []  # collect (filename, observed_R2%) per image
+        stockdon_rows = []  # collect (filename, observed_R2%, observed_S) per image
 
         # 5) Loop through each pair
         for raw_name, annotation_name in valid_pairs:
@@ -1636,12 +1749,12 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
             if ann_format == 'geojson':
                 t_arr, d_arr, _ = extract_runup_from_geojson(
                     annotation_path, resolution_x_m, time_interval_sec,
-                    image_height, flip_horizontal
+                    image_height, flip_horizontal, image_width=raw_img.width
                 )
             elif ann_format == 'coco_json':
                 t_arr, d_arr, _, _, _ = extract_runup_from_coco_json(
                     annotation_path, resolution_x_m, time_interval_sec,
-                    flip_horizontal
+                    flip_horizontal, timestack_width=raw_img.width
                 )
             else:
                 t_arr, d_arr, _ = extract_runup_from_mask(
@@ -1650,8 +1763,8 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
             
             if t_arr.size == 0:
                 dropped.append((annotation_name,
-                                f"no runup points extracted ({ann_format})"))
-                print(f"  [SKIP] {annotation_name}: no runup points extracted "
+                                f"no run-up points extracted ({ann_format})"))
+                print(f"  [SKIP] {annotation_name}: no run-up points extracted "
                       f"({ann_format})")
                 continue
 
@@ -1700,15 +1813,20 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
                     else:
                         detr = d_sorted - np.mean(d_sorted)
                     obs_r2 = np.percentile(detr, 98)
+                    kind = observed_r2_kind(v_sorted is not None)
+                    obs_s = observed_swash_height(detr)
                     csvfile.write(f"# Stockdon_R2%,{batch_stockdon['R2']:.4f}\n")
                     csvfile.write(f"# observed_R2%,{obs_r2:.4f}\n")
+                    csvfile.write(f"# observed_R2%_type,{kind}\n")
+                    csvfile.write(f"# observed_S,{obs_s:.4f}\n")
+                    csvfile.write(f"# observed_S_type,{kind}\n")
                     csvfile.write(f"# regime,{batch_stockdon.get('regime', 'intermediate')}\n")
                     csvfile.write(f"# slope_deg,{batch_stockdon.get('slope_deg', '')}\n")
                     csvfile.write(f"# beta,{batch_stockdon['beta']:.4f}\n")
                     csvfile.write(f"# H0_m,{batch_stockdon['H0']}\n")
                     csvfile.write(f"# T0_s,{batch_stockdon['T0']}\n")
                     csvfile.write(f"# L0_m,{batch_stockdon['L0']:.2f}\n")
-                    stockdon_rows.append((raw_name, obs_r2))
+                    stockdon_rows.append((raw_name, obs_r2, obs_s))
 
             all_runup_data.append((d_sorted, t_sorted))
             processed += 1
@@ -1716,13 +1834,13 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
             self._update_batch_progress(processed, total_pairs)
             self.update()
 
-        # 6) Plot aggregated runup contours
+        # 6) Plot aggregated run-up contours
         self.ax.clear()
         for d_arr, t_arr in all_runup_data:
             self.ax.plot(d_arr, t_arr, marker='o', markersize=1, linestyle='-')
         self.ax.set_xlabel("Distance (m)")
         self.ax.set_ylabel("Time (s)")
-        self.ax.set_title("Aggregated Runup Contours")
+        self.ax.set_title("Aggregated Run-up Contours")
         self.ax.grid(True)
         self.canvas_plot.draw()
 
@@ -1786,13 +1904,18 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
                   f"H₀={batch_stockdon['H0']:.2f} m  "
                   f"T₀={batch_stockdon['T0']:.1f} s  →  "
                   f"R₂% = {batch_stockdon['R2']:.3f} m")
+            if batch_slope_rad is None:
+                print(f"   [Warning] {HORIZONTAL_R2_NOTE}")
 
         # Write aggregated Stockdon comparison file
         if batch_stockdon is not None and stockdon_rows:
             obs_vals = np.array([r[1] for r in stockdon_rows])
+            obs_s_vals = np.array([r[2] for r in stockdon_rows])
+            vertical = batch_slope_rad is not None
+            kind = observed_r2_kind(vertical)
             txt_path = os.path.join(self.output_folder,
                                     "stockdon_comparison.txt")
-            with open(txt_path, "w") as f:
+            with open(txt_path, "w", encoding="utf-8") as f:
                 f.write("Stockdon et al. (2006) R₂% Comparison — Batch\n")
                 f.write("=" * 60 + "\n\n")
                 regime_str = batch_stockdon.get("regime", "intermediate")
@@ -1817,14 +1940,14 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
                         f"{batch_stockdon['S']:.4f} m\n")
                 f.write(f"  Stockdon R₂%     : "
                         f"{batch_stockdon['R2']:.4f} m\n\n")
-                f.write("Per-image observed R₂%\n")
-                f.write("-" * 60 + "\n")
-                f.write(f"{'Image':<45} {'Obs R₂% (m)':>12}\n")
-                f.write("-" * 60 + "\n")
-                for name, obs in stockdon_rows:
-                    f.write(f"{name:<45} {obs:>12.4f}\n")
-                f.write("-" * 60 + "\n\n")
-                f.write("Summary statistics (observed R₂%)\n")
+                f.write(f"Per-image observed R₂% and swash height S ({kind})\n")
+                f.write("-" * 72 + "\n")
+                f.write(f"{'Image':<45} {'Obs R₂% (m)':>12} {'Obs S (m)':>12}\n")
+                f.write("-" * 72 + "\n")
+                for name, obs, obs_s in stockdon_rows:
+                    f.write(f"{name:<45} {obs:>12.4f} {obs_s:>12.4f}\n")
+                f.write("-" * 72 + "\n\n")
+                f.write(f"Summary statistics (observed R₂%, {kind})\n")
                 f.write(f"  N images : {len(obs_vals)}\n")
                 f.write(f"  Mean     : {np.mean(obs_vals):.4f} m\n")
                 f.write(f"  Std      : {np.std(obs_vals):.4f} m\n")
@@ -1836,10 +1959,19 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
                 f.write(f"  Stockdon R₂%          : "
                         f"{batch_stockdon['R2']:.4f} m\n")
                 f.write(f"  Mean observed R₂%     : "
-                        f"{np.mean(obs_vals):.4f} m\n")
-                f.write(f"  Mean difference       : "
-                        f"{mean_diff:+.4f} m  "
-                        f"(observed − predicted)\n")
+                        f"{np.mean(obs_vals):.4f} m  ({kind})\n")
+                if vertical:
+                    f.write(f"  Mean difference       : "
+                            f"{mean_diff:+.4f} m  "
+                            f"(observed − predicted)\n")
+                else:
+                    f.write("  Mean difference       : not computed  "
+                            "(horizontal distance vs vertical height)\n")
+                f.write(f"  Mean observed S       : "
+                        f"{np.mean(obs_s_vals):.4f} m  ({kind}; "
+                        f"4 × standard deviation of detrended swash)\n")
+                if not vertical:
+                    _write_horizontal_r2_note(f)
             print(f"Stockdon comparison saved to: stockdon_comparison.txt")
 
         self.fig_stats.tight_layout()
@@ -1853,7 +1985,7 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
                 report_path = os.path.join(self.output_folder,
                                            "wave_runup_skipped.txt")
                 with open(report_path, "w", encoding="utf-8") as fh:
-                    fh.write("Wave runup batch - files not used\n")
+                    fh.write("Wave run-up batch - files not used\n")
                     fh.write(f"Run: {datetime.datetime.now():%Y-%m-%d %H:%M:%S}\n")
                     fh.write(f"Raw folder       : {self.batch_raw_folder}\n")
                     fh.write(f"Annotation folder: {self.batch_mask_folder}\n")
