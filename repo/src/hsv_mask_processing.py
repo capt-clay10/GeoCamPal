@@ -128,6 +128,7 @@ from rasterio.errors import NotGeoreferencedWarning
 from difflib import SequenceMatcher
 
 from utils import restore_console, imread_safe
+from feature_model import feature_label
 
 warnings.filterwarnings("ignore", category=NotGeoreferencedWarning)
 
@@ -321,25 +322,93 @@ class HSVMaskProcessingMixin:
 
 
     def update_mask_display(self, event=None):
-        if not self.mask_label.winfo_exists():
+        """Redraw the middle panel for its current size (bound to <Configure>)."""
+        self._refresh_center_panel()
+
+    def _aoi_in_effect(self):
+        """True when the AOI box is ticked and an AOI has been applied."""
+        return (self._aoi_filter_active()
+                and getattr(self, 'aoi_mask', None) is not None)
+
+    def _refresh_center_panel(self, event=None):
+        """
+        Draw what the middle panel has to show right now.
+
+        The AOI preview when the AOI was applied last, or when an AOI is in
+        effect and no mask has been calculated yet; otherwise the mask;
+        otherwise nothing.  Every place that changes the AOI, the mask or
+        the image calls this, so the panel cannot keep an outdated picture.
+        The shape editor owns the panel while it is open.
+        """
+        if self.mode == "batch" or getattr(self, "_edit_session_open", False):
             return
-        if self.current_mask is not None:
-            panel_w = self.top_center_frame.winfo_width()
-            panel_h = self.top_center_frame.winfo_height()
-            if panel_w > 0 and panel_h > 0:
-                h0, w0 = self.current_mask.shape[:2]
-                fit_w, fit_h = self._fit_size(w0, h0, panel_w, panel_h)
-                mask_resized = cv2.resize(self.current_mask, (fit_w, fit_h),
-                                          interpolation=cv2.INTER_AREA)
-                mask_rgb = cv2.cvtColor(mask_resized, cv2.COLOR_GRAY2RGB)
-                pil_img = Image.fromarray(mask_rgb)
-                ctk_img = ctk.CTkImage(
-                    light_image=pil_img, dark_image=pil_img, size=(fit_w, fit_h))
-                self.mask_label.configure(image=ctk_img)
-                self.mask_label.image = ctk_img
+        lbl = getattr(self, "mask_label", None)
+        if lbl is None or not lbl.winfo_exists() or not hasattr(self, "_blank_img"):
+            return
+        # (getattr: the panel's <Configure> can arrive while the window is
+        # still being built)
+        full_image = getattr(self, "full_image", None)
+        current_mask = getattr(self, "current_mask", None)
+        show_aoi = (self._aoi_in_effect() and full_image is not None
+                    and (getattr(self, "_center_view", "mask") == "aoi"
+                         or current_mask is None))
+        if show_aoi and hasattr(self, "_display_aoi_preview"):
+            self._display_aoi_preview()
+            self._center_shows = "aoi"
+        elif current_mask is not None:
+            self._draw_mask_in_center()
+            self._center_shows = "mask"
+        else:
+            self._clear_ctk_label(lbl)
+            self._center_shows = None
+        self._update_panel_titles()
+
+    # -------------- PANEL TITLES --------------
+
+    def _features_title(self):
+        """Title of the right panel: what kind of feature it shows."""
+        feats = [f for f in (getattr(self, "features", None) or []) if len(f[1]) >= 2]
+        n_poly = sum(1 for f in feats if f[0] == "polygon")
+        n_line = len(feats) - n_poly
+        parts = []
+        if n_line:
+            parts.append("boundary" if n_line == 1 else f"boundaries ({n_line})")
+        if n_poly:
+            parts.append("polygon" if n_poly == 1 else f"polygons ({n_poly})")
+        if not parts:
+            return "Detected feature (none yet)"
+        return "Detected " + " and ".join(parts)
+
+    def _update_panel_titles(self):
+        """Set the title above each panel of the image window to what the
+        panel shows at the moment."""
+        titles = getattr(self, "_panel_titles", None)
+        if not titles:
+            return
+        if getattr(self, "_edit_session_open", False):
+            middle, right = "Shape editor", "Editing tools"
+        else:
+            shows = getattr(self, "_center_shows", None)
+            if shows == "aoi":
+                middle = "Area of interest (AOI)"
+            elif shows == "mask":
+                middle = "Mask"
+            else:
+                middle = "Mask (not calculated yet)"
+            right = self._features_title()
+        for key, text in (("left", "Original"), ("center", middle), ("right", right)):
+            lbl = titles.get(key)
+            try:
+                if lbl is not None and lbl.winfo_exists() and lbl.cget("text") != text:
+                    lbl.configure(text=text)
+            except Exception:
+                pass
 
     def update_edge_display(self, event=None):
         """Display all stored features in the right panel (scrollable canvas)."""
+        if hasattr(self, "_refresh_label_summary"):
+            self._refresh_label_summary()
+        self._update_panel_titles()
         if self.full_image is None:
             return
 
@@ -363,7 +432,6 @@ class HSVMaskProcessingMixin:
             self.after(100, self.update_edge_display)
             return
 
-        overlay = self.full_image.copy()
         # Confirmed-feature colours (BGR, since OpenCV is BGR-native):
         #   polygon  → dark orange #cc5500  (BGR 0, 85, 204)
         #   polyline → teal       #0088aa  (BGR 170, 136, 0)
@@ -372,20 +440,8 @@ class HSVMaskProcessingMixin:
         # dimmest stage to indicate "committed".
         _CONFIRMED_POLYGON_BGR  = (0, 85, 204)
         _CONFIRMED_POLYLINE_BGR = (170, 136, 0)
-        for (feature_type, points) in self.features:
-            if len(points) < 2:
-                continue
-            pts_np = np.array(points, dtype=np.int32).reshape((-1, 1, 2))
-            if feature_type == "polygon":
-                cv2.polylines(overlay, [pts_np], isClosed=True,
-                              color=_CONFIRMED_POLYGON_BGR, thickness=2)
-            else:
-                thickness = int(self.edge_thickness_slider.get()) if hasattr(
-                    self, 'edge_thickness_slider') else 2
-                cv2.polylines(overlay, [pts_np], isClosed=False,
-                              color=_CONFIRMED_POLYLINE_BGR, thickness=thickness)
 
-        h0, w0 = overlay.shape[:2]
+        h0, w0 = self.full_image.shape[:2]
 
         # Apply overlay zoom factor (default 1.0 = fit-to-panel)
         overlay_zoom = getattr(self, '_overlay_zoom', 1.0)
@@ -393,9 +449,63 @@ class HSVMaskProcessingMixin:
         disp_w = max(1, int(fit_w * overlay_zoom))
         disp_h = max(1, int(fit_h * overlay_zoom))
 
-        resized = cv2.resize(overlay, (disp_w, disp_h),
+        # The image is scaled to the panel first and the shapes are drawn on
+        # the scaled copy, so a line is as thick on the screen as it is meant
+        # to be.  Drawn on the full image and scaled afterwards, a 2 px line
+        # on a 4700 px wide image came out about 0.2 px thick in this panel,
+        # and a detected feature could not be seen.
+        overlay = cv2.resize(self.full_image, (disp_w, disp_h),
                              interpolation=cv2.INTER_AREA)
-        overlay_rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+        if overlay.ndim == 2:
+            overlay = cv2.cvtColor(overlay, cv2.COLOR_GRAY2BGR)
+        else:
+            overlay = np.ascontiguousarray(overlay[:, :, :3])
+        sx = disp_w / float(w0)
+        sy = disp_h / float(h0)
+
+        def _to_panel(points):
+            arr = np.asarray(points, dtype=np.float64).reshape(-1, 2)
+            arr = arr * (sx, sy)
+            return np.round(arr).astype(np.int32).reshape((-1, 1, 2))
+
+        for (feature_type, points) in self.features:
+            if len(points) < 2:
+                continue
+            pts_np = _to_panel(points)
+            if feature_type == "polygon":
+                cv2.polylines(overlay, [pts_np], isClosed=True,
+                              color=_CONFIRMED_POLYGON_BGR, thickness=2,
+                              lineType=cv2.LINE_AA)
+            else:
+                # Line Thickness is in pixels of the full image; show it to
+                # scale, but never thinner than 2 px on the screen
+                thickness = int(self.edge_thickness_slider.get()) if hasattr(
+                    self, 'edge_thickness_slider') else 2
+                thickness = max(2, int(round(thickness * sx)))
+                cv2.polylines(overlay, [pts_np], isClosed=False,
+                              color=_CONFIRMED_POLYLINE_BGR, thickness=thickness,
+                              lineType=cv2.LINE_AA)
+
+        # Label names, only when shapes carry labels of their own (an image
+        # with only the Feature ID looks exactly as before).  About 13 px
+        # high on the screen.
+        if any(feature_label(f) for f in self.features) and hasattr(self, "_display_label"):
+            fs = 13.0 / 22.0
+            tt = max(1, int(round(fs * 1.5)))
+            for feat in self.features:
+                ftype, points = feat
+                if len(points) < 2:
+                    continue
+                name = self._display_label(feat) or "(no label)"
+                colour = (_CONFIRMED_POLYGON_BGR if ftype == "polygon"
+                          else _CONFIRMED_POLYLINE_BGR)
+                org = (int(points[0][0] * sx + 6), int(points[0][1] * sy - 6))
+                cv2.putText(overlay, name, org, cv2.FONT_HERSHEY_SIMPLEX, fs,
+                            (0, 0, 0), tt + max(2, int(round(fs))), cv2.LINE_AA)
+                cv2.putText(overlay, name, org, cv2.FONT_HERSHEY_SIMPLEX, fs,
+                            colour, tt, cv2.LINE_AA)
+
+        overlay_rgb = cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB)
         pil_img = Image.fromarray(overlay_rgb)
 
         # Draw on the scrollable canvas
@@ -458,12 +568,22 @@ class HSVMaskProcessingMixin:
         )
         if not file_path:
             return
+        # Close the shape editor first (asks before discarding edits)
+        if not self._abort_edit_session(prompt=True):
+            return
     
         original_image = imread_safe(file_path, cv2.IMREAD_UNCHANGED)
         if original_image is None:
             messagebox.showerror("Error", f"Failed to load image: {file_path}", parent=self)
             return
     
+        # The mask and the shapes belong to the image shown before.  Without
+        # this the middle and right panels kept showing them, and an export
+        # would have written the earlier image's shapes with the new image.
+        if self.mode != "batch":
+            self._restore_center_mask_panel()
+            self._reset_image_state()
+
         self.image_path = file_path
         self._current_input_path = file_path
         self._current_input_folder = os.path.dirname(file_path)
@@ -472,6 +592,15 @@ class HSVMaskProcessingMixin:
         self.compute_full_masks(original_image)
         if self.mode != "batch":
             self.process_loaded_image(original_image)
+            self._after_image_loaded()
+
+    def _after_image_loaded(self):
+        """Bring the AOI and the middle and right panels in line with the
+        image that was just loaded."""
+        if hasattr(self, "_reapply_aoi_to_new_image"):
+            self._reapply_aoi_to_new_image()
+        self._refresh_center_panel()
+        self.update_edge_display()
 
     def load_folder(self):
         folder = filedialog.askdirectory(parent=self)
@@ -485,6 +614,9 @@ class HSVMaskProcessingMixin:
                 "Error", "No valid image files found in folder.", parent=self)
             return
         files.sort()
+        # Close the shape editor first (asks before discarding edits)
+        if not self._abort_edit_session(prompt=True):
+            return
         self.image_files = files
         self._current_input_folder = folder
         self.current_index = 0
@@ -496,6 +628,10 @@ class HSVMaskProcessingMixin:
 
 
     def _reset_image_state(self):
+        # An editor left open must not carry shapes over to another image
+        if getattr(self, "_edit_session_open", False):
+            self._abort_edit_session(prompt=False, refresh=False)
+
         # clear per-image drawing state
         self.features = []
         self.edge_points = []
@@ -504,6 +640,13 @@ class HSVMaskProcessingMixin:
         self.selected_vertex = None
         self.current_mask = None
         self.inner_bbox_mask = None
+        # The colour-selection mask belongs to the image it was made on.
+        # Kept, Extract Polygon on the next image returned the previous
+        # image's polygons.
+        self.color_pick_mask = None
+        # a new image: Feature ID / Category ID are available again
+        if hasattr(self, "_refresh_label_summary"):
+            self._refresh_label_summary()
 
         # clear editor / preview caches
         self._bg_cache.clear()
@@ -563,31 +706,39 @@ class HSVMaskProcessingMixin:
 
         if self.mode != "batch":
             self.process_loaded_image(original_image)
+            self._after_image_loaded()
 
     def next_image(self):
+        if self.mode != "ml" or not self.image_files:
+            return
+        if self.current_index >= len(self.image_files) - 1:
+            messagebox.showinfo("Info", "Already at the last image.", parent=self)
+            return
+        # Close the shape editor first (asks before discarding edits)
+        if not self._abort_edit_session(prompt=True, refresh=False):
+            return
         self._restore_center_mask_panel()
-        if self.mode == "ml" and self.image_files:
-            if self.current_index < len(self.image_files) - 1:
-                self.current_index += 1
-                self.load_current_image()
-                self.update_image_display()
-                self.update_mask_display()
-            else:
-                messagebox.showinfo("Info", "Already at the last image.", parent=self)
+        self.current_index += 1
+        self.load_current_image()
+        self.update_image_display()
+        self.update_mask_display()
 
     def prev_image(self):
+        if self.mode != "ml" or not self.image_files:
+            return
+        if self.current_index <= 0:
+            messagebox.showinfo("Info", "Already at the first image.", parent=self)
+            return
+        # Close the shape editor first (asks before discarding edits)
+        if not self._abort_edit_session(prompt=True, refresh=False):
+            return
         self._restore_center_mask_panel()
-
-        if self.mode == "ml" and self.image_files:
-            if self.current_index > 0:
-                self.current_index -= 1
-                self._clear_ctk_label(self.mask_label)
-                self._clear_ctk_label(self.edge_label)
-                self.load_current_image()
-                self.update_image_display()
-                self.update_mask_display()
-            else:
-                messagebox.showinfo("Info", "Already at the first image.", parent=self)
+        self.current_index -= 1
+        self._clear_ctk_label(self.mask_label)
+        self._clear_ctk_label(self.edge_label)
+        self.load_current_image()
+        self.update_image_display()
+        self.update_mask_display()
 
     def compute_full_masks(self, original_image):
         if original_image.ndim == 3 and original_image.shape[2] == 4:
@@ -737,7 +888,7 @@ class HSVMaskProcessingMixin:
         # Re-apply alpha/bbox mask to ensure transparent regions are excluded
         mask_clean = cv2.bitwise_and(mask_clean, bbox_mask)
 
-        # ── Apply AOI constraint from AOI / Profile Filter (if active) ──
+        # ── Apply AOI constraint from Area of Interest (AOI) (if active) ──
         if self._aoi_filter_active() \
                 and getattr(self, 'aoi_mask', None) is not None:
             aoi_cv = self.aoi_mask
@@ -749,13 +900,27 @@ class HSVMaskProcessingMixin:
         if self._bv("do_invert_mask", self.do_invert_mask.get):
             mask_clean = cv2.bitwise_not(mask_clean)
 
+        # This mask replaces one from Multi-sample Colour Selection.  Its
+        # full-resolution copy has to go as well: Extract Polygon prefers
+        # that copy and would otherwise keep using it instead of the mask
+        # shown in the middle panel.
+        self.color_pick_mask = None
         self.current_mask = mask_clean
 
         if self.mode != "batch":
             self.display_mask()
 
     def display_mask(self):
+        """Show the current mask in the middle panel (after a detector ran)."""
         if self.current_mask is None or self.mode == "batch":
+            return
+        self._center_view = "mask"
+        self._refresh_center_panel()
+
+    def _draw_mask_in_center(self):
+        lbl = getattr(self, "mask_label", None)
+        if self.current_mask is None or lbl is None or not lbl.winfo_exists():
+            # the shape editor is open: the mask is shown when it closes
             return
         to_show = self.current_mask
         h0, w0 = to_show.shape[:2]
@@ -935,13 +1100,26 @@ class HSVMaskProcessingMixin:
             valid_points = [list(pt) for pt in points]
         return valid_points
 
+    def _nothing_extracted(self, tag, reason):
+        """Say on the console why an extraction gave no result.  The shapes
+        already on the image are not touched in that case."""
+        kept = ""
+        if self.mode != "batch" and self.features:
+            kept = " The shapes already on the image were left as they are."
+        print(f"[{tag}] {reason}{kept}")
+
     def extract_boundary(self):
         clean_mask = self._get_clean_mask_for_extraction()
-        if clean_mask is None or cv2.countNonZero(clean_mask) == 0:
+        if clean_mask is None:
+            self._nothing_extracted("Extract Boundary", "No mask has been calculated yet.")
+            return
+        if cv2.countNonZero(clean_mask) == 0:
+            self._nothing_extracted("Extract Boundary", "The mask is empty: no pixel is selected.")
             return
 
         contours, _ = cv2.findContours(clean_mask, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
         if not contours:
+            self._nothing_extracted("Extract Boundary", "No contour found in the mask.")
             return
 
         # Read advanced contour size filters
@@ -966,11 +1144,21 @@ class HSVMaskProcessingMixin:
             contours, border_mask, metric="length", prefer_interior=True,
             min_size=min_size, max_size=max_size)
         if largest is None:
+            if min_size > 0 or max_size > 0:
+                self._nothing_extracted(
+                    "Extract Boundary",
+                    "No contour is within the Min/Max contour size of the Advanced Settings.")
+            else:
+                self._nothing_extracted("Extract Boundary", "No usable contour found in the mask.")
             return
 
         rescaled_points = self._contour_to_full_coords(largest, approx_factor=0.0012)
         valid_points = self._filter_points_to_inner_masks(rescaled_points)
         if len(valid_points) < 2:
+            self._nothing_extracted(
+                "Extract Boundary",
+                "The contour lies in the margin at the edge of the image (or of the "
+                "bounding box with Use Inner Mask), where points are not kept.")
             return
 
         touch_ratio = self._contour_touch_ratio(largest, border_mask)
@@ -981,6 +1169,8 @@ class HSVMaskProcessingMixin:
         self.features = [("polyline", valid_points.copy())]
 
         if self.mode != "batch":
+            print(f"[Boundary] Boundary with {len(valid_points)} vertices extracted; "
+                  f"it is drawn in the right panel.")
             self.update_edge_display()
 
     def _get_best_mask_for_polygon(self):
@@ -1101,8 +1291,9 @@ class HSVMaskProcessingMixin:
 
         n_polys = len(self.features)
         n_verts = len(self.features[0][1])
+        where = "" if self.mode == "batch" else " Drawn in the right panel."
         print(f"[Extract Polygon] Extracted {n_polys} polygon(s); "
-              f"largest has {n_verts} vertices.")
+              f"largest has {n_verts} vertices.{where}")
 
         if self.mode != "batch":
             self.update_edge_display()
@@ -1399,6 +1590,9 @@ class HSVMaskProcessingMixin:
             messagebox.showerror("Mask", f"Failed to read mask:\n{mask_path}", parent=self)
             return
 
+        # The ML mask is the mask in use from here on (see calculate_mask)
+        self.color_pick_mask = None
+
         # --- FULL resolution mask for extraction ---
         Hf, Wf = self.full_image.shape[:2]
         m_full = self._ensure_binary_u8(m)
@@ -1497,6 +1691,9 @@ class HSVMaskProcessingMixin:
         if m is None:
             messagebox.showerror("Mask", f"Failed to read mask:\n{mask_path}", parent=self)
             return
+
+        # The ML mask is the mask in use from here on (see calculate_mask)
+        self.color_pick_mask = None
 
         # ── Resize mask to full-image dimensions ──
         Hf, Wf = self.full_image.shape[:2]
@@ -2307,16 +2504,20 @@ class HSVMaskProcessingMixin:
             # ── Overlay PNG ──
             out_ovl = os.path.join(overlay_folder, stem + "_overlay.png")
             overlay = self.full_image.copy()
+            # Full-opacity colours on RGBA images (a 3-value colour is
+            # padded with alpha 0, making the feature invisible in QGIS)
+            poly_bgr = self._overlay_colour((0, 85, 204), overlay)
+            line_bgr = self._overlay_colour((170, 136, 0), overlay)
             for feat_type, pts in all_features:
                 if len(pts) < 2:
                     continue
                 pts_np = np.array(pts, dtype=np.int32).reshape((-1, 1, 2))
                 if feat_type == "polygon":
                     cv2.polylines(overlay, [pts_np], True,
-                                  (0, 85, 204), cfg["edge_thickness"])
+                                  poly_bgr, cfg["edge_thickness"])
                 else:
                     cv2.polylines(overlay, [pts_np], False,
-                                  (170, 136, 0), cfg["edge_thickness"])
+                                  line_bgr, cfg["edge_thickness"])
             cv2.imwrite(out_ovl, overlay)
 
             # ── Copy original image ──
