@@ -1,21 +1,21 @@
 """
-colour_explorer.py  —  GeoCamPal Color Space Explorer
-======================================================
+colour_explorer.py  —  GeoCamPal Colour Space Explorer
+=======================================================
 
 Purpose
 -------
-Batch-analyses color distributions across a folder of images and
+Batch-analyses colour distributions across a folder of images and
 produces three diagnostic plots side-by-side: smoothed per-channel
 histograms, a 2-D scatter-density plot of any two channels, and a
-temporal color timeline keyed to timestamps in the filenames.
+temporal colour timeline keyed to timestamps in the filenames.
 A configurable z-score threshold flags images whose mean channel
 values deviate significantly from the dataset mean (outlier detection).
 
 The module is self-contained and can be launched standalone or opened
 from the GeoCamPal main launcher.
 
-Supported color spaces
-----------------------
+Supported colour spaces
+-----------------------
     RGB             — raw red, green, blue (0–255)
     HSV             — hue (0–180), saturation (0–255), value (0–255)
     LAB             — CIE L*, a*, b* via OpenCV (uint8 range 0–255)
@@ -82,6 +82,7 @@ from utils import (
     show_path,
     fit_geometry, resource_path, setup_console, restore_console,
     save_settings_json, load_settings_json, bring_child_to_front,
+    apply_window_icon, geometry_px, DARK_CANVAS_BG,
     imread_safe,
     format_eta as shared_format_eta,
 )
@@ -155,9 +156,9 @@ def collect_images(folder, recursive=False):
     )
 
 
-# %% ————————————————————————————— color-space conversion ——————————————
+# %% ————————————————————————————— colour-space conversion ——————————————
 
-# Channel name tuples for each color space
+# Channel name tuples for each colour space
 CS_CHANNELS = {
     "RGB":            ("Red", "Green", "Blue"),
     "HSV":            ("Hue", "Saturation", "Value"),
@@ -177,7 +178,7 @@ CS_RANGES = {
 def convert_pixels(img_bgr, color_space, sky_frac=0.0, ground_frac=0.0,
                    aoi_mask=None):
     """
-    Convert a BGR image to the requested color space.
+    Convert a BGR image to the requested colour space.
     Returns an (N, 3) float32 array of pixel values.
     Optionally crops top *sky_frac* and bottom *ground_frac* of rows.
     If *aoi_mask* is provided (uint8 H×W, 255 = inside), only those
@@ -241,11 +242,11 @@ def image_channel_stats(pixels_3col):
 # %% ————————————————————————————— main GUI ————————————————————————————
 
 class ColorSpaceExplorerWindow(ctk.CTkToplevel):
-    """Explore color distributions across an image folder."""
+    """Explore colour distributions across an image folder."""
 
     def __init__(self, master=None, **kw):
         super().__init__(master=master, **kw)
-        self.title("Color Space Explorer")
+        self.title("Colour Space Explorer")
         #self.geometry("1400x920")
         fit_geometry(self, 1400,920, resizable = True) 
         try:
@@ -287,7 +288,7 @@ class ColorSpaceExplorerWindow(ctk.CTkToplevel):
         self.axes[0].axis("off")
         self.axes[1].set_title("2-D Scatter Density")
         self.axes[1].axis("off")
-        self.axes[2].set_title("Color Timeline")
+        self.axes[2].set_title("Colour Timeline")
         self.axes[2].axis("off")
         self.fig.tight_layout()
 
@@ -324,8 +325,8 @@ class ColorSpaceExplorerWindow(ctk.CTkToplevel):
                      font=("Arial", 12, "bold")).grid(
             row=0, column=0, padx=5, pady=3, sticky="w", columnspan=2)
 
-        # Color space
-        ctk.CTkLabel(r2, text="Color space:").grid(
+        # Colour space
+        ctk.CTkLabel(r2, text="Colour space:").grid(
             row=1, column=0, padx=5, pady=3, sticky="e")
         self.cs_var = tk.StringVar(value="RGB")
         self.cs_menu = ctk.CTkOptionMenu(
@@ -509,18 +510,18 @@ class ColorSpaceExplorerWindow(ctk.CTkToplevel):
     # ——————————————————————————— guide text ———————————————————————————
     def _print_guide(self):
         print(
-            "Color Space Explorer — Tool Guide\n"
+            "Colour Space Explorer — Tool Guide\n"
             "====================================\n"
             "\n"
             "DISPLAY PANEL (top — three plots)\n"
             "  Left:   Smoothed channel distribution curves across ALL images.\n"
             "  Centre: 2-D scatter density of two selected channels (sampled pixels).\n"
-            "  Right:  Color timeline — channel statistic vs. image timestamp.\n"
+            "  Right:  Colour timeline — channel statistic vs. image timestamp.\n"
             "\n"
             "ANALYSIS SETTINGS\n"
-            "  Color space       — RGB, HSV, LAB, or Normalised RGB (r=R/sum).\n"
+            "  Colour space      — RGB, HSV, LAB, or Normalised RGB (r=R/sum).\n"
             "  Scatter X / Y     — Which channels to plot on the 2-D scatter.\n"
-            "                      Ch 0/1/2 map to the selected color space channels.\n"
+            "                      Ch 0/1/2 map to the selected colour space channels.\n"
             "  Skip sky (%)      — Ignore the top N% of the image (bright sky).\n"
             "  Skip ground (%)   — Ignore the bottom N% of the image.\n"
             "  Pixels/image      — Random pixel sample per image for the scatter plot.\n"
@@ -544,16 +545,16 @@ class ColorSpaceExplorerWindow(ctk.CTkToplevel):
             "\n"
             "OUTPUTS (saved to the output folder)\n"
             "  color_stats.csv   — Per-image channel statistics + class label.\n"
-            "  outliers.txt      — Images flagged as color outliers.\n"
+            "  outliers.txt      — Images flagged as colour outliers.\n"
             "  color_explorer_plots.png — Combined figure (all three panels).\n"
             "\n"
             "WORKFLOW TIPS\n"
-            "  • Use RGB or LAB to inspect general brightness / color drift.\n"
+            "  • Use RGB or LAB to inspect general brightness / colour drift.\n"
             "  • Use HSV to find optimal Hue–Saturation ranges for the HSV Mask tool.\n"
             "  • The timeline reveals day/night cycles, fog events, and seasonal shifts.\n"
             "  • Outlier detection pre-screens before harmonisation.\n"
             "  • Draw an AOI around 'water' → run → change AOI to 'sand' → run again\n"
-            "    → merge the two CSVs to compare color signatures of different features.\n"
+            "    → merge the two CSVs to compare colour signatures of different features.\n"
             "====================================\n"
         )
 
@@ -680,7 +681,7 @@ class ColorSpaceExplorerWindow(ctk.CTkToplevel):
             ax.axis("off")
         self.axes[0].set_title("Channel Distributions")
         self.axes[1].set_title("2-D Scatter Density")
-        self.axes[2].set_title("Color Timeline")
+        self.axes[2].set_title("Colour Timeline")
         self.fig.tight_layout()
         self.canvas_plot.draw()
         self.console_text.delete("1.0", tk.END)
@@ -711,22 +712,23 @@ class ColorSpaceExplorerWindow(ctk.CTkToplevel):
 
         self.aoi_polygon_pts = []
 
-        win = tk.Toplevel(self)
+        win = ctk.CTkToplevel(self)
+        apply_window_icon(win)
         win.title("Draw AOI Polygon — click vertices, double-click to close")
-        win.geometry("920x680")
+        geometry_px(win, 920, 680)
         bring_child_to_front(win, self, modal=True)
 
-        canvas = tk.Canvas(win, cursor="cross", bg="black")
+        canvas = tk.Canvas(win, cursor="cross", bg=DARK_CANVAS_BG, highlightthickness=0)
         canvas.pack(fill="both", expand=True)
 
-        info_frame = tk.Frame(win)
+        info_frame = ctk.CTkFrame(win, fg_color="transparent")
         info_frame.pack(fill="x")
-        info_label = tk.Label(
+        info_label = ctk.CTkLabel(
             info_frame,
             text="Click to add vertices.  Double-click to close polygon.  "
                  f"Image: {ref_path.name}")
         info_label.pack(side="left", padx=10)
-        coord_label = tk.Label(info_frame, text="Vertices: 0")
+        coord_label = ctk.CTkLabel(info_frame, text="Vertices: 0")
         coord_label.pack(side="right", padx=10)
 
         # Scale image to fit the popup
@@ -761,7 +763,7 @@ class ColorSpaceExplorerWindow(ctk.CTkToplevel):
                     p1[0] * scale, p1[1] * scale,
                     p2[0] * scale, p2[1] * scale,
                     fill="lime", width=2)
-            coord_label.config(text=f"Vertices: {len(pts)}")
+            coord_label.configure(text=f"Vertices: {len(pts)}")
 
         def on_double_click(event):
             pts = self.aoi_polygon_pts
@@ -938,7 +940,7 @@ class ColorSpaceExplorerWindow(ctk.CTkToplevel):
                 return
 
             n_img = len(images)
-            print(f"Found {n_img} images.  Color space: {cs}")
+            print(f"Found {n_img} images.  Colour space: {cs}")
             print(f"ROI crop — skip sky: {params['sky_frac']*100:.0f}%, "
                   f"skip ground: {params['ground_frac']*100:.0f}%")
             print(f"Pixel sample per image: {params['n_sample']}")
@@ -1103,8 +1105,8 @@ class ColorSpaceExplorerWindow(ctk.CTkToplevel):
             if self._cancel_if_requested():
                 return
 
-            # ---- Plot 3: color timeline -------------------------------
-            print("Generating color timeline …")
+            # ---- Plot 3: colour timeline ------------------------------
+            print("Generating colour timeline …")
             ax2 = self.axes[2]
             ax2.clear()
 
