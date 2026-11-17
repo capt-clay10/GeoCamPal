@@ -28,7 +28,9 @@ All sections except Import are collapsible:
         ml mode:         browse a mask folder + common-prefix length
                          entry for filename matching.
 
-    Dropdown 1  —  AOI / Profile Filter
+    Dropdown 1  —  Area of Interest (AOI)
+        Limits where HSV Colour Masking and Multi-sample Colour
+        Selection look; it does not detect a feature itself.
         Profile start/end coordinates + width (drawn or typed).
         Polygon AOI entry for free-form spatial masking.
         Method selector (Threshold / Variance / Otsu) + min/max
@@ -57,7 +59,9 @@ All sections except Import are collapsible:
         thickness).
 
     Export row
-        Feature ID and Image ID entries.
+        Feature ID (default label), Image ID and Category ID entries,
+        and a summary of the labels on the current image when shapes
+        carry labels of their own (set in the shape editor).
         Export path browser.
         Export Training Data, Export Mask, Export as Test Data,
         Export as Overlay buttons.
@@ -95,19 +99,20 @@ from PIL import Image, ImageTk
 import cv2
 import numpy as np
 
+from feature_model import LabelCatalog
 from utils import (
     short_path, PATH_INPUT_COLOR,
     fit_geometry, StdoutRedirector,
     save_settings_json, load_settings_json,
     make_selector_payload, describe_saved_path,
-    bring_child_to_front,
+    bring_child_to_front, apply_window_icon, geometry_px, DARK_CANVAS_BG,
 )
 
 # %% Standalone helper classes
 # ──────────────────────────────────────────────
 
 
-class BBoxSelectorWindow(tk.Toplevel):
+class BBoxSelectorWindow(ctk.CTkToplevel):
     def __init__(self, master, pil_image, callback, **kwargs):
         """
         A small window for selecting a bounding box.
@@ -116,24 +121,26 @@ class BBoxSelectorWindow(tk.Toplevel):
         """
         super().__init__(master, **kwargs)
         self.title("Select Bounding Box")
+        apply_window_icon(self)
         self.callback = callback
         self.original_pil_image = pil_image
         self.zoom_scale = 1.0
 
-        top_frame = tk.Frame(self)
+        top_frame = ctk.CTkFrame(self, fg_color="transparent")
         top_frame.pack(fill="both", expand=True)
 
-        container = tk.Frame(top_frame)
+        container = ctk.CTkFrame(top_frame, fg_color="transparent")
         container.pack(fill="both", expand=True)
 
-        self.canvas = tk.Canvas(container, cursor="cross")
+        self.canvas = tk.Canvas(container, cursor="cross",
+                                bg=DARK_CANVAS_BG, highlightthickness=0)
         self.canvas.grid(row=0, column=0, sticky="nsew")
 
-        v_scroll = tk.Scrollbar(
-            container, orient="vertical", command=self.canvas.yview)
+        v_scroll = ctk.CTkScrollbar(
+            container, orientation="vertical", command=self.canvas.yview)
         v_scroll.grid(row=0, column=1, sticky="ns")
-        h_scroll = tk.Scrollbar(
-            container, orient="horizontal", command=self.canvas.xview)
+        h_scroll = ctk.CTkScrollbar(
+            container, orientation="horizontal", command=self.canvas.xview)
         h_scroll.grid(row=1, column=0, sticky="ew")
         self.canvas.configure(yscrollcommand=v_scroll.set,
                               xscrollcommand=h_scroll.set)
@@ -141,17 +148,17 @@ class BBoxSelectorWindow(tk.Toplevel):
         container.grid_rowconfigure(0, weight=1)
         container.grid_columnconfigure(0, weight=1)
 
-        bottom_frame = tk.Frame(self)
+        bottom_frame = ctk.CTkFrame(self, fg_color="transparent")
         bottom_frame.pack(fill="x", pady=5)
 
-        btn_zoom_in = tk.Button(
-            bottom_frame, text="Zoom In", command=self.zoom_in)
+        btn_zoom_in = ctk.CTkButton(
+            bottom_frame, text="Zoom In", width=90, command=self.zoom_in)
         btn_zoom_in.pack(side="left", padx=5)
-        btn_zoom_out = tk.Button(
-            bottom_frame, text="Zoom Out", command=self.zoom_out)
+        btn_zoom_out = ctk.CTkButton(
+            bottom_frame, text="Zoom Out", width=90, command=self.zoom_out)
         btn_zoom_out.pack(side="left", padx=5)
-        btn_confirm = tk.Button(
-            bottom_frame, text="Confirm BBox", command=self.confirm_bbox)
+        btn_confirm = ctk.CTkButton(
+            bottom_frame, text="Confirm BBox", width=120, command=self.confirm_bbox)
         btn_confirm.pack(side="right", padx=5)
 
         self.display_image()
@@ -283,15 +290,18 @@ class HSVMaskUIMixin:
         self.inner_mask_check.pack(side="left", padx=5)
         self.inner_mask_check.configure(state="disabled")
 
-        # ── DROPDOWN 1: AOI / Profile-based Filter ─────────────────────────────────
+        # ── DROPDOWN 1: Area of Interest (AOI) ─────────────────────────────────────
+        # The name and the note say what the section is for: it limits where
+        # the two detectors below look and does not detect anything itself.
         self.aoi_check_frame = ctk.CTkFrame(parent)
         self.aoi_check_frame.pack(side="top", fill="x", pady=(5, 0))
         self.aoi_check = ctk.CTkCheckBox(
-            self.aoi_check_frame, text="AOI / Profile Filter",
+            self.aoi_check_frame, text="Area of Interest (AOI)",
             variable=self.use_aoi_filter, command=self._toggle_aoi_controls)
         self.aoi_check.pack(side="left", padx=5)
         ctk.CTkLabel(self.aoi_check_frame,
-                     text="(narrow search region using intensity profile)",
+                     text="(limits where HSV Colour Masking and Multi-sample Colour "
+                          "Selection look; it detects nothing itself)",
                      font=("Arial", 9), text_color="gray").pack(side="left", padx=5)
 
         # AOI controls (hidden by default)
@@ -424,7 +434,7 @@ class HSVMaskUIMixin:
             command=self._toggle_hsv_controls)
         self.hsv_check.pack(side="left", padx=5)
         ctk.CTkLabel(self.hsv_label_frame,
-                     text="(constrained to the AOI when AOI / Profile Filter is active)",
+                     text="(looks only inside the AOI when one is applied)",
                      font=("Arial", 9), text_color="gray").pack(side="left", padx=5)
 
         # Container for all HSV controls (collapsible)
@@ -700,6 +710,15 @@ class HSVMaskUIMixin:
         self.category_id_entry.insert(0, "1")
         self.category_id_entry.pack(side="left", padx=5)
 
+        # Labels used on the current image; only filled in when shapes carry
+        # labels of their own (set in the shape editor)
+        self.label_summary_label = ctk.CTkLabel(
+            featureid_frame, text="", font=("Arial", 10), text_color="gray60")
+        self.label_summary_label.pack(side="left", padx=8)
+        for _entry in (self.feature_id_entry, self.category_id_entry):
+            _entry.bind("<KeyRelease>", self._on_default_label_changed, add="+")
+            _entry.bind("<FocusOut>", self._on_default_label_changed, add="+")
+
         # ── Row 6: Export buttons or Batch button ──────────────────────────────────
         export_buttons_frame = ctk.CTkFrame(parent)
         export_buttons_frame.pack(side="top", fill="x", pady=5)
@@ -797,6 +816,15 @@ class HSVMaskUIMixin:
 
     def extract_boundary_universal(self):
         """Use the ML-mask workflow when enabled, otherwise use the normal boundary extraction."""
+        if getattr(self, "_edit_session_open", False):
+            # Detection would replace the shapes the editor is working on
+            print("[Edit] Finish editing first: press Confirm Feature or "
+                  "Cancel in the image window, then extract again.")
+            try:
+                self.image_display_window.lift()
+            except Exception:
+                pass
+            return
         if getattr(self, "use_ml_pred_mask", None) and self.use_ml_pred_mask.get():
             if self.mode == "individual" and self.ml_mask_file_path.get().strip():
                 self.calculate_edge_with_ml_mask()
@@ -804,10 +832,60 @@ class HSVMaskUIMixin:
             if self.mode == "ml" and self.ml_mask_folder_path.get().strip():
                 self.calculate_edge_with_ml_mask()
                 return
+        if not self._mask_ready_for_extraction("Extract Boundary"):
+            return
+        # The middle panel shows the mask the boundary is taken from (it may
+        # have been on the AOI picture)
+        self.display_mask()
         self.extract_boundary()
+
+    def _mask_ready_for_extraction(self, action):
+        """
+        True when there is a mask that *action* (Extract Boundary or Extract
+        Polygon) can work on.  Otherwise the user is told what is missing:
+        pressing the button used to do nothing at all in that case.
+        """
+        if self.full_image is None:
+            messagebox.showwarning(action, "Load an image first.", parent=self)
+            return False
+        mask = getattr(self, "current_mask", None)
+        cpick = getattr(self, "color_pick_mask", None)
+        if mask is None and cpick is None:
+            text = ("There is no mask to extract from yet.\n\n"
+                    "Calculate one first: HSV Colour Masking (Calculate Mask) or "
+                    "Multi-sample Colour Selection (Detect Class), or tick Use ML "
+                    "predicted mask and load a mask.")
+            if getattr(self, "aoi_mask", None) is not None:
+                text += ("\n\nThe area of interest (AOI) only limits where these "
+                         "detectors look. It is not a mask to extract from.")
+            print(f"[{action}] No mask has been calculated yet.")
+            messagebox.showwarning(action, text, parent=self)
+            return False
+        empty = ((mask is None or cv2.countNonZero(mask) == 0)
+                 and (cpick is None or cv2.countNonZero(cpick) == 0))
+        if empty:
+            where = (" inside the area of interest (AOI)"
+                     if self._aoi_in_effect() else "")
+            print(f"[{action}] The mask is empty: no pixel is selected{where}.")
+            messagebox.showwarning(
+                action,
+                f"The mask is empty: no pixel is selected{where}.\n\n"
+                "Change the settings of the detector and calculate the mask again.",
+                parent=self)
+            return False
+        return True
 
     def extract_polygon_universal(self):
         """Use the ML-mask workflow when enabled, otherwise use the normal polygon extraction."""
+        if getattr(self, "_edit_session_open", False):
+            # Detection would replace the shapes the editor is working on
+            print("[Edit] Finish editing first: press Confirm Feature or "
+                  "Cancel in the image window, then extract again.")
+            try:
+                self.image_display_window.lift()
+            except Exception:
+                pass
+            return
         if getattr(self, "use_ml_pred_mask", None) and self.use_ml_pred_mask.get():
             if self.mode == "individual" and self.ml_mask_file_path.get().strip():
                 self.extract_polygon_with_ml_mask()
@@ -815,6 +893,10 @@ class HSVMaskUIMixin:
             if self.mode == "ml" and self.ml_mask_folder_path.get().strip():
                 self.extract_polygon_with_ml_mask()
                 return
+        if not self._mask_ready_for_extraction("Extract Polygon"):
+            return
+        # The middle panel shows the mask the polygons are taken from
+        self.display_mask()
         self.extract_polygon()
 
 
@@ -908,6 +990,10 @@ class HSVMaskUIMixin:
                 self.aoi_opts_frame.pack(side="top", fill="x", pady=(2, 5))
         else:
             self.aoi_opts_frame.pack_forget()
+        # An AOI that is switched off is not used by the detectors, so it is
+        # not shown either; ticking the box again brings it back
+        if self.mode != "batch" and hasattr(self, "_refresh_center_panel"):
+            self._refresh_center_panel()
 
     def _toggle_hsv_controls(self):
         """Show/hide the HSV masking controls."""
@@ -931,10 +1017,11 @@ class HSVMaskUIMixin:
             pil_img = Image.fromarray(self.full_image)
 
         self.aoi_click_points = []
-        win = tk.Toplevel(self)
+        win = ctk.CTkToplevel(self)
+        apply_window_icon(win)
         win.title("Draw Profile Line — click start then end")
-        win.geometry("800x600")
-        canvas = tk.Canvas(win, cursor="cross")
+        geometry_px(win, 800, 600)
+        canvas = tk.Canvas(win, cursor="cross", bg=DARK_CANVAS_BG, highlightthickness=0)
         canvas.pack(fill="both", expand=True)
 
         max_w, max_h = 780, 560
@@ -1040,12 +1127,66 @@ class HSVMaskUIMixin:
         from matplotlib.figure import Figure
         from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 
-        popup = tk.Toplevel(self)
-        popup.title("Profile Preview — AOI Filter")
-        popup.geometry("750x450")
+        popup = ctk.CTkToplevel(self)
+        apply_window_icon(popup)
+        popup.title("Profile Preview — Area of Interest (AOI)")
+        # Profile on top, the image with the profile line below it; the
+        # window is kept inside the screen on small displays
+        try:
+            popup_h = int(min(800, popup.winfo_screenheight() * 0.85))
+        except Exception:
+            popup_h = 800
+        geometry_px(popup, 760, popup_h)
 
-        fig = Figure(figsize=(8, 3.5), dpi=100)
-        ax = fig.add_subplot(111)
+        fig = Figure(figsize=(7.6, popup_h / 100.0 - 0.4), dpi=100,
+                     constrained_layout=True)
+        grid = fig.add_gridspec(2, 1, height_ratios=[1.0, 1.25])
+        ax = fig.add_subplot(grid[0])
+        ax_img = fig.add_subplot(grid[1])
+
+        # ── The image the profile was taken from, with the profile line ──
+        # A copy of at most 1000 px on the longer side keeps the window
+        # quick; the axes are in pixels of the full image.
+        img_h, img_w = self.full_image.shape[:2]
+        shrink = min(1000.0 / max(img_h, img_w), 1.0)
+        small = self.full_image
+        if shrink < 1.0:
+            small = cv2.resize(
+                small, (max(1, int(round(img_w * shrink))), max(1, int(round(img_h * shrink)))),
+                interpolation=cv2.INTER_AREA)
+        if small.ndim == 3:
+            small_rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
+        else:
+            small_rgb = cv2.cvtColor(small, cv2.COLOR_GRAY2RGB)
+        ax_img.imshow(small_rgb, extent=(0, img_w, img_h, 0), interpolation="bilinear")
+        n_prof = len(profile)
+        seg_len = max(int(np.hypot(x2 - x1, y2 - y1)), 1)
+
+        def _on_line(i):
+            """Image position of profile sample i (as extract_profile takes it)."""
+            return (x1 + i * (x2 - x1) / seg_len, y1 + i * (y2 - y1) / seg_len)
+
+        xe, ye = _on_line(n_prof - 1)
+        ax_img.plot([x1, xe], [y1, ye], color="white", linewidth=3.2, solid_capstyle="round")
+        ax_img.plot([x1, xe], [y1, ye], color="#D55E00", linewidth=1.6, solid_capstyle="round",
+                    label="Profile line")
+        ax_img.plot([x1], [y1], marker="o", markersize=7, markerfacecolor="white",
+                    markeredgecolor="#D55E00", markeredgewidth=1.6, linestyle="none",
+                    label="Start (0 px)")
+        ax_img.plot([xe], [ye], marker="s", markersize=7, markerfacecolor="#D55E00",
+                    markeredgecolor="white", markeredgewidth=1.2, linestyle="none",
+                    label=f"End ({n_prof - 1} px)")
+        here_marker, = ax_img.plot([], [], marker="o", markersize=9, markerfacecolor="#F0E442",
+                                   markeredgecolor="black", markeredgewidth=1.2,
+                                   linestyle="none", label="Pointer on the profile")
+        ax_img.set_xlim(0, img_w)
+        ax_img.set_ylim(img_h, 0)
+        ax_img.set_xlabel("x (px)")
+        ax_img.set_ylabel("y (px)")
+        ax_img.set_title(f"Where the profile lies on the image: "
+                         f"({x1}, {y1}) to ({x2}, {y2})", fontsize=10)
+        ax_img.legend(fontsize=7, loc="upper left", framealpha=0.9)
+
         ax.plot(profile, color="steelblue", linewidth=0.8, label="Intensity")
         ax.axhline(plot_min, color="#E69F00", linestyle="--", linewidth=1, label=f"Min: {plot_min}")
         ax.axhline(plot_max, color="#0072B2", linestyle="--", linewidth=1, label=f"Max: {plot_max}")
@@ -1064,34 +1205,42 @@ class HSVMaskUIMixin:
         ax.set_title(f"Profile ({method}) — adjust Min/Max entries and click Apply AOI")
         ax.legend(fontsize=7, loc="upper right")
         ax.grid(True, alpha=0.3)
-        fig.tight_layout()
+
+        # Toolbar first, at the bottom, so it stays visible when the window
+        # is made smaller
+        toolbar_frame = ctk.CTkFrame(popup, fg_color="transparent")
+        toolbar_frame.pack(side="bottom", fill="x")
 
         canvas_widget = FigureCanvasTkAgg(fig, master=popup)
-        canvas_widget.get_tk_widget().pack(fill="both", expand=True)
+        canvas_widget.get_tk_widget().pack(side="top", fill="both", expand=True)
 
         # Zoom/pan toolbar
-        toolbar_frame = tk.Frame(popup)
-        toolbar_frame.pack(fill="x")
         toolbar = NavigationToolbar2Tk(canvas_widget, toolbar_frame)
         toolbar.update()
 
-        # Hover cursor — show pixel index and intensity on mouseover
+        # Hover cursor — show pixel index and intensity on mouseover, and
+        # mark the same place on the image below
         annot = ax.annotate("", xy=(0, 0), xytext=(15, 15),
                             textcoords="offset points",
                             bbox=dict(boxstyle="round,pad=0.3", fc="lightyellow", ec="gray", alpha=0.9),
                             fontsize=8, visible=False)
 
         def on_hover(event):
-            if event.inaxes != ax:
-                annot.set_visible(False)
-                canvas_widget.draw_idle()
+            if event.inaxes != ax or event.xdata is None:
+                if annot.get_visible() or len(here_marker.get_xdata()):
+                    annot.set_visible(False)
+                    here_marker.set_data([], [])
+                    canvas_widget.draw_idle()
                 return
             xi = int(round(event.xdata))
             if 0 <= xi < len(profile):
                 val = profile[xi]
                 annot.xy = (xi, val)
-                annot.set_text(f"px: {xi}\nintensity: {val:.1f}")
+                hx, hy = _on_line(xi)
+                annot.set_text(f"px: {xi}\nintensity: {val:.1f}\n"
+                               f"image x, y: {hx:.0f}, {hy:.0f}")
                 annot.set_visible(True)
+                here_marker.set_data([hx], [hy])
                 canvas_widget.draw_idle()
 
         fig.canvas.mpl_connect("motion_notify_event", on_hover)
@@ -1104,11 +1253,61 @@ class HSVMaskUIMixin:
               f"your range [{plot_min}, {plot_max}] using {method}{auto_info}")
 
     def _aoi_apply_filter(self):
-        """Build the AOI mask from the profile threshold range or polygon."""
-        import numpy as np
+        """Apply AOI button: build the AOI for the image shown and show it."""
         if self.full_image is None:
             messagebox.showwarning("AOI", "No image loaded.", parent=self)
             return
+        previous = getattr(self, "aoi_mask", None)
+        if not self._build_aoi_mask():
+            return
+        # From here on the AOI is rebuilt for every image that is loaded,
+        # until Clear AOI (see _reapply_aoi_to_new_image)
+        self._aoi_applied = True
+        print("[AOI] The AOI only limits where HSV Colour Masking and "
+              "Multi-sample Colour Selection look. Calculate a mask with one "
+              "of them next, then use Extract Boundary or Extract Polygon.")
+        changed = (previous is None or previous.shape != self.aoi_mask.shape
+                   or not np.array_equal(previous, self.aoi_mask))
+        if changed and getattr(self, "current_mask", None) is not None:
+            print("[AOI] The mask calculated earlier does not use this AOI yet: "
+                  "calculate it again.")
+
+        # Show AOI preview: original RGB with outside-AOI dimmed
+        self._center_view = "aoi"
+        self._refresh_center_panel()
+
+    def _reapply_aoi_to_new_image(self):
+        """
+        Another image was loaded.  The AOI mask in memory was made from the
+        image shown before (for an intensity range, from that image's pixel
+        values), so it is dropped and, when an AOI had been applied, built
+        again from the same entries for the new image.  Batch Processing
+        does the same for every image.
+        """
+        self.aoi_mask = None
+        self._aoi_preview_rgb = None
+        if not getattr(self, "_aoi_applied", False) or self.full_image is None:
+            return
+        if self._build_aoi_mask(dialogs=False, quiet=True):
+            nz = cv2.countNonZero(self.aoi_mask)
+            total = self.aoi_mask.shape[0] * self.aoi_mask.shape[1]
+            state = "" if self._aoi_filter_active() else " (the AOI box is not ticked, so it is not used)"
+            print(f"[AOI] Applied to this image: {nz}/{total} pixels "
+                  f"({100 * nz / total:.1f}%){state}")
+        else:
+            self._aoi_applied = False
+            print("[AOI] The AOI could not be applied to this image; "
+                  "check its entries and press Apply AOI.")
+
+    def _build_aoi_mask(self, dialogs=True, quiet=False):
+        """
+        Build self.aoi_mask for the image shown, from the polygon when one
+        is given, otherwise from the Min/Max intensity range.  Returns True
+        when a mask was built.
+        """
+        import numpy as np
+        self._aoi_preview_rgb = None
+        log = (lambda *a: None) if quiet else print
 
         # Check if we have a polygon AOI (drawn or from text entry)
         aoi_poly = getattr(self, '_aoi_polygon_pts', None)
@@ -1130,19 +1329,20 @@ class HSVMaskUIMixin:
             self.aoi_mask = np.zeros((h, w), dtype=np.uint8)
             pts = np.array(aoi_poly, dtype=np.int32).reshape((-1, 1, 2))
             cv2.fillPoly(self.aoi_mask, [pts], 255)
-            print(f"[AOI] Polygon mask applied: {len(aoi_poly)} vertices")
+            log(f"[AOI] Polygon mask applied: {len(aoi_poly)} vertices")
         else:
             # Threshold-based AOI
             try:
                 min_val = int(self.aoi_min_entry.get())
                 max_val = int(self.aoi_max_entry.get())
             except (ValueError, TypeError):
-                messagebox.showwarning("AOI", "Set Min and Max values first (use Preview Profile).", parent=self)
-                return
+                if dialogs:
+                    messagebox.showwarning("AOI", "Set Min and Max values first (use Preview Profile).", parent=self)
+                return False
 
             gray = cv2.cvtColor(self.full_image, cv2.COLOR_BGR2GRAY) if self.full_image.ndim == 3 else self.full_image.copy()
             self.aoi_mask = cv2.inRange(gray, min_val, max_val)
-            print(f"[AOI] Threshold mask applied: range [{min_val}, {max_val}]")
+            log(f"[AOI] Threshold mask applied: range [{min_val}, {max_val}]")
 
         if self.use_bbox.get():
             try:
@@ -1155,49 +1355,68 @@ class HSVMaskUIMixin:
 
         nz = cv2.countNonZero(self.aoi_mask)
         total = self.aoi_mask.shape[0] * self.aoi_mask.shape[1]
-        print(f"[AOI] {nz}/{total} pixels selected ({100*nz/total:.1f}%)")
-
-        # Show AOI preview: original RGB with outside-AOI dimmed
-        self._display_aoi_preview()
+        log(f"[AOI] {nz}/{total} pixels selected ({100*nz/total:.1f}%)")
+        return True
 
     def _display_aoi_preview(self):
-        """Display the AOI as a dimmed overlay of the original image in the mask panel."""
+        """
+        Show the AOI in the middle panel: the image with everything outside
+        the AOI dimmed and the AOI outlined in green, fitted to the panel
+        with the proportions of the image kept.
+        """
         import numpy as np
         if self.full_image is None or self.aoi_mask is None:
             return
         if not hasattr(self, 'mask_label') or not self.mask_label.winfo_exists():
             return
 
-        if self.full_image.ndim == 3:
-            img_rgb = cv2.cvtColor(self.full_image, cv2.COLOR_BGR2RGB)
-        else:
-            img_rgb = cv2.cvtColor(self.full_image, cv2.COLOR_GRAY2RGB)
+        # The picture is put together once per AOI, at most 1600 px on the
+        # longer side, and only scaled to the panel after that, so resizing
+        # the window stays quick on large images.
+        display = getattr(self, "_aoi_preview_rgb", None)
+        if display is None:
+            img = self.full_image
+            ih, iw = img.shape[:2]
+            s = min(1600.0 / max(ih, iw), 1.0)
+            size = (max(1, int(round(iw * s))), max(1, int(round(ih * s))))
+            small = cv2.resize(img, size, interpolation=cv2.INTER_AREA) if s < 1.0 else img
+            if small.ndim == 3:
+                img_rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
+            else:
+                img_rgb = cv2.cvtColor(small, cv2.COLOR_GRAY2RGB)
 
-        aoi = self.aoi_mask
-        if aoi.shape[:2] != img_rgb.shape[:2]:
-            aoi = cv2.resize(aoi, (img_rgb.shape[1], img_rgb.shape[0]),
-                             interpolation=cv2.INTER_NEAREST)
+            aoi = self.aoi_mask
+            if aoi.shape[:2] != img_rgb.shape[:2]:
+                # INTER_AREA and a 50 % cut: a pixel of the preview counts as
+                # inside when most of the image pixels it stands for are
+                aoi = cv2.resize(aoi, (img_rgb.shape[1], img_rgb.shape[0]),
+                                 interpolation=cv2.INTER_AREA)
+            inside = (aoi >= 128).astype(np.uint8) * 255
 
-        # Dim outside, keep inside bright, draw green boundary
-        dimmed = (img_rgb.astype(np.float32) * 0.25).astype(np.uint8)
-        display = np.where(aoi[:, :, np.newaxis] > 0, img_rgb, dimmed)
-        contours, _ = cv2.findContours(aoi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        cv2.drawContours(display, contours, -1, (0, 255, 0), 2)
+            # Dim outside, keep inside bright, draw green boundary
+            dimmed = (img_rgb.astype(np.float32) * 0.25).astype(np.uint8)
+            display = np.where(inside[:, :, np.newaxis] > 0, img_rgb, dimmed)
+            contours, _ = cv2.findContours(inside, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            cv2.drawContours(display, contours, -1, (0, 255, 0), 2)
+            self._aoi_preview_rgb = display
 
-        # Resize to mask panel size
+        # Fit to the panel, keeping the proportions of the image
+        h0, w0 = display.shape[:2]
         try:
             pw = self.top_center_frame.winfo_width()
             ph = self.top_center_frame.winfo_height()
-            if pw > 50 and ph > 50:
-                display = cv2.resize(display, (pw, ph), interpolation=cv2.INTER_AREA)
         except Exception:
-            pass
+            pw = ph = 0
+        if pw > 50 and ph > 50:
+            fit_w, fit_h = self._fit_size(w0, h0, pw, ph)
+        else:
+            fit_w, fit_h = self._fit_size(w0, h0, 600, 600)
+        if (fit_w, fit_h) != (w0, h0):
+            display = cv2.resize(display, (fit_w, fit_h), interpolation=cv2.INTER_AREA)
 
-        from PIL import Image as PILImage
-        pil_img = PILImage.fromarray(display)
-        import customtkinter as ctk
+        pil_img = Image.fromarray(display)
         ctk_img = ctk.CTkImage(light_image=pil_img, dark_image=pil_img,
-                               size=(pil_img.width, pil_img.height))
+                               size=(fit_w, fit_h))
         self.mask_label.configure(image=ctk_img)
         self.mask_label.image = ctk_img
 
@@ -1215,19 +1434,20 @@ class HSVMaskUIMixin:
 
         self._aoi_polygon_pts = []
 
-        win = tk.Toplevel(self)
+        win = ctk.CTkToplevel(self)
+        apply_window_icon(win)
         win.title("Draw AOI Polygon — click vertices, double-click to close")
-        win.geometry("900x650")
+        geometry_px(win, 900, 650)
 
-        canvas = tk.Canvas(win, cursor="cross")
+        canvas = tk.Canvas(win, cursor="cross", bg=DARK_CANVAS_BG, highlightthickness=0)
         canvas.pack(fill="both", expand=True)
 
         # Info bar
-        info_frame = tk.Frame(win)
+        info_frame = ctk.CTkFrame(win, fg_color="transparent")
         info_frame.pack(fill="x")
-        info_label = tk.Label(info_frame, text="Click to add vertices. Double-click to close polygon.")
+        info_label = ctk.CTkLabel(info_frame, text="Click to add vertices. Double-click to close polygon.")
         info_label.pack(side="left", padx=10)
-        coord_label = tk.Label(info_frame, text="Vertices: 0")
+        coord_label = ctk.CTkLabel(info_frame, text="Vertices: 0")
         coord_label.pack(side="right", padx=10)
 
         max_w, max_h = 880, 590
@@ -1256,7 +1476,7 @@ class HSVMaskUIMixin:
                     p2[0] * scale, p2[1] * scale,
                     fill="lime", width=2)
                 line_ids.append(lid)
-            coord_label.config(text=f"Vertices: {len(pts)}")
+            coord_label.configure(text=f"Vertices: {len(pts)}")
 
         def on_double_click(event):
             pts = self._aoi_polygon_pts
@@ -1279,14 +1499,22 @@ class HSVMaskUIMixin:
         canvas.bind("<Double-Button-1>", on_double_click)
 
     def _aoi_clear(self):
+        had_aoi = getattr(self, 'aoi_mask', None) is not None
         self.aoi_mask = None
+        self._aoi_applied = False
+        self._aoi_preview_rgb = None
         self._aoi_polygon_pts = None
         if hasattr(self, 'aoi_polygon_entry'):
             self.aoi_polygon_entry.delete(0, tk.END)
-        # Restore normal mask display if possible
-        if hasattr(self, 'current_mask') and self.current_mask is not None:
-            self.display_mask()
+        # The middle panel goes back to the mask, or is emptied when there
+        # is no mask (it used to keep showing the AOI that was just cleared)
+        self._center_view = "mask"
+        if hasattr(self, "_refresh_center_panel"):
+            self._refresh_center_panel()
         print("[AOI] Filter cleared.")
+        if had_aoi and getattr(self, 'current_mask', None) is not None:
+            print("[AOI] A mask calculated while the AOI was applied is still "
+                  "limited to it: calculate it again to use the whole image.")
 
 
     #  DROPDOWN 3: Colour Picker — toggle & actions
@@ -1394,14 +1622,15 @@ class HSVMaskUIMixin:
         marker_colour = "orange" if is_remove else "cyan"
         title_suffix = " (pick within highlighted AOI)" if aoi_active else ""
 
-        win = tk.Toplevel(self)
+        win = ctk.CTkToplevel(self)
+        apply_window_icon(win)
         win.title(f"Click to add {display_name}{title_suffix}")
-        win.geometry("820x680")
+        geometry_px(win, 820, 680)
 
         # Top bar with info + undo button
-        top_bar = tk.Frame(win)
+        top_bar = ctk.CTkFrame(win, fg_color="transparent")
         top_bar.pack(fill="x", padx=8, pady=(8, 2))
-        info_label = tk.Label(
+        info_label = ctk.CTkLabel(
             top_bar,
             text="Left-click to add samples. Right-click or Escape to finish.",
             anchor="w"
@@ -1429,14 +1658,15 @@ class HSVMaskUIMixin:
             print(f"[Color Picker] Undid last {display_name[:-1]}: "
                   f"({removed_pt[0]}, {removed_pt[1]}). Remaining: {len(pts)} pts.")
 
-        undo_btn = tk.Button(top_bar, text="Undo Last", bg="#8B0000", fg="white",
-                             command=undo_last_in_window)
+        undo_btn = ctk.CTkButton(top_bar, text="Undo Last", width=100,
+                                 fg_color="#8B0000", hover_color="#A52A2A",
+                                 command=undo_last_in_window)
         undo_btn.pack(side="right", padx=5)
 
-        coord_label = tk.Label(win, text=self._format_color_pick_group(label), anchor="w")
+        coord_label = ctk.CTkLabel(win, text=self._format_color_pick_group(label), anchor="w")
         coord_label.pack(fill="x", padx=8, pady=(0, 6))
 
-        canvas = tk.Canvas(win, cursor="cross")
+        canvas = tk.Canvas(win, cursor="cross", bg=DARK_CANVAS_BG, highlightthickness=0)
         canvas.pack(fill="both", expand=True)
 
         max_w, max_h = 790, 560
@@ -1622,6 +1852,9 @@ class HSVMaskUIMixin:
             "feature_id": self.feature_id_entry.get() if hasattr(self, 'feature_id_entry') else "",
             "image_id": self.image_id_entry.get() if hasattr(self, 'image_id_entry') else "1",
             "category_id": self.category_id_entry.get() if hasattr(self, 'category_id_entry') else "1",
+            # label -> category ID for per-shape labels (ignored by older releases)
+            "label_catalog": (self._label_catalog_for_settings()
+                              if hasattr(self, '_label_catalog_for_settings') else []),
             # ── batch extraction mode ──
             "batch_extraction_mode": self.batch_extraction_mode.get() if hasattr(self, 'batch_extraction_mode') else "boundary",
         }
@@ -1687,6 +1920,12 @@ class HSVMaskUIMixin:
                         for f in os.listdir(folder_path)
                         if f.lower().endswith(exts)
                     )
+                    if files and self.mode != "batch" \
+                            and getattr(self, "_edit_session_open", False) \
+                            and not self._abort_edit_session(prompt=True):
+                        print("[Settings] Image folder not reloaded: the shape "
+                              "editor is still open.")
+                        files = []
                     if files:
                         self.image_files = files
                         self._current_input_folder = folder_path
@@ -1786,7 +2025,10 @@ class HSVMaskUIMixin:
         self.ml_mask_file_disp.set(self._shorten_path(self.ml_mask_file_path.get()))
         self.ml_mask_folder_disp.set(short_path(self.ml_mask_folder_path.get())
                                      if self.ml_mask_folder_path.get() else "")
-        self.lbl_ml_mask_folder.configure(text_color=PATH_INPUT_COLOR)
+        # The folder label only exists in folder (ml) mode; in Single Image
+        # mode this line used to raise and abort the rest of Load Settings.
+        if hasattr(self, "lbl_ml_mask_folder"):
+            self.lbl_ml_mask_folder.configure(text_color=PATH_INPUT_COLOR)
 
 
         # reflect rows visibility
@@ -1825,6 +2067,21 @@ class HSVMaskUIMixin:
                     self._aoi_polygon_pts = None
             else:
                 self._aoi_polygon_pts = None
+        # The AOI in memory was built from the entries as they were before
+        # this file was loaded.  It is dropped, and an AOI that the file
+        # switches on is applied as Batch Processing applies it: to the image
+        # shown now and to every image loaded afterwards.
+        if self.mode != "batch":
+            self.aoi_mask = None
+            self._aoi_preview_rgb = None
+            self._aoi_applied = bool(self.use_aoi_filter.get())
+            if self._aoi_applied and getattr(self, "full_image", None) is not None:
+                if self._build_aoi_mask(dialogs=False):
+                    self._center_view = "aoi"
+                else:
+                    self._aoi_applied = False
+                    print("[AOI] The AOI of the settings file could not be applied; "
+                          "check its entries and press Apply AOI.")
         self._toggle_aoi_controls()
 
         # Load HSV masking toggle
@@ -1867,7 +2124,11 @@ class HSVMaskUIMixin:
         self.color_pick_class_a_name.set(data.get("color_pick_class_a_name", "water"))
         self.color_pick_class_b_name.set(data.get("color_pick_class_b_name", "sand"))
 
-        # Restore export identifiers
+        # Restore export identifiers.  The entries may be greyed out (editor
+        # open, or labels set in the editor); a disabled entry ignores
+        # delete/insert, so enable them for the restore.
+        if hasattr(self, "_set_default_entries_state"):
+            self._set_default_entries_state("normal")
         if hasattr(self, 'feature_id_entry'):
             self.feature_id_entry.delete(0, "end")
             self.feature_id_entry.insert(0, data.get("feature_id", ""))
@@ -1877,6 +2138,21 @@ class HSVMaskUIMixin:
         if hasattr(self, 'category_id_entry'):
             self.category_id_entry.delete(0, "end")
             self.category_id_entry.insert(0, data.get("category_id", "1"))
+
+        # Restore the label catalogue (label -> category ID).  Files written
+        # before per-shape labels have no such key: the catalogue then starts
+        # empty and the Feature ID / Category ID above work as before.
+        cat_entries = data.get("label_catalog", [])
+        new_catalog = LabelCatalog()
+        for c in new_catalog.merge(cat_entries if isinstance(cat_entries, list) else []):
+            print(f"[Settings] label_catalog: {c}")
+        self.label_catalog = new_catalog
+        if hasattr(self, "_sync_default_into_catalog"):
+            self._sync_default_into_catalog()
+        if getattr(self, "_edit_session_open", False) and hasattr(self, "_refresh_label_widgets"):
+            self._refresh_label_widgets()
+        if hasattr(self, "_refresh_label_summary"):
+            self._refresh_label_summary()      # also re-applies the lock
 
         # Restore batch extraction mode
         if hasattr(self, 'batch_extraction_mode'):
@@ -1898,12 +2174,12 @@ class HSVMaskUIMixin:
             poly = data.get("aoi_polygon", "")
             if poly:
                 n_verts = len(poly.split(";"))
-                lines.append(f"  ✓ AOI / Profile Filter: polygon with {n_verts} vertices")
+                lines.append(f"  ✓ Area of Interest (AOI): polygon with {n_verts} vertices")
             else:
-                lines.append(f"  ✓ AOI / Profile Filter: method={data.get('aoi_method','?')}, "
+                lines.append(f"  ✓ Area of Interest (AOI): method={data.get('aoi_method','?')}, "
                              f"range=[{data.get('aoi_min','?')}, {data.get('aoi_max','?')}]")
         else:
-            lines.append("  ✗ AOI / Profile Filter: disabled")
+            lines.append("  ✗ Area of Interest (AOI): disabled")
         if data.get("use_hsv_masking", True):
             lines.append(f"  ✓ HSV Masking: H=[{data.get('h_low',0)}–{data.get('h_high',255)}] "
                          f"S=[{data.get('s_low',0)}–{data.get('s_high',255)}] "
