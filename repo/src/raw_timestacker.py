@@ -1,6 +1,6 @@
 """
-raw_timestacker.py  —  GeoCamPal Raw Timestack Tool
-====================================================
+raw_timestacker.py  —  GeoCamPal Burst Images Timestacker
+==========================================================
 
 Purpose
 -------
@@ -8,7 +8,7 @@ Builds a raw timestack image from a folder of coastal camera frames.
 Each row in the output PNG corresponds to one time step; each column
 corresponds to one pixel position along the selected cross-shore or
 alongshore transect (or averaged across a bounding-box ROI).  The
-resulting image is the primary input for the Wave Run-Up Calculator.
+resulting image is the primary input for the Wave Run-up Calculator.
 
 A timestack compresses a time series of images into a single 2-D image
 where time runs vertically (newest row at the top) and distance runs
@@ -92,7 +92,6 @@ Dependencies
 import json
 import os
 import glob
-import sys
 import threading
 import time
 from datetime import datetime, timedelta
@@ -122,40 +121,14 @@ from utils import (
     compute_eta,
     make_selector_payload,
     imread_safe,
+    apply_window_icon,
+    window_scaling,
+    DARK_CANVAS_BG,
 )
 
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("green")
 
-
-def apply_window_icon(window):
-    """
-    Give a child window the GeoCamPal icon instead of the default Tk feather.
-
-    The .png via iconphoto() is the reliable cross-platform path — it is what
-    the other GeoCamPal windows use — and on Windows the .ico is applied on
-    top of it for a crisper title bar.  Both are re-applied after a short
-    delay because Tk can drop an icon that is set before the window is
-    mapped.  A missing asset is not fatal.
-    """
-    def _set():
-        try:
-            img = tk.PhotoImage(file=resource_path("launch_logo.png"))
-            window.iconphoto(False, img)
-            window._icon_image = img  # keep a reference alive
-        except Exception:
-            pass
-        if sys.platform == "win32":
-            try:
-                window.iconbitmap(resource_path("launch_logo.ico"))
-            except Exception:
-                pass
-
-    _set()
-    try:
-        window.after(200, _set)
-    except Exception:
-        pass
 
 # %% helpers
 
@@ -463,7 +436,7 @@ def _selector_pnginfo(info, selector, resolution_x_m,
                       time_interval_s=None, duration_s=None):
     mode = _selector_mode(selector)
     info.add_text("pixel_resolution", f"{resolution_x_m:.6f}")
-    # Seconds per row and total stack duration. Wave Run-Up reads
+    # Seconds per row and total stack duration. Wave Run-up reads
     # time_interval for its time axis; without it, it assumes 1 s per row,
     # which is wrong for bursts not captured at 1 Hz.
     if time_interval_s is not None and time_interval_s > 0:
@@ -689,23 +662,25 @@ def _process_subfolder(sub_path: str, selector: dict, res_x: float,
         return sub_path, "error", str(exc)
 
 
-class ScrollZoomSelector(tk.Frame):
+class ScrollZoomSelector(ctk.CTkFrame):
     """Scrollable/zoomable selector supporting bbox, straight line, and freehand."""
 
     def __init__(self, master, mode_var=None, line_width_var=None, **kwargs):
+        kwargs.setdefault("fg_color", "transparent")
         super().__init__(master, **kwargs)
         master.title("Select ROI")
         self.mode_var = mode_var or tk.StringVar(master=master, value="bbox")
         self.line_width_var = line_width_var or tk.StringVar(master=master, value="1")
 
-        top_frame = tk.Frame(self)   # packed at the end of __init__, see below
+        top_frame = ctk.CTkFrame(self, fg_color="transparent")   # packed at the end of __init__, see below
 
-        self.canvas = tk.Canvas(top_frame, cursor="cross", highlightthickness=0)
+        self.canvas = tk.Canvas(top_frame, cursor="cross", highlightthickness=0,
+                                bg=DARK_CANVAS_BG)
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        self.v_scroll = tk.Scrollbar(top_frame, orient=tk.VERTICAL, command=self.canvas.yview)
+        self.v_scroll = ctk.CTkScrollbar(top_frame, orientation="vertical", command=self.canvas.yview)
         self.v_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        self.h_scroll = tk.Scrollbar(self, orient=tk.HORIZONTAL, command=self.canvas.xview)
+        self.h_scroll = ctk.CTkScrollbar(self, orientation="horizontal", command=self.canvas.xview)
         self.h_scroll.pack(side=tk.BOTTOM, fill=tk.X)
         self.canvas.configure(xscrollcommand=self.h_scroll.set, yscrollcommand=self.v_scroll.set)
 
@@ -728,20 +703,21 @@ class ScrollZoomSelector(tk.Frame):
         self.canvas.bind("<ButtonRelease-1>", self.on_button_release)
         self.master.bind("<Return>", self.on_enter_key)
 
-        button_frame = tk.Frame(self)
+        button_frame = ctk.CTkFrame(self, fg_color="transparent")
         button_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=5, pady=5)
-        tk.Button(button_frame, text="Load Image", command=self.load_image).pack(side=tk.LEFT, padx=5)
-        tk.Button(button_frame, text="Zoom In", command=self.zoom_in).pack(side=tk.LEFT, padx=5)
-        tk.Button(button_frame, text="Zoom Out", command=self.zoom_out).pack(side=tk.LEFT, padx=5)
-        tk.Button(button_frame, text="Fit to Window", command=self.fit_to_window).pack(side=tk.LEFT, padx=5)
-        tk.Button(button_frame, text="100%", command=self.actual_size).pack(side=tk.LEFT, padx=5)
-        self.zoom_lbl = tk.Label(button_frame, text="")
+        ctk.CTkButton(button_frame, text="Load Image", width=90, command=self.load_image).pack(side=tk.LEFT, padx=5)
+        ctk.CTkButton(button_frame, text="Zoom In", width=80, command=self.zoom_in).pack(side=tk.LEFT, padx=5)
+        ctk.CTkButton(button_frame, text="Zoom Out", width=80, command=self.zoom_out).pack(side=tk.LEFT, padx=5)
+        ctk.CTkButton(button_frame, text="Fit to Window", width=100, command=self.fit_to_window).pack(side=tk.LEFT, padx=5)
+        ctk.CTkButton(button_frame, text="100%", width=60, command=self.actual_size).pack(side=tk.LEFT, padx=5)
+        self.zoom_lbl = ctk.CTkLabel(button_frame, text="")
         self.zoom_lbl.pack(side=tk.LEFT, padx=(12, 3))
-        tk.Label(button_frame, text="Mode:").pack(side=tk.LEFT, padx=(15, 3))
-        tk.OptionMenu(button_frame, self.mode_var, "bbox", "line", "freehand").pack(side=tk.LEFT, padx=3)
-        tk.Label(button_frame, text="Line width:").pack(side=tk.LEFT, padx=(12, 3))
-        tk.Entry(button_frame, textvariable=self.line_width_var, width=4).pack(side=tk.LEFT, padx=3)
-        tk.Label(button_frame, text="Drag to select; press Enter to confirm").pack(side=tk.LEFT, padx=10)
+        ctk.CTkLabel(button_frame, text="Mode:").pack(side=tk.LEFT, padx=(15, 3))
+        ctk.CTkOptionMenu(button_frame, variable=self.mode_var, values=["bbox", "line", "freehand"],
+                          width=110).pack(side=tk.LEFT, padx=3)
+        ctk.CTkLabel(button_frame, text="Line width:").pack(side=tk.LEFT, padx=(12, 3))
+        ctk.CTkEntry(button_frame, textvariable=self.line_width_var, width=50).pack(side=tk.LEFT, padx=3)
+        ctk.CTkLabel(button_frame, text="Drag to select; press Enter to confirm").pack(side=tk.LEFT, padx=10)
 
         # Packed last on purpose.  Tk's packer hands out space in packing
         # order, so the toolbar and scrollbar claim their strips first and the
@@ -845,10 +821,10 @@ class ScrollZoomSelector(tk.Frame):
         if lbl is None:
             return
         if self.scale_factor >= 1.0:
-            lbl.config(text=f"Zoom {self.scale_factor * 100:.0f}%  "
+            lbl.configure(text=f"Zoom {self.scale_factor * 100:.0f}%  "
                             f"(full pixel precision)")
         else:
-            lbl.config(text=f"Zoom {self.scale_factor * 100:.0f}%  "
+            lbl.configure(text=f"Zoom {self.scale_factor * 100:.0f}%  "
                             f"(1 screen px = {1.0 / self.scale_factor:.1f} "
                             f"image px \u2014 zoom in for exact edges)")
 
@@ -954,7 +930,7 @@ class ScrollZoomSelector(tk.Frame):
 class TimestackTool(ctk.CTkToplevel):
     def __init__(self, master=None):
         super().__init__(master)
-        self.title("Burst Images Time-stacker module")
+        self.title("Burst Images Timestacker Module")
         fit_geometry(self, 1200, 800, resizable=True)
         try:
             self.after(200, lambda: self.iconphoto(False, tk.PhotoImage(file=resource_path("launch_logo.png"))))
@@ -1278,16 +1254,20 @@ class TimestackTool(ctk.CTkToplevel):
         if not imgs:
             messagebox.showerror("Error", "No supported image files found in folder.", parent=self)
             return
-        win = tk.Toplevel(self)
+        win = ctk.CTkToplevel(self)
         apply_window_icon(win)
         sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+        # CTkToplevel multiplies geometry()/maxsize() by the DPI factor;
+        # divide the physical-pixel sizes by it so the window keeps the
+        # size it had as a plain Toplevel.
+        f = window_scaling(win)
         # Leave room for the taskbar / window decorations: a window taller
         # than the usable desktop hides its own bottom strip, which is where
         # the Confirm button lives.  maxsize also binds the window manager,
         # so maximising from the title bar stays inside the visible area.
         usable_h = int(sh * 0.90)
-        win.maxsize(sw, usable_h)
-        win.geometry("%dx%d+%d+%d" % (int(sw * 0.85), usable_h,
+        win.maxsize(int(sw / f), int(usable_h / f))
+        win.geometry("%dx%d+%d+%d" % (int(sw * 0.85 / f), int(usable_h / f),
                                       int(sw * 0.07), int(sh * 0.03)))
         sel = ScrollZoomSelector(win, mode_var=self.selector_mode_var, line_width_var=self.line_width_var)
         # Confirm is packed BEFORE the selector, against the bottom edge, so
