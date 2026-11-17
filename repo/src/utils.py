@@ -40,7 +40,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 #  Import this everywhere the version is shown or recorded (launcher
 #  footer, calibration reports, saved-settings provenance) so the
 #  number can never drift between the GUI, the code, and the paper.
-__version__ = "1.0.3"
+__version__ = "1.0.4"
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -500,10 +500,105 @@ def bring_child_to_front(child, parent=None, modal: bool = False) -> None:
         pass
 
     if modal:
+        def _grab():
+            try:
+                if child.winfo_exists():
+                    child.grab_set()
+            except Exception:
+                pass
         try:
             child.grab_set()
         except Exception:
+            # A CTkToplevel is withdrawn for a few milliseconds while its
+            # title bar is restyled, and a grab on an unmapped window fails.
+            # Retry once the window is viewable.
+            try:
+                child.after(200, _grab)
+            except Exception:
+                pass
+
+
+# ─────────────────────────────────────────────────────────────────────
+#  Window chrome  —  logo icon and DPI-safe sizing for child windows
+# ─────────────────────────────────────────────────────────────────────
+
+# Background for tk.Canvas widgets embedded in dark customtkinter windows.
+# "gray14" is customtkinter's dark-mode window colour, so the canvas blends
+# into the window instead of showing as a light grey rectangle.
+DARK_CANVAS_BG = "#242424"
+
+
+def apply_window_icon(window, delay_ms: int = 250) -> None:
+    """
+    Give any child window (CTkToplevel, tk.Toplevel, CTk) the GeoCamPal logo.
+
+    The .png via iconphoto() works on every platform.  On Windows the .ico
+    via iconbitmap() is layered on top for a crisper title bar; calling
+    iconbitmap() straight away also tells CTkToplevel that an icon has been
+    chosen, so it does not install its own default icon 200 ms later.
+
+    The icon is set once immediately and once more after ``delay_ms``
+    because Tk can drop an icon set before the window is mapped, and
+    CTkToplevel reconfigures its title bar shortly after construction.
+    A missing asset is not fatal.
+    """
+    def _set():
+        try:
+            if not window.winfo_exists():
+                return
+        except Exception:
+            return
+        try:
+            img = tk.PhotoImage(master=window,
+                                file=resource_path("launch_logo.png"))
+            window.iconphoto(False, img)
+            window._icon_image = img  # keep a reference alive
+        except Exception:
             pass
+        if sys.platform == "win32":
+            try:
+                window.iconbitmap(resource_path("launch_logo.ico"))
+            except Exception:
+                pass
+
+    _set()
+    try:
+        window.after(delay_ms, _set)
+    except Exception:
+        pass
+
+
+def window_scaling(window) -> float:
+    """
+    Factor by which a customtkinter window multiplies geometry(), minsize()
+    and maxsize() requests (DPI scaling x user window scaling).
+
+    Plain Tk windows return 1.0, as does any window whose factor cannot be
+    read.
+    """
+    try:
+        from customtkinter import ScalingTracker
+        return float(ScalingTracker.get_window_scaling(window)) or 1.0
+    except Exception:
+        return 1.0
+
+
+def geometry_px(window, width, height, x=None, y=None) -> None:
+    """
+    Size (and optionally place) *window* in physical screen pixels.
+
+    CTkToplevel.geometry() multiplies the requested size by the DPI scaling
+    factor, so a popup converted from tk.Toplevel would otherwise grow on
+    high-DPI screens.  Dividing by that factor first keeps the size the
+    design intended.  Positions are never scaled by customtkinter.
+    """
+    f = window_scaling(window)
+    w = max(1, int(round(width / f)))
+    h = max(1, int(round(height / f)))
+    if x is None or y is None:
+        window.geometry(f"{w}x{h}")
+    else:
+        window.geometry(f"{w}x{h}+{int(x)}+{int(y)}")
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -850,6 +945,44 @@ def imread_safe(path, flags=cv2.IMREAD_COLOR, *, verbose=True):
         print(f"[imread] File exists but could not be decoded "
               f"(unsupported format or corrupt): {path}")
     return img
+
+
+def imwrite_safe(path, img, params=None, *, verbose=True):
+    """
+    Drop-in replacement for cv2.imwrite that does not fail silently.
+
+    cv2.imwrite returns False, without raising, when it cannot write the
+    file: for example for non-ASCII paths on Windows or paths it treats as
+    too long.  This writes with cv2.imwrite first (identical output), then
+    falls back to encoding in memory and writing the bytes with numpy.
+
+    Returns True when the file was written, False otherwise (with the
+    reason printed), so callers can report the failure.
+    """
+    path = os.fspath(path)
+    params = list(params) if params else []
+    try:
+        # On Windows cv2.imwrite "succeeds" on a non-ASCII path but writes a
+        # file whose name is the UTF-8 bytes read as ANSI; take the numpy
+        # path for those straight away.
+        if path.isascii() and cv2.imwrite(path, img, params):
+            return True
+    except cv2.error as e:
+        if verbose:
+            print(f"[imwrite] cv2.imwrite failed for {path}: {e}")
+    ext = os.path.splitext(path)[1] or ".png"
+    try:
+        ok, buf = cv2.imencode(ext, img, params)
+        if not ok:
+            if verbose:
+                print(f"[imwrite] Could not encode the image as {ext}: {path}")
+            return False
+        buf.tofile(path)
+        return True
+    except Exception as e:
+        if verbose:
+            print(f"[imwrite] Could not write {path}: {type(e).__name__}: {e}")
+        return False
 
 # ─────────────────────────────────────────────────────────────────────
 #  Backward-compatible alias
