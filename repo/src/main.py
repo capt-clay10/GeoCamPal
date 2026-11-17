@@ -21,8 +21,8 @@ The launcher groups tools into six labelled sections:
 
     Data Exploration Tools
         Time Series Analysis — multi-series hydrodynamic image selector
-        Color Space Explorer — color distribution analysis across an
-                               image folder
+        Colour Space Explorer — colour distribution analysis across
+                                an image folder
 
     Georeferencing Tools
         Pixel to GCP        — interactive pixel-coordinate picker for
@@ -43,12 +43,12 @@ The launcher groups tools into six labelled sections:
         Create DEM          — waterline-method DEM from shoreline
                               GeoJSON files and a water-level CSV
 
-    Time-stacking Tools
+    Timestacking Tools
         Profile & Hovmöller — pixel-profile extraction and Hovmöller
                               diagram generation
-        Raw Timestack Image — builds a raw timestack PNG from a folder
-                              of coastal camera images
-        Wave Run Up         — extracts wave run-up from a timestack and
+        Burst Images Timestacker — builds a raw timestack PNG from a
+                              folder of coastal camera images
+        Wave Run-up         — extracts wave run-up from a timestack and
                               an annotation file
 
 One-module-at-a-time guard
@@ -289,7 +289,7 @@ def launcher_window():
     exp_frame = ctk.CTkFrame(frame, fg_color="transparent")
     exp_frame.pack(fill="x", pady=5)
     ctk.CTkButton(exp_frame, text="Time Series Analysis", command=open_timeseries).pack(side="left", padx=5)
-    ctk.CTkButton(exp_frame, text="Color Space Explorer", command=open_color_explorer).pack(side="left", padx=5)
+    ctk.CTkButton(exp_frame, text="Colour Space Explorer", command=open_color_explorer).pack(side="left", padx=5)
 
     # (C) Georeferencing
     ctk.CTkLabel(frame, text="Georeferencing Tools", font=("Serif", 14, "bold")) \
@@ -317,14 +317,14 @@ def launcher_window():
     ctk.CTkButton(dem_frame, text="Create DEM", command=open_dem) \
         .pack(side="left", padx=5)
 
-    # (F) Time-stacking
-    ctk.CTkLabel(frame, text="Time-stacking Tools", font=("Serif", 14, "bold")) \
+    # (F) Timestacking
+    ctk.CTkLabel(frame, text="Timestacking Tools", font=("Serif", 14, "bold")) \
         .pack(anchor="w", pady=(10,0))
     ts_frame = ctk.CTkFrame(frame, fg_color="transparent")
     ts_frame.pack(fill="x", pady=5)
     ctk.CTkButton(ts_frame, text="Profile & Hovmöller",  command=open_profile).pack(side="left", padx=5)
-    ctk.CTkButton(ts_frame, text="Burst Images Time-stacker", command=open_timestack).pack(side="left", padx=5)
-    ctk.CTkButton(ts_frame, text="Wave Run Up",          command=open_wave_run).pack(side="left", padx=5)
+    ctk.CTkButton(ts_frame, text="Burst Images Timestacker", command=open_timestack).pack(side="left", padx=5)
+    ctk.CTkButton(ts_frame, text="Wave Run-up",          command=open_wave_run).pack(side="left", padx=5)
 
 
 
