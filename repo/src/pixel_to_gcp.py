@@ -81,6 +81,12 @@ Output
     camera      — extracted from the filename if present
                   (e.g. cam1 from GCP_3_cam1.jpg), else "0"
 
+    Pixel_X, Pixel_Y — column and row of the clicked image pixel, counted
+                  from 0 at the top-left pixel.  The pixel under the cursor
+                  is stored at every zoom, so whole numbers are pixel
+                  centres.  The Homography Matrix Generator and all methods
+                  of the Georeferencing Module use them this way.
+
 Dependencies
 ------------
     numpy, pandas, Pillow, utm, customtkinter, utils, csv_utils
@@ -1105,8 +1111,8 @@ class PixelToGCPWindow(ctk.CTkToplevel):
         if self.current_filename in self.selected_points:
             px, py = self.selected_points[self.current_filename]
             r = 3
-            ox = px * scale
-            oy = py * scale
+            ox = (px + 0.5) * scale
+            oy = (py + 0.5) * scale
             self.overview_canvas.create_oval(ox - r, oy - r, ox + r, oy + r, fill="yellow", outline="black")
 
     # CLICK & SCROLL
@@ -1119,9 +1125,14 @@ class PixelToGCPWindow(ctk.CTkToplevel):
         x_canvas = self.main_canvas.canvasx(event.x)
         y_canvas = self.main_canvas.canvasy(event.y)
 
-        # Exact mapping from zoomed canvas back to original source pixels
-        x_full = int(round(x_canvas / z))
-        y_full = int(round(y_canvas / z))
+        # The image pixel under the cursor.  The canvas pixel x shows the image from
+        # x / z to (x + 1) / z; the image pixel that holds its centre is stored.
+        # Pixel_X and Pixel_Y are therefore pixel indices counted from 0, and whole
+        # numbers are pixel centres, at every zoom.  (Up to v1.0.3 the position was
+        # rounded: zoomed in, a click on the right or lower half of a pixel was
+        # stored as the next pixel.)
+        x_full = int((x_canvas + 0.5) // z)
+        y_full = int((y_canvas + 0.5) // z)
 
         full_w, full_h = self.current_pil_img.size
         x_full = max(0, min(full_w - 1, x_full))
@@ -1146,8 +1157,8 @@ class PixelToGCPWindow(ctk.CTkToplevel):
 
         px, py = self.selected_points[self.current_filename]
         z = max(_MIN_ZOOM, min(_MAX_ZOOM, float(self.scale_factor)))
-        cx = px * z
-        cy = py * z
+        cx = (px + 0.5) * z     # the centre of the stored pixel
+        cy = (py + 0.5) * z
         size = max(5, min(14, int(round(6 + z * 0.2))))
 
         self._selection_ids.append(
