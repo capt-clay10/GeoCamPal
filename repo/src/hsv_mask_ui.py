@@ -1408,15 +1408,15 @@ class HSVMaskUIMixin:
         except Exception:
             pw = ph = 0
         if pw > 50 and ph > 50:
-            fit_w, fit_h = self._fit_size(w0, h0, pw, ph)
+            size, pixels = self._fit_for_label(w0, h0, pw, ph, self.mask_label)
         else:
-            fit_w, fit_h = self._fit_size(w0, h0, 600, 600)
-        if (fit_w, fit_h) != (w0, h0):
-            display = cv2.resize(display, (fit_w, fit_h), interpolation=cv2.INTER_AREA)
+            size = pixels = self._fit_size(w0, h0, 600, 600)
+        if pixels != (w0, h0):
+            display = cv2.resize(display, pixels, interpolation=cv2.INTER_AREA)
 
         pil_img = Image.fromarray(display)
         ctk_img = ctk.CTkImage(light_image=pil_img, dark_image=pil_img,
-                               size=(fit_w, fit_h))
+                               size=size)
         self.mask_label.configure(image=ctk_img)
         self.mask_label.image = ctk_img
 
