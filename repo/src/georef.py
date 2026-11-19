@@ -44,10 +44,48 @@ Workflow (single image)
        and inspect per-GCP residuals.
     7. Optionally run Optimise GCPs (simulated annealing) to find
        the subset of GCPs that minimises mean LOO error, or exclude
-       individual GCPs manually.
+       individual GCPs manually.  The search leaves out two GCPs and
+       takes 100000 steps (for 120 GCPs about an hour with Homography
+       or Camera Projection, several hours with Thin Plate Spline);
+       a progress bar and the remaining time appear in the row of the
+       button (the bar beside Process All is that of the batch).
+       While it runs, the button reads Stop optimisation and the other
+       buttons and the Exclude GCPs field are off.  A finished run adds
+       its two GCPs to those already in Exclude GCPs; a stopped run
+       changes nothing.
     8. Click Secondary Georeferencing to apply the refined settings
        and generate the final preview.
     9. Set input/output folders and click Process All for batch export.
+       Process All, its progress bar and the remaining time are in the
+       bottom row, after Save Settings, Load Settings and Reset, where
+       they are in view whatever the length of the folder names.
+
+Stages
+------
+The buttons follow the workflow.  Secondary Georeferencing, Select AOI
+and Set need a result of Initial Georeferencing.  Process All needs a
+result of Secondary Georeferencing made with the settings as they are:
+it writes, for every image, what the right panel shows.  Initial
+Georeferencing empties the right panel; so does a change of the corner
+preset, the S/N/E/W values, the scale, the elevation, the excluded
+GCPs, the EPSG code or the AOI after Secondary Georeferencing.  Another
+method, image or input file, Load Settings and Reset empty both result
+panels.  While Process All runs, the buttons that change what it reads
+are switched off.
+
+Picture panels
+--------------
+The three panels (original, initial and secondary georeferencing) show
+the whole image, fitted to the panel.  Mouse wheel: zoom in and out
+about the cursor.  Left button held: move.  Double-click or right-click:
+the whole image again.  The panels only draw; they do not change the
+previews or anything Process All uses.
+
+After Initial and Secondary Georeferencing the console states which
+share of the preview holds image data and the pixel box around it
+(x1,y1,x2,y2, the form of the AOI field).  The corner preset and the
+S/N/E/W values set the extent of the grid; nothing limits it to the
+part that holds image data.
 
 Accuracy assessment
 -------------------
@@ -85,13 +123,19 @@ Inputs
     Homography file       — plain-text 3×3 matrix, optional EPSG comment
     GCP CSV               — columns Pixel_X, Pixel_Y, Real_X, Real_Y,
                              Real_Z, GCP_ID, EPSG (see csv_utils.py)
+                             Pixel_X and Pixel_Y count pixels from 0; whole
+                             numbers are pixel centres (as Pixel to GCP
+                             writes them).  All methods use them this way.
     Calibration pickle    — dict with camera_matrix, dist_coeff,
                              image_size (from lens_correction.py)
 
 Outputs
 -------
     <image_name>.tif      — DEFLATE-compressed GeoTIFF with alpha channel,
-                             CRS set from EPSG, pixel size from GSD estimate
+                             CRS set from EPSG, pixel size from GSD estimate.
+                             The geotransform starts at the outer corner of
+                             the first pixel, so a pixel's value belongs to
+                             the map position of its centre.
     georef_failures.txt   — written only when a batch has failures: every
                              failed file with its reason (written to the
                              output folder)
@@ -321,7 +365,11 @@ def _make_gdal_gcps(df):
         g = gdal.GCP()
         g.GCPX = float(row["Real_X"]); g.GCPY = float(row["Real_Y"])
         g.GCPZ = float(row.get("Real_Z", 0))
-        g.GCPPixel = float(row["Pixel_X"]); g.GCPLine = float(row["Pixel_Y"])
+        # Pixel_X / Pixel_Y count pixels from 0 and whole numbers are pixel centres: the
+        # convention of Pixel to GCP and of OpenCV, which the homography and the camera
+        # projection use.  GDAL counts from the outer corner of the first pixel, where that
+        # centre is at 0.5.
+        g.GCPPixel = float(row["Pixel_X"]) + 0.5; g.GCPLine = float(row["Pixel_Y"]) + 0.5
         g.Id = str(row.get("GCP_ID", ""))
         gcps.append(g)
     epsg = int(df["EPSG"].iloc[0]) if "EPSG" in df.columns else 0
@@ -357,7 +405,10 @@ def _write_geotiff(path, bgr, alpha, gt, epsg, lock=None):
         ds = drv.Create(path, w, h, 4, gdal.GDT_Byte,
                         ["COMPRESS=DEFLATE","TILED=YES"])
         if ds is None: return False
-        ds.SetGeoTransform(gt)
+        # gt gives the map position of the first sample, that is of the CENTRE of the first
+        # pixel (homography warp and camera projection grid).  The geotransform of a GeoTIFF
+        # starts at the outer corner of that pixel, half a pixel further out.
+        ds.SetGeoTransform((gt[0] - gt[1] / 2.0, gt[1], gt[2], gt[3] - gt[5] / 2.0, gt[4], gt[5]))
         srs = osr.SpatialReference(); srs.ImportFromEPSG(int(epsg))
         ds.SetProjection(srs.ExportToWkt())
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
@@ -388,6 +439,43 @@ def _apply_crop_to_extent(extent, crop_fracs):
     x0 -= dx * cw; x1 -= dx * ce
     y0 += dy * cs; y1 += dy * cn
     return x0, y0, x1, y1
+
+# ── AOI of a homography warp ──
+def _aoi_box_in_warp(aoi, aoi_shape, aoi_gt, warp_shape, warp_gt):
+    """The AOI as a pixel box (x1, y1, x2, y2) of a homography warp.
+
+    The AOI is given in pixels of the preview it was set on.  That preview is
+    either the whole warp, possibly at another scale (the AOI is scaled), or
+    itself an AOI part of it (the AOI is also moved by the place of that part,
+    taken from the two geotransforms)."""
+    x1, y1, x2, y2 = [float(v) for v in aoi]
+    oh, ow = aoi_shape; nh, nw = warp_shape
+    if aoi_gt is None or (aoi_gt[0] == warp_gt[0] and aoi_gt[3] == warp_gt[3]):
+        sx, sy = nw/ow, nh/oh
+        x1, y1, x2, y2 = x1*sx, y1*sy, x2*sx, y2*sy
+    else:
+        fx, fy = aoi_gt[1]/warp_gt[1], aoi_gt[5]/warp_gt[5]
+        dx, dy = (aoi_gt[0]-warp_gt[0])/warp_gt[1], (aoi_gt[3]-warp_gt[3])/warp_gt[5]
+        e = 1e-6    # a shift by a whole number of pixels must not end up just below it
+        x1, y1, x2, y2 = x1*fx+dx+e, y1*fy+dy+e, x2*fx+dx+e, y2*fy+dy+e
+    return max(0, int(x1)), max(0, int(y1)), min(nw, int(x2)), min(nh, int(y2))
+
+# ── Where a preview holds image data (console line) ──
+def _data_mask(bgr):
+    """True where a preview holds image data: grey value above 1, the rule
+    by which Process All sets the alpha band of a homography GeoTIFF."""
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY) if bgr.ndim == 3 else bgr
+    return gray > 1
+
+def _data_extent_text(mask):
+    """Share of the preview that holds image data and the pixel box around
+    it, in the form of the AOI field (x1,y1,x2,y2)."""
+    n = int(np.count_nonzero(mask))
+    if n == 0:
+        return "No image data in the preview"
+    cols = np.flatnonzero(mask.any(axis=0)); rows = np.flatnonzero(mask.any(axis=1))
+    return (f"Image data in {100.0 * n / mask.size:.1f} % of the preview, within pixel coords "
+            f"{cols[0]},{rows[0]},{cols[-1] + 1},{rows[-1] + 1} (x1,y1,x2,y2)")
 
 # ── LOO Cross-Validation ──
 def _loo_homography(df):
@@ -462,9 +550,26 @@ def compute_loo(df, method_key, K=None, dist=None, elev=0.0):
     else: return _loo_tps_poly(df, method_key)
 
 # ── Simulated Annealing ──
+SA_TEXT = "Optimise GCPs (SA)"          # the button; while a run goes on it reads SA_STOP_TEXT
+SA_STOP_TEXT = "Stop optimisation"
+
+def merge_gcp_exclusions(before, new):
+    """Text for the Exclude GCPs field after an optimisation: the numbers that
+    were in the field, then the new ones.  A field that was not a list of
+    numbers excluded nothing (see _get_working_df) and is replaced."""
+    try:
+        old = [x.strip() for x in str(before).split(",") if x.strip()]
+        [int(x) for x in old]
+    except ValueError:
+        old = []
+    return ",".join(old + [t for t in new if t not in old])
+
 def run_sa_optimisation(df, method_key, K=None, dist=None, elev=0.0,
                         n_keep=None, max_iter=100000, temp=10000,
-                        cooling=0.9999, log_fn=print):
+                        cooling=0.9999, log_fn=print, progress_fn=None, stop_fn=None):
+    # progress_fn(steps done, steps in all, best cost, seconds) is called about
+    # twice a second and once at the end; stop_fn() returning True ends the
+    # search before its next step.  Neither changes the search itself.
     n = len(df)
     if n_keep is None: n_keep = max(4, n - 2)
     n_keep = min(n_keep, n)
@@ -478,8 +583,9 @@ def run_sa_optimisation(df, method_key, K=None, dist=None, elev=0.0,
     current_cost = _cost(current_sub)
     best_sub, best_cost = current_sub.copy(), current_cost
     log_fn(f"[SA] Starting: {n_keep}/{n} GCPs, cost={current_cost:.2f} m")
-    t0 = time.time()
+    t0 = time.time(); t_rep = t0; done = 0; stopped = False
     for it in range(max_iter):
+        if stop_fn is not None and stop_fn(): stopped = True; break
         new_sub = current_sub.copy()
         outside = np.setdiff1d(idx_all, new_sub)
         if len(outside) == 0: break
@@ -491,11 +597,19 @@ def run_sa_optimisation(df, method_key, K=None, dist=None, elev=0.0,
         if dc < 0 or random.random() < np.exp(-dc / max(temp, 1e-10)):
             current_sub, current_cost = new_sub, new_cost
         temp *= cooling
+        done = it + 1
         if (it+1) % 20000 == 0:
             log_fn(f"  [SA] iter {it+1}  temp={temp:.2f}  best={best_cost:.2f} m")
-    log_fn(f"[SA] Done in {time.time()-t0:.1f}s — best: {best_cost:.2f} m")
+        if progress_fn is not None and time.time() - t_rep >= 0.5:
+            t_rep = time.time(); progress_fn(done, max_iter, best_cost, t_rep - t0)
+    if progress_fn is not None: progress_fn(done, max_iter, best_cost, time.time() - t0)
     ids = df["GCP_ID"].values if "GCP_ID" in df.columns else np.arange(n)
     excluded = np.setdiff1d(idx_all, best_sub)
+    if stopped:
+        log_fn(f"[SA] Stopped at step {done} of {max_iter} after {time.time()-t0:.1f}s — best so far: {best_cost:.2f} m")
+        if len(excluded) > 0: log_fn(f"[SA] Best so far excludes: {[str(ids[i]) for i in excluded]}")
+        return best_sub, best_cost
+    log_fn(f"[SA] Done in {time.time()-t0:.1f}s — best: {best_cost:.2f} m")
     if len(excluded) > 0: log_fn(f"[SA] Excluded: {[str(ids[i]) for i in excluded]}")
     return best_sub, best_cost
 
@@ -594,6 +708,167 @@ class InteractiveAOISelector(ctk.CTkToplevel):
         self._cb(a, b, d, e); self.destroy()
 
 
+# ── Picture panel with zoom ──
+ZOOM_HINT = ("Mouse wheel on a picture: zoom  ·  hold the left button: move  "
+             "·  double-click: whole image")
+
+class ZoomPanel:
+    """One picture panel of the Georeferencing Module.
+
+    Shows the whole image, fitted to the panel; nothing is cut off.
+    Mouse wheel: zoom in and out about the cursor.  Left button held: move.
+    Double-click or right-click: the whole image again.
+
+    Display only.  The panel keeps a reference to the array it is given and
+    reads from it.  It never writes to it, and nothing the panel holds is
+    read by the georeferencing or by Process All.
+    """
+    MAX_ZOOM = 16.0     # screen pixels per image pixel
+    STEP = 1.25         # one notch of the mouse wheel
+    PAD = 4             # margin around the fitted picture, px
+
+    def __init__(self, parent, name):
+        self.name = name
+        self._arr = None; self._bgr = False
+        self._zoom = None             # None: whole image; else screen px per image px
+        self._ox = self._oy = 0.0     # image coordinate at the left / top edge of the view
+        self._drag = None; self._job = None; self._tk = None
+        self._note = ""               # shown under the name while the panel is empty
+        self.view = None              # what is drawn: image size, pixel box in view, zoom
+        fr = ctk.CTkFrame(parent, width=370, height=340, fg_color="black")
+        fr.pack_propagate(False); fr.pack(side="left", fill="both", expand=True, padx=4, pady=4)
+        self._cap = ctk.CTkLabel(fr, text="", fg_color="black", text_color="#9aa", font=("Arial", 11), height=32)
+        self._cap.pack(side="bottom", fill="x")
+        self._c = c = tk.Canvas(fr, bg="black", highlightthickness=0)
+        c.pack(side="top", fill="both", expand=True)
+        c.bind("<Configure>", lambda e: self._schedule())
+        for ev in ("<MouseWheel>", "<Button-4>", "<Button-5>"): c.bind(ev, self._wheel)
+        c.bind("<ButtonPress-1>", self._press); c.bind("<B1-Motion>", self._move)
+        c.bind("<ButtonRelease-1>", self._release)
+        c.bind("<Double-Button-1>", self.whole); c.bind("<ButtonPress-3>", self.whole)
+
+    def show(self, src):
+        """src: an image file, or a BGR array (a georeferencing preview)."""
+        if isinstance(src, np.ndarray):
+            self._arr, self._bgr = src, src.ndim == 3
+        else:
+            im = Image.open(src)
+            arr = None
+            if im.mode in ("I", "F") or im.mode.startswith("I;"):
+                arr = imread_safe(src, verbose=False)      # 16-bit and float images: as OpenCV reads them
+            if arr is not None:
+                self._arr, self._bgr = arr, arr.ndim == 3
+            else:
+                if im.mode in ("RGBA", "LA", "PA") or (im.mode == "P" and "transparency" in im.info):
+                    im = im.convert("RGBA")
+                    im = Image.alpha_composite(Image.new("RGBA", im.size, (0, 0, 0, 255)), im)
+                self._arr, self._bgr = np.asarray(im.convert("RGB")), False
+        self._zoom = None; self._ox = self._oy = 0.0
+        self._draw()
+
+    def clear(self, note=""):
+        self._arr = None; self._zoom = None; self._ox = self._oy = 0.0; self._note = note
+        self._draw()
+
+    def whole(self, _e=None):
+        self._zoom = None; self._ox = self._oy = 0.0
+        self._draw()
+
+    def set_view(self, zoom, centre):
+        """Zoom (screen px per image px) with the image point *centre* in the middle of the panel."""
+        cw, ch = self._c.winfo_width(), self._c.winfo_height()
+        self._zoom = float(zoom)
+        self._ox = centre[0] - cw / 2 / self._zoom; self._oy = centre[1] - ch / 2 / self._zoom
+        self._draw()
+
+    def _geom(self):
+        cw, ch = self._c.winfo_width(), self._c.winfo_height()
+        h, w = self._arr.shape[:2]
+        fit = max(min((cw - 2 * self.PAD) / w, (ch - 2 * self.PAD) / h, self.MAX_ZOOM), 1e-6)
+        z = fit if self._zoom is None else self._zoom
+        vw, vh = min(cw, w * z), min(ch, h * z)           # size of the picture on the canvas
+        px, py = (cw - vw) / 2, (ch - vh) / 2             # margin left / top
+        ox = min(max(self._ox, 0.0), w - vw / z) if w * z > cw else 0.0
+        oy = min(max(self._oy, 0.0), h - vh / z) if h * z > ch else 0.0
+        return cw, ch, w, h, fit, z, vw, vh, px, py, ox, oy
+
+    def image_to_canvas(self, ix, iy):
+        cw, ch, w, h, fit, z, vw, vh, px, py, ox, oy = self._geom()
+        return px + (ix - ox) * z, py + (iy - oy) * z
+
+    def canvas_to_image(self, cx, cy):
+        cw, ch, w, h, fit, z, vw, vh, px, py, ox, oy = self._geom()
+        return ox + (cx - px) / z, oy + (cy - py) / z
+
+    def _schedule(self):
+        if self._job is None: self._job = self._c.after(30, self._draw)
+
+    def _draw(self):
+        c = self._c
+        if self._job is not None:
+            try: c.after_cancel(self._job)
+            except Exception: pass
+            self._job = None
+        c.delete("all")
+        cw, ch = c.winfo_width(), c.winfo_height()
+        if cw < 2 or ch < 2: return
+        if self._arr is None:
+            c.create_text(cw / 2, ch / 2, text=self.name, fill="white")
+            if self._note: c.create_text(cw / 2, ch / 2 + 22, text=self._note, fill="#9aa")
+            self._cap.configure(text=""); self._tk = None; self.view = None
+            return
+        cw, ch, w, h, fit, z, vw, vh, px, py, ox, oy = self._geom()
+        self._ox, self._oy = ox, oy
+        x0, y0 = int(np.floor(ox)), int(np.floor(oy))
+        x1, y1 = min(w, int(np.ceil(ox + vw / z))), min(h, int(np.ceil(oy + vh / z)))
+        crop = self._arr[y0:y1, x0:x1]
+        dw, dh = max(1, int(round((x1 - x0) * z))), max(1, int(round((y1 - y0) * z)))
+        if (dw, dh) == (x1 - x0, y1 - y0):
+            small = crop                                   # 1 : 1, the pixels as they are
+        else:
+            interp = cv2.INTER_AREA if z < 1 else (cv2.INTER_LINEAR if z < 2 else cv2.INTER_NEAREST)
+            small = cv2.resize(crop, (dw, dh), interpolation=interp)
+        if self._bgr: small = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
+        self._tk = ImageTk.PhotoImage(Image.fromarray(small))
+        c.create_image(px - (ox - x0) * z, py - (oy - y0) * z, anchor="nw", image=self._tk)
+        # outline of the whole image, so that its edge shows against the black panel
+        c.create_rectangle(max(-9, px - ox * z - 1), max(-9, py - oy * z - 1),
+                           min(cw + 9, px + (w - ox) * z), min(ch + 9, py + (h - oy) * z), outline="#5a5a5a")
+        scale = f"1 screen px = {1 / z:.1f} image px" if z < 1 else f"1 image px = {z:.1f} screen px"
+        part = "whole image" if self._zoom is None else f"pixel coords {x0},{y0},{x1},{y1} in view"
+        self._cap.configure(text=f"{self.name}: {w} × {h} px\n{part}, {scale}")
+        self.view = {"image": (w, h), "box": (x0, y0, x1, y1), "drawn": (dw, dh), "canvas": (cw, ch),
+                     "zoom": z, "fit": fit, "whole": self._zoom is None}
+
+    def _wheel(self, e):
+        if self._arr is None: return
+        up = getattr(e, "num", 0) == 4 or getattr(e, "delta", 0) > 0
+        cw, ch, w, h, fit, z, vw, vh, px, py, ox, oy = self._geom()
+        nz = min(z * self.STEP if up else z / self.STEP, max(self.MAX_ZOOM, fit))
+        ix = min(max(ox + (e.x - px) / z, 0.0), w)        # image point under the cursor
+        iy = min(max(oy + (e.y - py) / z, 0.0), h)
+        if nz <= fit * 1.001:
+            self._zoom = None; self._ox = self._oy = 0.0
+        else:
+            self._zoom = nz
+            npx, npy = (cw - min(cw, w * nz)) / 2, (ch - min(ch, h * nz)) / 2
+            self._ox = ix - (e.x - npx) / nz              # the same image point stays under the cursor
+            self._oy = iy - (e.y - npy) / nz
+        self._draw()
+
+    def _press(self, e):
+        self._drag = (e.x, e.y)
+        if self._zoom is not None: self._c.configure(cursor="fleur")
+
+    def _move(self, e):
+        if self._drag is None or self._arr is None or self._zoom is None: return
+        self._ox -= (e.x - self._drag[0]) / self._zoom; self._oy -= (e.y - self._drag[1]) / self._zoom
+        self._drag = (e.x, e.y); self._draw()
+
+    def _release(self, _e):
+        self._drag = None; self._c.configure(cursor="")
+
+
 # %%
 #  Main GUI
 
@@ -615,11 +890,31 @@ class GeoReferenceModule(ctk.CTkToplevel):
         self._grid_x = self._grid_y = self._grid_z = None
         self._preview_bgr = None; self._preview_gt = None; self._preview_Hf = None
         self._aoi = None; self._aoi_preview_shape = None; self._excluded_gcps = []; self._scale = 4.0
+        # The AOI is in pixels of the preview it was set on; _aoi_gt is that
+        # preview's geotransform.  _preview_gt changes with every preview, so it
+        # must not be used to place the AOI.
+        self._aoi_gt = None
         self._corner_var = tk.StringVar(value="Full Image")
         self.image_list = []; self.output_folder = ""; self.input_folder = ""
         self.user_epsg = None; self._lock = threading.Lock(); self.executor = None
+        # Stage of the window.  0: no preview.  1: Initial Georeferencing done.
+        # 2: Secondary Georeferencing done with the settings as they are now;
+        # only then does Process All run, and it writes what the right panel shows.
+        self._stage = 0; self._sec_signature = None; self._busy = False; self._watch_job = None
+        self._sa_running = False; self._sa_stop = None      # a run of Optimise GCPs and its stop signal
         self._build_ui()
+        self._set_stage(0)
+        self._watch_job = self.after(400, self._watch)
         self.protocol("WM_DELETE_WINDOW", self._close)
+
+    def destroy(self):
+        stop = getattr(self, "_sa_stop", None)
+        if stop is not None: stop.set()     # a running optimisation ends with the window
+        job, self._watch_job = getattr(self, "_watch_job", None), None
+        if job is not None:
+            try: self.after_cancel(job)
+            except Exception: pass
+        super().destroy()
 
     def _close(self):
         if self.executor: self.executor.shutdown(wait=False, cancel_futures=True)
@@ -633,11 +928,79 @@ class GeoReferenceModule(ctk.CTkToplevel):
         if r >= 60: return f"ETA: {r/60:.1f}min"
         return f"ETA: {int(r)}s"
 
-    def _show(self, src, lbl):
-        img = Image.fromarray(src) if isinstance(src, np.ndarray) else Image.open(src)
-        img.thumbnail((500, 380))
-        ci = ctk.CTkImage(light_image=img, dark_image=img, size=img.size)
-        lbl.configure(image=ci, text=""); lbl.image = ci
+    def _show(self, src, panel):
+        # src: an image file, or a BGR array (a preview).  The panel only draws.
+        panel.show(src)
+
+    # ── Stages: Initial Georeferencing -> Secondary Georeferencing -> Process All ──
+    def _refine_signature(self):
+        """The settings that Secondary Georeferencing and Process All apply."""
+        return (self._method_key, self._corner_var.get(), self._manual_corner_ent.get().strip(),
+                tuple(self._crop_entries[t].get().strip() for t in ("S", "N", "E", "W")),
+                self._scale_ent.get().strip(), self._elev_ent.get().strip(),
+                self._excl_ent.get().strip(), self._epsg_ent.get().strip(),
+                None if self._aoi is None else tuple(float(v) for v in self._aoi))
+
+    def _set_stage(self, stage, note=None):
+        self._stage = stage
+        if stage == 0:      # no preview: both result panels empty, no AOI
+            self._preview_bgr = None; self._preview_gt = None; self._sec_signature = None
+            self._aoi = None; self._aoi_preview_shape = None; self._aoi_gt = None
+            self._aoi_status.configure(text="AOI: not set", text_color="gray")
+            self._init_lbl.clear("click Initial Georeferencing")
+            self._sec_lbl.clear("follows Initial Georeferencing")
+        elif stage == 1:    # the right panel shows nothing that Process All would not write
+            self._sec_signature = None
+            self._sec_lbl.clear(note or "click Secondary Georeferencing")
+        self._update_buttons()
+
+    @staticmethod
+    def _enable(btn, on):
+        if not hasattr(btn, "_gc_fg"): btn._gc_fg = btn.cget("fg_color")
+        btn.configure(state="normal" if on else "disabled", fg_color=btn._gc_fg if on else "#3d3d3d")
+
+    def _update_buttons(self):
+        free = not self._busy
+        self._enable(self._btn_initial, free)
+        for b in (self._btn_aoi_select, self._btn_aoi_set, self._btn_secondary): self._enable(b, free and self._stage >= 1)
+        self._enable(self._btn_process, free and self._stage >= 2)
+        for b in self._lock_while_busy: self._enable(b, free)
+        self._method_menu.configure(state="normal" if free else "disabled")
+        # Optimise GCPs.  While it runs, its own button stops it, and Compute
+        # Accuracy, Save Settings and the Exclude GCPs field (the result is
+        # written into it) are off as well.  It cannot start during Process All.
+        sa = self._sa_running
+        self._enable(self._btn_accuracy, not sa)
+        self._enable(self._btn_save, not sa)
+        if sa:
+            stopping = self._sa_stop is not None and self._sa_stop.is_set()
+            self._btn_sa.configure(text="Stopping…" if stopping else SA_STOP_TEXT,
+                                   state="disabled" if stopping else "normal",
+                                   fg_color="#3d3d3d" if stopping else "#8B0000", hover_color="#B22222")
+        else:
+            self._btn_sa.configure(text=SA_TEXT, state="normal" if free else "disabled",
+                                   fg_color=self._btn_sa_colours[0] if free else "#3d3d3d",
+                                   hover_color=self._btn_sa_colours[1])
+        if sa != self._excl_locked:
+            self._excl_locked = sa
+            self._excl_ent.configure(state="disabled" if sa else "normal",
+                                     text_color="gray" if sa else self._excl_text_colour)
+
+    def _set_busy(self, busy):
+        # While Process All or Optimise GCPs runs, nothing that it reads can be changed.
+        self._busy = bool(busy); self._update_buttons()
+
+    def _watch(self):
+        # A setting changed after Secondary Georeferencing: back to stage 1.
+        self._watch_job = None
+        try:
+            if not self.winfo_exists(): return
+            if self._stage == 2 and not self._busy and self._refine_signature() != self._sec_signature:
+                print("[Settings] Changed after Secondary Georeferencing: run it again before Process All.")
+                self._set_stage(1, "settings changed: click Secondary Georeferencing again")
+            self._watch_job = self.after(400, self._watch)
+        except tk.TclError:
+            pass
 
     def _build_ui(self):
         self.grid_columnconfigure(0, weight=1); self.grid_rowconfigure(0, weight=1)
@@ -645,32 +1008,38 @@ class GeoReferenceModule(ctk.CTkToplevel):
 
         pf = ctk.CTkFrame(self, fg_color="black")
         pf.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
-        self._orig_lbl = self._mkp(pf, "Original")
-        self._init_lbl = self._mkp(pf, "Initial Georef")
-        self._sec_lbl  = self._mkp(pf, "Secondary Georef")
+        ctk.CTkLabel(pf, text=ZOOM_HINT, fg_color="black", text_color="#9aa", font=("Arial", 11),
+                     height=18).pack(side="bottom", fill="x", pady=(0, 2))
+        self._orig_lbl = ZoomPanel(pf, "Original")
+        self._init_lbl = ZoomPanel(pf, "Initial Georef")
+        self._sec_lbl  = ZoomPanel(pf, "Secondary Georef")
 
         # Method + inputs
         r1 = ctk.CTkFrame(self); r1.grid(row=2, column=0, sticky="ew", padx=5, pady=2)
         ctk.CTkLabel(r1, text="Method:", font=("Arial", 12, "bold")).pack(side="left", padx=(8,2))
         self._method_var = ctk.StringVar(value=METHODS[0])
-        ctk.CTkOptionMenu(r1, values=METHODS, variable=self._method_var,
+        self._method_menu = ctk.CTkOptionMenu(r1, values=METHODS, variable=self._method_var,
             command=self._on_method_change, width=180,
             fg_color="white", text_color="black", button_color="#d0d0d0",
             button_hover_color="#a0a0a0", dropdown_fg_color="white",
-            dropdown_text_color="black", dropdown_hover_color="#d0d0d0").pack(side="left", padx=4)
-        ctk.CTkButton(r1, text="Browse Image", command=self._browse_img).pack(side="left", padx=6)
+            dropdown_text_color="black", dropdown_hover_color="#d0d0d0")
+        self._method_menu.pack(side="left", padx=4)
+        self._lock_while_busy = []      # buttons that change what a running Process All reads
+        def _locked(btn, **pack):
+            btn.pack(**pack); self._lock_while_busy.append(btn); return btn
+        _locked(ctk.CTkButton(r1, text="Browse Image", command=self._browse_img), side="left", padx=6)
         self._img_lbl = ctk.CTkLabel(r1, text="No image", text_color="gray"); self._img_lbl.pack(side="left", padx=4)
 
         self._inp_homo = ctk.CTkFrame(r1)
-        ctk.CTkButton(self._inp_homo, text="Load Homography (.txt)", command=self._load_homo).pack(side="left", padx=4)
+        _locked(ctk.CTkButton(self._inp_homo, text="Load Homography (.txt)", command=self._load_homo), side="left", padx=4)
         self._homo_lbl = ctk.CTkLabel(self._inp_homo, text="\u2014", text_color="gray"); self._homo_lbl.pack(side="left", padx=4)
 
         self._inp_gcp = ctk.CTkFrame(r1)
-        ctk.CTkButton(self._inp_gcp, text="Load GCP CSV", command=self._load_gcp, fg_color="#2E7D32").pack(side="left", padx=4)
+        _locked(ctk.CTkButton(self._inp_gcp, text="Load GCP CSV", command=self._load_gcp, fg_color="#2E7D32"), side="left", padx=4)
         self._gcp_lbl = ctk.CTkLabel(self._inp_gcp, text="\u2014", text_color="gray"); self._gcp_lbl.pack(side="left", padx=4)
 
         self._inp_proj = ctk.CTkFrame(r1)
-        ctk.CTkButton(self._inp_proj, text="Load Calibration (.pkl)", command=self._load_cal).pack(side="left", padx=4)
+        _locked(ctk.CTkButton(self._inp_proj, text="Load Calibration (.pkl)", command=self._load_cal), side="left", padx=4)
         self._cal_lbl = ctk.CTkLabel(self._inp_proj, text="\u2014", text_color="gray"); self._cal_lbl.pack(side="left", padx=4)
         ctk.CTkLabel(self._inp_proj, text="Elev (m):").pack(side="left", padx=(8,2))
         self._elev_ent = ctk.CTkEntry(self._inp_proj, width=60, placeholder_text="0.0"); self._elev_ent.pack(side="left", padx=2)
@@ -693,50 +1062,70 @@ class GeoReferenceModule(ctk.CTkToplevel):
 
         # Initial georef + AOI
         r2b = ctk.CTkFrame(self); r2b.grid(row=4, column=0, sticky="ew", padx=5, pady=2)
-        ctk.CTkButton(r2b, text="Initial Georeferencing", command=self._initial_georef, fg_color="#0F52BA", hover_color="#2A6BD1",
-                      font=("Arial", 12, "bold")).pack(side="left", padx=6)
-        ctk.CTkButton(r2b, text="Select AOI Interactively", command=self._select_aoi, fg_color="#2E7D32").pack(side="left", padx=6)
+        self._btn_initial = ctk.CTkButton(r2b, text="Initial Georeferencing", command=self._initial_georef, fg_color="#0F52BA", hover_color="#2A6BD1",
+                      font=("Arial", 12, "bold"))
+        self._btn_initial.pack(side="left", padx=6)
+        self._btn_aoi_select = ctk.CTkButton(r2b, text="Select AOI Interactively", command=self._select_aoi, fg_color="#2E7D32")
+        self._btn_aoi_select.pack(side="left", padx=6)
         ctk.CTkLabel(r2b, text="or manual (x1,y1,x2,y2):").pack(side="left", padx=(8,2))
         self._aoi_ent = ctk.CTkEntry(r2b, width=200, placeholder_text="preview pixel coords"); self._aoi_ent.pack(side="left", padx=2)
-        ctk.CTkButton(r2b, text="Set", command=self._set_manual_aoi, width=50, fg_color="#0F52BA", hover_color="#2A6BD1").pack(side="left", padx=2)
+        self._btn_aoi_set = ctk.CTkButton(r2b, text="Set", command=self._set_manual_aoi, width=50, fg_color="#0F52BA", hover_color="#2A6BD1")
+        self._btn_aoi_set.pack(side="left", padx=2)
         self._aoi_status = ctk.CTkLabel(r2b, text="AOI: not set", text_color="gray"); self._aoi_status.pack(side="left", padx=8)
 
         # Accuracy + Secondary
         r3 = ctk.CTkFrame(self); r3.grid(row=5, column=0, sticky="ew", padx=5, pady=2)
-        ctk.CTkButton(r3, text="Compute Accuracy", command=self._compute_accuracy, fg_color="#6693F5", hover_color="#7DA5F7").pack(side="left", padx=6)
-        ctk.CTkButton(r3, text="Optimise GCPs (SA)", command=self._run_sa, fg_color="#37474F").pack(side="left", padx=4)
+        self._btn_accuracy = ctk.CTkButton(r3, text="Compute Accuracy", command=self._compute_accuracy, fg_color="#6693F5", hover_color="#7DA5F7")
+        self._btn_accuracy.pack(side="left", padx=6)
+        self._btn_sa = ctk.CTkButton(r3, text=SA_TEXT, command=self._run_sa, fg_color="#37474F")
+        self._btn_sa.pack(side="left", padx=4)
+        self._btn_sa_colours = (self._btn_sa.cget("fg_color"), self._btn_sa.cget("hover_color"))
         ctk.CTkLabel(r3, text="Exclude GCPs:").pack(side="left", padx=(10,2))
         self._excl_ent = ctk.CTkEntry(r3, width=140, placeholder_text="e.g. 5,7,11"); self._excl_ent.pack(side="left", padx=2)
+        self._excl_text_colour = self._excl_ent.cget("text_color"); self._excl_locked = False
         ctk.CTkLabel(r3, text="|", text_color="gray").pack(side="left", padx=6)
         ctk.CTkLabel(r3, text="Scale:").pack(side="left", padx=(4,2))
         self._scale_ent = ctk.CTkEntry(r3, width=55); self._scale_ent.insert(0, "4"); self._scale_ent.pack(side="left", padx=2)
         self._rec_scale_lbl = ctk.CTkLabel(r3, text="", text_color="gray", font=("Arial", 10)); self._rec_scale_lbl.pack(side="left", padx=4)
-        ctk.CTkButton(r3, text="Secondary Georeferencing", command=self._secondary_georef, fg_color="#0F52BA",
-                      font=("Arial", 12, "bold")).pack(side="left", padx=8)
+        self._btn_secondary = ctk.CTkButton(r3, text="Secondary Georeferencing", command=self._secondary_georef, fg_color="#0F52BA",
+                      font=("Arial", 12, "bold"))
+        self._btn_secondary.pack(side="left", padx=8)
+        # Progress and remaining time of Optimise GCPs: shown from the first
+        # run on, in this row, beside the settings the run works with (the
+        # bar in the bottom row is that of Process All).
+        self._sa_prog = ctk.CTkProgressBar(r3, width=100); self._sa_prog.set(0)
+        self._sa_lbl = ctk.CTkLabel(r3, text="")
 
         # Batch
         r4 = ctk.CTkFrame(self); r4.grid(row=6, column=0, sticky="ew", padx=5, pady=2)
-        ctk.CTkButton(r4, text="Browse Input Folder", command=self._browse_in).pack(side="left", padx=4)
+        _locked(ctk.CTkButton(r4, text="Browse Input Folder", command=self._browse_in), side="left", padx=4)
         self._in_lbl = ctk.CTkLabel(r4, text="\u2014", text_color="gray"); self._in_lbl.pack(side="left", padx=4)
         self._subfolder_var = tk.BooleanVar(value=False)
         ctk.CTkCheckBox(r4, text="Include subfolders", variable=self._subfolder_var).pack(side="left", padx=8)
         self._skip_done_var = tk.BooleanVar(value=False)
         ctk.CTkCheckBox(r4, text="Skip existing", variable=self._skip_done_var).pack(side="left", padx=8)
-        ctk.CTkButton(r4, text="Browse Output Folder", command=self._browse_out, fg_color="#8C7738", hover_color="#A18A45").pack(side="left", padx=4)
+        _locked(ctk.CTkButton(r4, text="Browse Output Folder", command=self._browse_out, fg_color="#8C7738", hover_color="#A18A45"), side="left", padx=4)
         self._out_lbl = ctk.CTkLabel(r4, text="\u2014", text_color="gray"); self._out_lbl.pack(side="left", padx=4)
         self._epsg_ent = ctk.CTkEntry(r4, width=80, placeholder_text="EPSG"); self._epsg_ent.pack(side="left", padx=4)
-        ctk.CTkButton(r4, text="Process All", fg_color="#0F52BA", hover_color="#2A6BD1", command=self._process_all,
-                      font=("Arial", 12, "bold")).pack(side="left", padx=6)
-        self._prog = ctk.CTkProgressBar(r4, width=160); self._prog.set(0); self._prog.pack(side="left", padx=6)
-        self._eta_lbl = ctk.CTkLabel(r4, text="ETA: ~"); self._eta_lbl.pack(side="left", padx=4)
 
-
-        # Settings row
+        # Settings row, then Process All with its progress bar and remaining time
         r5 = ctk.CTkFrame(self); r5.grid(row=7, column=0, sticky="ew", padx=5, pady=2)
-        ctk.CTkButton(r5, text="Save Settings", command=self._save_settings, width=100, fg_color="#4F5D75",hover_color="#61708A").pack(side="left", padx=4)
-        ctk.CTkButton(r5, text="Load Settings", command=self._load_settings, width=100, fg_color="#4F5D75",hover_color="#61708A").pack(side="left", padx=4)
-        ctk.CTkButton(r5, text="Reset", command=self._reset, width=60, fg_color="#8B0000", hover_color="#B22222").pack(side="left", padx=8)
-        
+        self._btn_save = ctk.CTkButton(r5, text="Save Settings", command=self._save_settings, width=100, fg_color="#4F5D75",hover_color="#61708A")
+        self._btn_save.pack(side="left", padx=4)
+        _locked(ctk.CTkButton(r5, text="Load Settings", command=self._load_settings, width=100, fg_color="#4F5D75",hover_color="#61708A"), side="left", padx=4)
+        _locked(ctk.CTkButton(r5, text="Reset", command=self._reset, width=60, fg_color="#8B0000", hover_color="#B22222"), side="left", padx=8)
+        # Process All, its bar and its label stand in this row and not at the
+        # end of the folder row above: that row grows with the two folder
+        # labels and can be longer than the window at the size it opens with,
+        # which cut the button off and hid the bar and the remaining time.
+        # Everything in this row has a fixed width.
+        ctk.CTkLabel(r5, text="|", text_color="gray").pack(side="left", padx=6)
+        self._btn_process = ctk.CTkButton(r5, text="Process All", fg_color="#0F52BA", hover_color="#2A6BD1", command=self._process_all,
+                      font=("Arial", 12, "bold"))
+        self._btn_process.pack(side="left", padx=6)
+        self._prog = ctk.CTkProgressBar(r5, width=160); self._prog.set(0); self._prog.pack(side="left", padx=6)
+        self._eta_lbl = ctk.CTkLabel(r5, text="ETA: ~"); self._eta_lbl.pack(side="left", padx=4)
+
         # Console
         cf = ctk.CTkFrame(self); cf.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
         ct = tk.Text(cf, wrap="word", height=10); ct.pack(fill="both", expand=True, padx=5, pady=5)
@@ -753,18 +1142,16 @@ class GeoReferenceModule(ctk.CTkToplevel):
         print("  7. Process All for batch")
         print("     (tick \u2018Skip existing\u2019 to resume: outputs already")
         print("      present and readable are skipped instead of redone)")
+        print("  The buttons follow these steps: Secondary Georeferencing")
+        print("  needs Initial Georeferencing, Process All needs Secondary")
+        print("  Georeferencing.  After a change of the settings, run")
+        print("  Secondary Georeferencing again.")
         print("="*50 + "\n")
         self._on_method_change(METHODS[0])
 
-    @staticmethod
-    def _mkp(parent, text):
-        fr = ctk.CTkFrame(parent, width=370, height=340, fg_color="black")
-        fr.pack_propagate(False); fr.pack(side="left", fill="both", expand=True, padx=4, pady=4)
-        lbl = ctk.CTkLabel(fr, text=text, fg_color="black"); lbl.pack(fill="both", expand=True)
-        return lbl
-
     def _on_method_change(self, choice):
         self._method_key = _METHOD_KEY[choice]
+        self._set_stage(0)
         for w in (self._inp_homo, self._inp_gcp, self._inp_proj): w.pack_forget()
         if self._method_key == "homo":
             self._inp_homo.pack(side="left", padx=4)
@@ -839,6 +1226,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
         if p:
             self._img_path = p; self._img_lbl.configure(text=os.path.basename(p), text_color="#81C784")
             self._show(p, self._orig_lbl)
+            self._set_stage(0)
 
     def _load_homo(self, filepath=None):
         p = filepath or filedialog.askopenfilename(parent=self,filetypes=[("Text","*.txt")])
@@ -854,6 +1242,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
                     if m: self._homo_epsg = int(m.group(1))
             self._H = np.loadtxt(p).reshape(3, 3)
             self._homo_path = p
+            self._set_stage(0)
             self._homo_lbl.configure(text=os.path.basename(p), text_color="#81C784")
             if self._homo_epsg:
                 if not self._epsg_ent.get().strip(): self._epsg_ent.insert(0, str(self._homo_epsg))
@@ -870,6 +1259,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
             for c in ("Pixel_X","Pixel_Y","Real_X","Real_Y"):
                 if c not in df.columns: messagebox.showerror("Error", f"Missing \u2018{c}\u2019", parent=self); return
             self._gcp_df = df; self._gcp_path = p
+            self._set_stage(0)
             self._gcp_epsg = int(df["EPSG"].iloc[0]) if "EPSG" in df.columns and df["EPSG"].iloc[0] > 0 else None
             gsd = _estimate_gsd(df)
             if self._gcp_epsg:
@@ -901,6 +1291,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
             self._dist = d["dist_coeff"].ravel().astype(np.float64)
             self._cal_img_size = d.get("image_size")
             self._cal_path = p
+            self._set_stage(0)
             self._cal_lbl.configure(text=f"{os.path.basename(p)} (fx={self._K[0,0]:.0f})", text_color="#81C784")
         except Exception as e: messagebox.showerror("Calibration Error", str(e), parent=self)
 
@@ -957,17 +1348,22 @@ class GeoReferenceModule(ctk.CTkToplevel):
         img = imread_safe(self._img_path)
         if img is None: messagebox.showerror("Error", "Cannot read image.", parent=self); return
         self._show(self._img_path, self._orig_lbl)
+        had_aoi = self._aoi is not None
+        self._set_stage(0)      # a new start: both result panels empty, the AOI of the preview before no longer applies
         mk = self._method_key; scale = self._get_scale()
         print(f"\n[Initial Georef] Starting initial georeferencing ({self._method_var.get()})…")
         try:
             hi, wi = img.shape[:2]
             source_corners = self._get_source_corners(hi, wi)
             crop_fracs = self._get_crop_fracs()
+            data_mask = None    # where the preview holds image data (console line only)
 
             if mk == "homo":
                 if self._H is None: messagebox.showerror("Error", "Load homography.", parent=self); return
-                self._aoi = None; self._aoi_preview_shape = None; self._aoi_ent.delete(0, "end")
-                self._aoi_status.configure(text="AOI: not set", text_color="gray")
+                # AOI coordinates that were in use belong to the preview before, whose
+                # scale or extent may differ; coordinates not yet set (typed, or from a
+                # settings file) stay for the Set button.
+                if had_aoi: self._aoi_ent.delete(0, "end")
                 warped, Hf, gt = _homo_warp_windowed(img, self._H, scale, source_corners, crop_fracs)
                 self._preview_bgr = warped; self._preview_gt = gt; self._preview_Hf = Hf
                 tc = cv2.perspectiveTransform(source_corners, self._H)
@@ -995,7 +1391,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
                 gx, gy, gz = _build_grid(x0, x1, y0, y1, gsd, elev)
                 self._grid_x, self._grid_y, self._grid_z = gx, gy, gz
                 rect, alpha = _rectify_image(img, K, self._dist, rv, tv, cen, gx, gy, gz)
-                self._preview_bgr = rect
+                self._preview_bgr = rect; data_mask = alpha > 0
                 self._preview_gt = (float(gx[0,0]), gsd, 0, float(gy[0,0]), 0, -gsd)
                 self._rec_scale_lbl.configure(text=f"(GSD={gsd:.4f} m/px)")
 
@@ -1023,16 +1419,18 @@ class GeoReferenceModule(ctk.CTkToplevel):
                     ds = gdal.Open(tmp.name); self._preview_gt = ds.GetGeoTransform()
                     arr = np.zeros((ds.RasterYSize, ds.RasterXSize, 3), np.uint8)
                     for i in range(min(3, ds.RasterCount)): arr[:,:,i] = ds.GetRasterBand(i+1).ReadAsArray()
+                    if ds.RasterCount >= 4: data_mask = ds.GetRasterBand(4).ReadAsArray() > 0
                     self._preview_bgr = arr[:,:,::-1].copy(); ds = None
                 finally:
                     if os.path.exists(tmp.name): os.unlink(tmp.name)
                 self._rec_scale_lbl.configure(text=f"(GSD={gsd:.4f} m/px)")
 
-            rgb = cv2.cvtColor(self._preview_bgr, cv2.COLOR_BGR2RGB)
-            self._show(rgb, self._init_lbl)
+            self._show(self._preview_bgr, self._init_lbl)
             oh, ow = self._preview_bgr.shape[:2]
             print(f"[Initial] Preview: {ow}x{oh}")
+            print(f"[Initial] {_data_extent_text(_data_mask(self._preview_bgr) if data_mask is None else data_mask)}")
             print(f"[Next] Select AOI or click Secondary Georeferencing")
+            self._set_stage(1)
         except Exception as e:
             messagebox.showerror("Error", str(e), parent=self)
             import traceback; traceback.print_exc()
@@ -1043,7 +1441,8 @@ class GeoReferenceModule(ctk.CTkToplevel):
         rgb = cv2.cvtColor(self._preview_bgr, cv2.COLOR_BGR2RGB)
         def _on_aoi(x1, y1, x2, y2):
             self._aoi = (x1, y1, x2, y2)
-            self._aoi_preview_shape = self._preview_bgr.shape[:2]
+            self._aoi_preview_shape = self._preview_bgr.shape[:2]; self._aoi_gt = self._preview_gt
+            self._set_stage(1)      # the AOI takes effect with the next Secondary Georeferencing
             self._aoi_ent.delete(0, "end")
             self._aoi_ent.insert(0, f"{x1:.0f},{y1:.0f},{x2:.0f},{y2:.0f}")
             self._aoi_status.configure(text=f"AOI: {x2-x1:.0f}x{y2-y1:.0f} px", text_color="#81C784")
@@ -1051,11 +1450,14 @@ class GeoReferenceModule(ctk.CTkToplevel):
         InteractiveAOISelector(self, rgb, _on_aoi)
 
     def _set_manual_aoi(self):
+        if self._preview_bgr is None: messagebox.showerror("Error", "Run Initial Georeferencing first.", parent=self); return
         try:
             vals = [float(v.strip()) for v in self._aoi_ent.get().split(",")]
             if len(vals) != 4: raise ValueError("Need 4 values")
             self._aoi = tuple(vals)
             self._aoi_preview_shape = self._preview_bgr.shape[:2] if self._preview_bgr is not None else None
+            self._aoi_gt = self._preview_gt if self._preview_bgr is not None else None
+            self._set_stage(1)      # the AOI takes effect with the next Secondary Georeferencing
             self._aoi_status.configure(text=f"AOI: {vals[2]-vals[0]:.0f}x{vals[3]-vals[1]:.0f} px", text_color="#81C784")
             self._show_aoi_crop()
         except Exception as e: messagebox.showerror("Error", f"Bad AOI: {e}", parent=self)
@@ -1065,7 +1467,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
         x1, y1, x2, y2 = [int(v) for v in self._aoi]; h, w = self._preview_bgr.shape[:2]
         x1, y1 = max(0, x1), max(0, y1); x2, y2 = min(w, x2), min(h, y2)
         if x2 <= x1 or y2 <= y1: return
-        self._show(cv2.cvtColor(self._preview_bgr[y1:y2, x1:x2], cv2.COLOR_BGR2RGB), self._init_lbl)
+        self._show(self._preview_bgr[y1:y2, x1:x2], self._init_lbl)
 
     # ── Accuracy ──
     def _compute_accuracy(self):
@@ -1101,23 +1503,88 @@ class GeoReferenceModule(ctk.CTkToplevel):
 
     # ── SA ──
     def _run_sa(self):
+        # One button: it starts a run and, while the run goes on, stops it.
+        # During the run the window is locked like during Process All (plus
+        # Compute Accuracy, Save Settings and the Exclude GCPs field); the
+        # pictures can still be zoomed and moved.
+        if self._sa_running:
+            if self._sa_stop is not None and not self._sa_stop.is_set():
+                self._sa_stop.set(); self._update_buttons()
+                print("[SA] Stopping…")
+            return
+        if self._busy: return
         df = self._get_working_df()
         if df is None or len(df) < 5: messagebox.showerror("Error", "Need >= 5 GCPs.", parent=self); return
         mk = self._method_key; K = self._K if mk == "proj" else None; d = self._dist if mk == "proj" else None
         if mk == "proj" and self._img_path:
             img = imread_safe(self._img_path)
             if img is not None: K = self._get_K_for((img.shape[1], img.shape[0]))
+        elev = self._get_elev()                     # widgets are read here, not in the thread
+        before = self._excl_ent.get().strip()       # GCPs excluded by hand stay excluded
+        stop = threading.Event(); st = {"done": 0, "total": 0, "told": False}
+        self._sa_stop = stop; self._sa_running = True; self._set_busy(True)
+        if not self._sa_prog.winfo_manager():
+            self._sa_prog.pack(side="left", padx=(6, 4)); self._sa_lbl.pack(side="left", padx=2)
+        self._sa_prog.set(0); self._sa_lbl.configure(text="0 % – ETA: ~")
+
+        def _ui(fn):
+            # from the thread to the window; nothing once the window is closed
+            def _do():
+                try:
+                    if self.winfo_exists(): fn()
+                except tk.TclError: pass
+            try: self.after(0, _do)
+            except Exception: pass
+
+        def _progress(done, total, best, seconds):
+            st["done"], st["total"] = done, total
+            f = done / total if total else 0.0
+            text = f"{int(100 * f)} % – {self._eta(time.time() - seconds, f)}"
+            _ui(lambda: (self._sa_prog.set(f), self._sa_lbl.configure(text=text)))
+            if not st["told"] and done and seconds >= 5 and done < total:
+                st["told"] = True
+                whole = seconds / done * total
+                dur = f"{whole/3600:.1f} h" if whole >= 3600 else f"{whole/60:.0f} min" if whole >= 60 else f"{whole:.0f} s"
+                print(f"[SA] {total} steps in all, about {dur} at this speed. Progress and remaining time: "
+                      f"in the row of the button. ‘{SA_STOP_TEXT}’ ends the run.")
+
         def _run():
-            best_idx, _ = run_sa_optimisation(df, mk, K, d, self._get_elev(), log_fn=print)
-            dropped = set(range(len(df))) - set(best_idx.tolist())
-            if dropped:
-                ids = df["GCP_ID"].values if "GCP_ID" in df.columns else np.arange(len(df))
-                def _excl_num(v):
-                    n = gcp_numeric_suffix(v)
-                    return str(n) if n is not None else str(v)
-                excl = ",".join(_excl_num(ids[i]) for i in dropped)
-                self.after(0, lambda: (self._excl_ent.delete(0, "end"), self._excl_ent.insert(0, excl)))
+            best_idx, status = None, "failed"
+            try:
+                best_idx, _ = run_sa_optimisation(df, mk, K, d, elev, log_fn=print, progress_fn=_progress, stop_fn=stop.is_set)
+                status = "done" if st["total"] and st["done"] >= st["total"] else "stopped"
+            except Exception as e:
+                print(f"[SA] Error: {e}")
+            finally:
+                _ui(lambda: self._sa_finish(df, best_idx, before, status))
         threading.Thread(target=_run, daemon=True).start()
+
+    def _sa_finish(self, df, best_idx, before, status):
+        # In the window's thread, at the end of a run.  A run that was stopped
+        # or failed applies nothing; a finished one adds its GCPs to those
+        # that were excluded before.
+        self._sa_running = False; self._sa_stop = None
+        self._set_busy(False)
+        # The field was locked during the run; its text is set here in every
+        # case, so that it holds what the console says.
+        self._excl_ent.delete(0, "end")
+        if before: self._excl_ent.insert(0, before)
+        if status != "done":
+            self._sa_lbl.configure(text=f"Optimisation {status}")
+            print(f"[SA] Exclude GCPs left as it was: {before if before else '(empty)'}")
+            return
+        self._sa_prog.set(1.0); self._sa_lbl.configure(text="Optimisation done")
+        dropped = sorted(set(range(len(df))) - set(best_idx.tolist()))
+        if not dropped: return
+        ids = df["GCP_ID"].values if "GCP_ID" in df.columns else np.arange(len(df))
+        def _excl_num(v):
+            n = gcp_numeric_suffix(v)
+            return str(n) if n is not None else str(v)
+        new = [_excl_num(ids[i]) for i in dropped]
+        excl = merge_gcp_exclusions(before, new)
+        self._excl_ent.delete(0, "end"); self._excl_ent.insert(0, excl)
+        kept = excl != ",".join(new)
+        print(f"[SA] Exclude GCPs: {excl}" + (f"  ({before} from before the run, {','.join(new)} added)" if kept else ""))
 
     # ── Secondary Georeferencing ──
     def _secondary_georef(self):
@@ -1126,21 +1593,21 @@ class GeoReferenceModule(ctk.CTkToplevel):
         img = imread_safe(self._img_path)
         if img is None: messagebox.showerror("Error", "Cannot read image.", parent=self); return
         mk = self._method_key; scale = self._get_scale(); aoi = self._aoi
+        self._set_stage(1)      # the right panel is empty until this run has finished
         print(f"\n[Secondary Georef] Starting secondary georeferencing ({self._method_var.get()})…")
+        aoi_text = self._aoi_ent.get().strip()
+        if aoi_text and aoi is None: print(f"[AOI] The AOI field holds {aoi_text}, but no AOI is set (Set applies it).")
         try:
             hi, wi = img.shape[:2]
             source_corners = self._get_source_corners(hi, wi)
             crop_fracs = self._get_crop_fracs()
+            data_mask = None    # where the preview holds image data (console line only)
 
             if mk == "homo":
                 if self._H is None: messagebox.showerror("Error", "Load homography.", parent=self); return
                 warped, Hf, gt = _homo_warp_windowed(img, self._H, scale, source_corners, crop_fracs)
                 if aoi and self._aoi_preview_shape is not None:
-                    x1, y1, x2, y2 = [int(v) for v in aoi]
-                    oh, ow = self._aoi_preview_shape; nh, nw = warped.shape[:2]
-                    sx, sy = nw/ow, nh/oh
-                    x1, y1 = max(0, int(x1*sx)), max(0, int(y1*sy))
-                    x2, y2 = min(nw, int(x2*sx)), min(nh, int(y2*sy))
+                    x1, y1, x2, y2 = _aoi_box_in_warp(aoi, self._aoi_preview_shape, self._aoi_gt, warped.shape[:2], gt)
                     if x2 <= x1 or y2 <= y1:
                         raise ValueError(f"AOI out of bounds after scaling ({x1},{y1})->({x2},{y2}). Re-select AOI.")
                     warped = warped[y1:y2, x1:x2]
@@ -1154,7 +1621,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
                 rv, tv, cen, errs = _solve_extrinsics(df[["Pixel_X","Pixel_Y"]].values, df[["Real_X","Real_Y","Real_Z"]].values, K, self._dist)
                 self._rvec, self._tvec, self._centroid = rv, tv, cen
                 if aoi and self._preview_gt:
-                    gt = self._preview_gt; x1, y1, x2, y2 = aoi
+                    gt = self._aoi_gt or self._preview_gt; x1, y1, x2, y2 = aoi
                     utm_x0, utm_x1 = gt[0]+x1*gt[1], gt[0]+x2*gt[1]
                     utm_y0, utm_y1 = gt[3]+y2*gt[5], gt[3]+y1*gt[5]
                 else:
@@ -1168,6 +1635,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
                 gx, gy, gz = _build_grid(utm_x0, utm_x1, utm_y0, utm_y1, gsd, elev)
                 self._grid_x, self._grid_y, self._grid_z = gx, gy, gz
                 rect, alpha = _rectify_image(img, K, self._dist, rv, tv, cen, gx, gy, gz)
+                data_mask = alpha > 0
                 self._preview_bgr = rect; self._preview_gt = (float(gx[0,0]), gsd, 0, float(gy[0,0]), 0, -gsd)
 
             else:
@@ -1178,7 +1646,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
                 srs = osr.SpatialReference(); srs.ImportFromEPSG(epsg)
                 gsd = _estimate_gsd(df)
                 if aoi and self._preview_gt:
-                    gt = self._preview_gt; x1, y1, x2, y2 = aoi
+                    gt = self._aoi_gt or self._preview_gt; x1, y1, x2, y2 = aoi
                     te = [gt[0]+x1*gt[1], gt[3]+max(y1,y2)*gt[5], gt[0]+x2*gt[1], gt[3]+min(y1,y2)*gt[5]]
                 else:
                     extent = self._corners_to_world_extent(source_corners, hi, wi)
@@ -1193,11 +1661,14 @@ class GeoReferenceModule(ctk.CTkToplevel):
                     ds = gdal.Open(tmp.name); self._preview_gt = ds.GetGeoTransform()
                     arr = np.zeros((ds.RasterYSize, ds.RasterXSize, 3), np.uint8)
                     for i in range(min(3, ds.RasterCount)): arr[:,:,i] = ds.GetRasterBand(i+1).ReadAsArray()
+                    if ds.RasterCount >= 4: data_mask = ds.GetRasterBand(4).ReadAsArray() > 0
                     self._preview_bgr = arr[:,:,::-1].copy(); ds = None
                 finally:
                     if os.path.exists(tmp.name): os.unlink(tmp.name)
-            self._show(cv2.cvtColor(self._preview_bgr, cv2.COLOR_BGR2RGB), self._sec_lbl)
+            self._show(self._preview_bgr, self._sec_lbl)
             print(f"[Secondary] Preview: {self._preview_bgr.shape[1]}x{self._preview_bgr.shape[0]}")
+            print(f"[Secondary] {_data_extent_text(_data_mask(self._preview_bgr) if data_mask is None else data_mask)}")
+            self._sec_signature = self._refine_signature(); self._set_stage(2)
         except Exception as e:
             messagebox.showerror("Error", str(e), parent=self); import traceback; traceback.print_exc()
 
@@ -1222,9 +1693,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
         if mk == "homo":
             warped, Hf, gt = _homo_warp_windowed(img, self._H, scale, source_corners, crop_fracs)
             if self._aoi and self._aoi_preview_shape is not None:
-                oh, ow = self._aoi_preview_shape; nh, nw = warped.shape[:2]
-                sx, sy = nw/ow, nh/oh; x1, y1, x2, y2 = self._aoi
-                x1, y1 = max(0, int(x1*sx)), max(0, int(y1*sy)); x2, y2 = min(nw, int(x2*sx)), min(nh, int(y2*sy))
+                x1, y1, x2, y2 = _aoi_box_in_warp(self._aoi, self._aoi_preview_shape, self._aoi_gt, warped.shape[:2], gt)
                 if x2 <= x1 or y2 <= y1:
                     raise ValueError(f"AOI out of bounds after scaling ({x1},{y1})->({x2},{y2})")
                 warped = warped[y1:y2, x1:x2]; gt = (gt[0]+x1*gt[1], gt[1], 0, gt[3]+y1*gt[5], 0, gt[5])
@@ -1241,7 +1710,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
             srs = osr.SpatialReference(); srs.ImportFromEPSG(epsg)
             gsd = abs(self._preview_gt[1]) if self._preview_gt else _estimate_gsd(df)
             if self._aoi and self._preview_gt:
-                gt = self._preview_gt; x1, y1, x2, y2 = self._aoi
+                gt = self._aoi_gt or self._preview_gt; x1, y1, x2, y2 = self._aoi
                 te = [gt[0]+x1*gt[1], gt[3]+max(y1,y2)*gt[5], gt[0]+x2*gt[1], gt[3]+min(y1,y2)*gt[5]]
             else:
                 extent = self._corners_to_world_extent(source_corners, hi, wi, df=work_df, elev=elev)
@@ -1265,6 +1734,16 @@ class GeoReferenceModule(ctk.CTkToplevel):
         return sorted(set(imgs))
 
     def _process_all(self):
+        if self._busy: return
+        if self._stage == 2 and self._refine_signature() != self._sec_signature:
+            print("[Settings] Changed after Secondary Georeferencing: run it again before Process All.")
+            self._set_stage(1, "settings changed: click Secondary Georeferencing again")
+        if self._stage < 2:
+            messagebox.showerror("Error",
+                "Run Secondary Georeferencing first.\n\n"
+                "Process All writes, for every image of the input folder, the result that the right "
+                "panel shows. After a change of the settings, Secondary Georeferencing has to be run "
+                "again.", parent=self); return
         if not self.input_folder: messagebox.showerror("Error", "Select input folder.", parent=self); return
         if not self.output_folder: messagebox.showerror("Error", "Select output folder.", parent=self); return
         if not self._resolve_epsg(): return
@@ -1404,7 +1883,13 @@ class GeoReferenceModule(ctk.CTkToplevel):
                 self.after(0, lambda m=msg: messagebox.showwarning("Some Failed", m, parent=self))
             else:
                 self.after(0, lambda: messagebox.showinfo("Complete", f"All {n} files processed!", parent=self))
-        threading.Thread(target=_worker, daemon=True).start()
+        def _guarded():
+            try: _worker()
+            finally:
+                try: self.after(0, lambda: self._set_busy(False))
+                except Exception: pass
+        self._set_busy(True)
+        threading.Thread(target=_guarded, daemon=True).start()
 
     # ── Save / Load Settings ──
     def _save_settings(self):
@@ -1513,6 +1998,8 @@ class GeoReferenceModule(ctk.CTkToplevel):
             self._skip_done_var.set(bool(data.get("skip_existing", False)))
 
             print(f"Settings loaded: {path}")
+            self._set_stage(0)
+            print("[Next] Initial Georeferencing, Set (when an AOI is filled in), Secondary Georeferencing; then Process All")
         except Exception as e:
             messagebox.showerror("Load Settings", f"Could not load:\n{e}", parent=self)
 
@@ -1525,10 +2012,9 @@ class GeoReferenceModule(ctk.CTkToplevel):
         self._rvec = self._tvec = self._centroid = None
         self._grid_x = self._grid_y = self._grid_z = None
         self._preview_bgr = None; self._preview_gt = None; self._preview_Hf = None
-        self._aoi = None; self._aoi_preview_shape = None; self._excluded_gcps = []; self._scale = 4.0
+        self._aoi = None; self._aoi_preview_shape = None; self._aoi_gt = None; self._excluded_gcps = []; self._scale = 4.0
         self.image_list = []; self.output_folder = ""; self.input_folder = ""; self.user_epsg = None
-        for lbl, txt in [(self._orig_lbl,"Original"),(self._init_lbl,"Initial Georef"),(self._sec_lbl,"Secondary Georef")]:
-            lbl.configure(image=None, text=txt); lbl.image = None
+        self._orig_lbl.clear(); self._set_stage(0)
         for lbl in [self._img_lbl, self._homo_lbl, self._gcp_lbl, self._cal_lbl, self._in_lbl, self._out_lbl]:
             lbl.configure(text="~", text_color="gray")
         for ent in [self._aoi_ent, self._excl_ent, self._epsg_ent, self._elev_ent, self._manual_corner_ent]:
@@ -1539,6 +2025,7 @@ class GeoReferenceModule(ctk.CTkToplevel):
         self._aoi_status.configure(text="AOI: not set", text_color="gray")
         self._rec_scale_lbl.configure(text="")
         self._prog.set(0); self._eta_lbl.configure(text="ETA: ~"); self._subfolder_var.set(False)
+        self._sa_prog.pack_forget(); self._sa_lbl.pack_forget(); self._sa_prog.set(0); self._sa_lbl.configure(text="")
         self._skip_done_var.set(False)
         print("\n" + "="*50 + "\n  Reset complete\n" + "="*50 + "\n")
 
