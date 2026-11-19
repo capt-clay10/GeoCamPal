@@ -1,0 +1,77 @@
+{
+  "camera_matrix": [
+    [
+      6707.806604271506,
+      0.0,
+      1579.2380899562825
+    ],
+    [
+      0.0,
+      6730.79911725659,
+      1116.164369652464
+    ],
+    [
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "dist_coeff": [
+    [
+      -0.007510317909259638,
+      0.297148647880718,
+      0.0,
+      0.0,
+      0.0
+    ]
+  ],
+  "rms_error": 1.7491147975460257,
+  "image_size": [
+    3088,
+    2064
+  ],
+  "n_images_used": 18,
+  "pattern_size": [
+    18,
+    16
+  ],
+  "board_squares": [
+    19,
+    17
+  ],
+  "cell_width_m": 0.02755,
+  "cell_height_m": 0.02755,
+  "square_size_m": 0.02755,
+  "dist_model": "k1 + k2 (recommended)",
+  "calib_flags": 136,
+  "per_image_rms": [
+    1.6645297113827426,
+    1.6513214047353382,
+    1.6503874165510566,
+    1.8028538825172271,
+    1.8092955052188475,
+    1.6093070405481047,
+    1.6160657752151124,
+    1.6224046141185324,
+    1.5665548477376412,
+    1.5160701662429001,
+    1.5514206443545768,
+    1.5463850339130596,
+    1.698568032098963,
+    1.7075875332104458,
+    1.8843246844498975,
+    2.0922956084530178,
+    2.038200640069848,
+    2.2485590249971064
+  ],
+  "quality": "POOR",
+  "quality_warnings": [
+    "Target accuracy: the detected corners lie up to ~1.1 mm from where a flat, exact pattern would be seen (image 18). The calibration assumes such a pattern. Mount it on a flat, stiff backing (foam board / dibond / glass), check the printed cell size, and re-shoot.",
+    "Suspect distortion coefficients \u2014 likely overfitting to target defects rather than real lens distortion: k2 = 0.297 \u00b1 0.16 (not significant). Prefer a simpler distortion model."
+  ],
+  "model_guidance": "Model guidance: k2 is not significant (+0.297 \u00b1 0.16) (dropping it changes RMS by only +0.000 px) \u2014 prefer the next-simpler model.",
+  "_meta": {
+    "geocampal_version": "1.0.4",
+    "produced_by": "GeoCamPal lens_correction"
+  }
+}

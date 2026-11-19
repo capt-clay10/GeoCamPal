@@ -598,6 +598,9 @@ time,horizontal_distance,horizontal_distance_detrended,vertical_distance,vertica
 2025-10-04-08-28-59,70.97500000000001,-3.013552763819078,12.514807455783304,-0.531370660049868
 # Stockdon_R2%,1.3124
 # observed_R2%,1.9445
+# observed_R2%_type,vertical
+# observed_S,2.7217
+# observed_S_type,vertical
 # regime,intermediate
 # slope_deg,10.0
 # beta,0.1763

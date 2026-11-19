@@ -1,10 +1,11 @@
 {
+  "geocampal_version": "1.0.4",
   "module": "harmonise_images",
   "settings_version": 1,
   "paths": {
-    "input_folder": "U:/coast01/active/00_AG_share/Clayton/GeoCamPal/03_harmonise_images/input/raw_images/harmonise_colour",
-    "output_folder": "U:/coast01/active/00_AG_share/Clayton/GeoCamPal/03_harmonise_images/expected_outputs/colour_harmonised",
-    "ref_colour_path": "U:/coast01/active/00_AG_share/Clayton/GeoCamPal/03_harmonise_images/input/raw_images/harmonise_colour/2026_01_02_12_05-12_15_camPANO_v2_HDR.tif",
+    "input_folder": "C:/your/local/path/GeoCamPal/examples/03_harmonise_images/input/raw_images/harmonise_colour",
+    "output_folder": "C:/your/local/path/GeoCamPal/examples/03_harmonise_images/expected_outputs/colour_harmonised",
+    "ref_colour_path": "C:/your/local/path/GeoCamPal/examples/03_harmonise_images/input/raw_images/harmonise_colour/2026_01_02_12_05-12_15_camPANO_v2_HDR.tif",
     "loaded_bad_json_path": "",
     "lens_calib_path": ""
   },
@@ -16,7 +17,7 @@
     "run_colour": true,
     "run_average": false,
     "exclude_bad_brightness": true,
-    "exclude_bad_colour": true,
+    "exclude_bad_colour": false,
     "exclude_bad_avg": false,
     "exclude_bad_lens": true,
     "lens_crop_to_valid": true,
@@ -46,6 +47,9 @@
       "Droplet fraction": "0.08",
       "Obstruction fraction": "0.35",
       "Failed min size pct": "10"
-    }
+    },
+    "filter_aoi_enabled": false,
+    "filter_aoi": null,
+    "filter_aoi_drawn_on": ""
   }
 }

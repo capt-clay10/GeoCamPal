@@ -16,5 +16,6 @@ Intermediate quantities
 
 Results
   Stockdon R₂%     : 1.3124 m
-  Observed R₂%     : 1.9445 m  (98th percentile of detrended swash)
+  Observed R₂%     : 1.9445 m  (vertical; 98th percentile of detrended swash)
   Difference       : +0.6321 m  (observed − predicted)
+  Observed S       : 2.7217 m  (vertical; 4 × standard deviation of detrended swash)

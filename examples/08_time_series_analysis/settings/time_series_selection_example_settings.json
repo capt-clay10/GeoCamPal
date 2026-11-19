@@ -1,7 +1,8 @@
 {
+  "geocampal_version": "1.0.4",
   "paths": {
-    "image_folder": "D:/DynaDeep/Camera_Data/test/05",
-    "output_folder": "D:/DynaDeep/Camera_Data/test/result_test"
+    "image_folder": "C:/your/local/path/GeoCamPal/examples/08_time_series_analysis/input/images",
+    "output_folder": "C:/your/local/path/GeoCamPal/examples/08_time_series_analysis/expected_outputs"
   },
   "global": {
     "num_series": 1,
@@ -12,8 +13,9 @@
   },
   "series": [
     {
-      "csv_path": "C:/02_Camera/02_Data/Water_level/wangerooge_nord_wl_2024-04-15_to_2024-06-15_UTC_m",
+      "csv_path": "C:/your/local/path/GeoCamPal/examples/08_time_series_analysis/input/wangerooge_nord_wl_2024-04-15_to_2024-06-15_UTC_m.csv",
       "label": "Water_Level",
+      "unit": "m",
       "criterion": "Troughs (Minima)",
       "threshold": "",
       "tolerance": "0.5",

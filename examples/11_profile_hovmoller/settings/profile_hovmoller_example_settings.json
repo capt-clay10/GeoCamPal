@@ -1,0 +1,17 @@
+{
+  "geocampal_version": "1.0.4",
+  "paths": {
+    "image_folder": "C:/your/local/path/GeoCamPal/examples/11_profile_hovmoller/input/timestamped_images",
+    "output_folder": "C:/your/local/path/GeoCamPal/examples/11_profile_hovmoller/expected_outputs"
+  },
+  "profile": {
+    "x1": "965",
+    "y1": "345",
+    "x2": "4832",
+    "y2": "1537",
+    "width": "100"
+  },
+  "mode": "RGB",
+  "filename_format": "",
+  "recursive": false
+}

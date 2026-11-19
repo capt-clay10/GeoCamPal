@@ -1,14 +1,16 @@
 {
+  "geocampal_version": "1.0.4",
   "module": "pixel_to_gcp",
   "settings_version": 1,
   "paths": {
-    "image_folder": "U:/coast01/active/00_AG_share/Clayton/GeoCamPal/04_pixel_to_gcp/input/input_oblique_images",
-    "gcp_file": "U:/coast01/active/00_AG_share/Clayton/GeoCamPal/04_pixel_to_gcp/input/raw_gcp_file.csv",
-    "output_folder": "U:/coast01/active/00_AG_share/Clayton/GeoCamPal/04_pixel_to_gcp/expected_outputs"
+    "image_folder": "C:/your/local/path/GeoCamPal/examples/04_pixel_to_gcp/input/input_oblique_images",
+    "gcp_file": "C:/your/local/path/GeoCamPal/examples/04_pixel_to_gcp/input/raw_gcp_file.csv",
+    "output_folder": "C:/your/local/path/GeoCamPal/examples/04_pixel_to_gcp/expected_outputs"
   },
   "ui_state": {
     "bad_gcps": "",
     "output_filename": "gcp_to_pixel_coordinates",
-    "convert_to_utm": true
+    "convert_to_utm": true,
+    "projected_epsg": ""
   }
 }

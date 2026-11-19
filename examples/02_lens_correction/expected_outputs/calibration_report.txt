@@ -1,43 +1,134 @@
 === Lens Calibration Report ===
 
-Input folder: U:/coast01/active/00_AG_share/Clayton/GeoCamPal/02_lens_correction/input/checkerboard_images
+GeoCamPal version: 1.0.4
+Input folder: C:/your/local/path/GeoCamPal/examples/02_lens_correction/input/checkerboard_images
 Images found: 18
 Images with corners: 18
 Board: 19 × 17 squares
 Inner corners: 18 × 16
 Cell size: 27.55 mm (square)
+Distortion model: k1 + k2 (recommended)
 
-RMS reprojection error: 1.6484 px
+=== Result ===
+Lens distortion:   the correction moves pixels by up to 2.72 px ± 3.75 px
+Checkerboard fit:  POOR  (RMS reprojection error 1.7491 px)
 
+Lens distortion  (3088 × 2064 px image, model: k1 + k2 (recommended))
+  If the correction is applied, each pixel moves by its own amount,
+  depending on where it is in the image:
+    Image centre:        0.00 px  ± 0.00 px
+    Half of all pixels:  no more than 0.04 px  ± 0.35 px
+    Largest movement:    2.72 px  ± 3.75 px, at the top-left corner
+  The ± is how much the value changes when one photo is left out
+  (standard error from 18 repeated calibrations).
+  This is the movement by the distortion model itself. "Crop to valid
+  pixels" in Harmonise Images also rescales the image; that is not
+  included.
+
+Checkerboard fit  (GOOD: RMS below 0.5 px; MARGINAL: below 1.0 px; POOR: 1.0 px or more)
+  The fit says how well the detected corners match the camera model.
+  It is not the amount of lens distortion.
+    RMS reprojection error without a distortion model:  1.7498 px
+    RMS reprojection error with the distortion model:   1.7491 px  (0.057 % of the image width)
+    Reduction by the distortion model:                  0.0007 px  (0.04 %)
+
+Warnings: 2 (listed below)
+
+Warnings:
+  ! Target accuracy: the detected corners lie up to ~1.1 mm from where a flat, exact pattern would be seen (image 18). The calibration assumes such a pattern. Mount it on a flat, stiff backing (foam board / dibond / glass), check the printed cell size, and re-shoot.
+  ! Suspect distortion coefficients — likely overfitting to target defects rather than real lens distortion: k2 = 0.297 ± 0.16 (not significant). Prefer a simpler distortion model.
+
+Model guidance: k2 is not significant (+0.297 ± 0.16) (dropping it changes RMS by only +0.000 px) — prefer the next-simpler model.
+
+=== Details ===
 Camera matrix:
-[[6.70842148e+03 0.00000000e+00 1.68594391e+03]
- [0.00000000e+00 6.74133071e+03 1.34418933e+03]
+[[6.70780660e+03 0.00000000e+00 1.57923809e+03]
+ [0.00000000e+00 6.73079912e+03 1.11616437e+03]
  [0.00000000e+00 0.00000000e+00 1.00000000e+00]]
 
-Focal length: fx=6708.42 px, fy=6741.33 px
-Principal point: cx=1685.94 px, cy=1344.19 px
+Focal length: fx=6707.81 ± 8.01 px, fy=6730.80 ± 7.82 px
+Principal point: cx=1579.24 ± 3.18 px, cy=1116.16 ± 3.38 px
 Image size: 3088 × 2064 px
+Corner coverage of frame: 70%
 
 Distortion coefficients:
-[ 1.04731836e-01 -2.27135510e+00  1.44043937e-02  4.90130204e-03
-  1.68952818e+01]
+[-0.00751032  0.29714865  0.          0.          0.        ]
+  k1 = -0.007510 ± 0.007851
+  k2 =  0.297149 ± 0.158421
+  p1 =  0.000000 ± 0.000000
+  p2 =  0.000000 ± 0.000000
+  k3 =  0.000000 ± 0.000000
+  (fixed coefficients have sigma = 0)
 
-Per-image reprojection errors:
-  Image 1: 0.0890 px
-  Image 2: 0.0883 px
-  Image 3: 0.0882 px
-  Image 4: 0.0899 px
-  Image 5: 0.0930 px
-  Image 6: 0.0942 px
-  Image 7: 0.0929 px
-  Image 8: 0.0963 px
-  Image 9: 0.0912 px
-  Image 10: 0.0852 px
-  Image 11: 0.0873 px
-  Image 12: 0.0883 px
-  Image 13: 0.0905 px
-  Image 14: 0.0887 px
-  Image 15: 0.1064 px
-  Image 16: 0.1185 px
-  Image 17: 0.1164 px
-  Image 18: 0.1299 px
+Per-image diagnostics
+  (RMS is the true per-image RMS, |residuals|/sqrt(N);
+   plane-fit is the deviation of the detected grid from a flat plane):
+  Image 1: RMS 1.6645 px | plane-fit 1.52 px (~0.37 mm)
+  Image 2: RMS 1.6513 px | plane-fit 1.50 px (~0.37 mm)
+  Image 3: RMS 1.6504 px | plane-fit 1.50 px (~0.37 mm)
+  Image 4: RMS 1.8029 px | plane-fit 1.56 px (~0.37 mm)
+  Image 5: RMS 1.8093 px | plane-fit 1.65 px (~0.40 mm)
+  Image 6: RMS 1.6093 px | plane-fit 1.59 px (~0.45 mm)
+  Image 7: RMS 1.6161 px | plane-fit 1.59 px (~0.45 mm)
+  Image 8: RMS 1.6224 px | plane-fit 1.59 px (~0.45 mm)
+  Image 9: RMS 1.5666 px | plane-fit 1.54 px (~0.42 mm)
+  Image 10: RMS 1.5161 px | plane-fit 1.49 px (~0.40 mm)
+  Image 11: RMS 1.5514 px | plane-fit 1.50 px (~0.38 mm)
+  Image 12: RMS 1.5464 px | plane-fit 1.46 px (~0.37 mm)
+  Image 13: RMS 1.6986 px | plane-fit 1.59 px (~0.40 mm)
+  Image 14: RMS 1.7076 px | plane-fit 1.56 px (~0.42 mm)
+  Image 15: RMS 1.8843 px | plane-fit 1.88 px (~0.56 mm)
+  Image 16: RMS 2.0923 px | plane-fit 2.09 px (~0.68 mm)
+  Image 17: RMS 2.0382 px | plane-fit 2.04 px (~0.84 mm)
+  Image 18: RMS 2.2486 px | plane-fit 2.24 px (~1.06 mm)
+
+=== Interpretation ===
+Note: this section is an interpretation of the numbers above, written by
+GeoCamPal from fixed rules. It is not a measurement. Check it against your
+own use before acting on it.
+
+Does the lens distort the image?
+  - The largest movement (2.72 px) is smaller than 2 times its ± (3.75 px).
+    These photos do not show a lens distortion.
+  - They also cannot rule one out. A distortion of up to about 10 px at the
+    top-left corner would not have been noticed (largest movement + 2 × its
+    ±). For half of all pixels the ± is 0.35 px or less.
+
+Where does the misfit come from?
+  - The distortion model removes 0.04 % of the misfit. The remaining 1.75 px
+    (0.057 % of the image width) comes from the board or the photos, not from
+    lens distortion that this model can describe.
+  - On the board, the remaining misfit is 0.54 mm on average. 0.39 mm of that
+    is the same in every photo, which points to the pattern itself. 0.38 mm
+    changes from photo to photo, which points to the board bending, to blur,
+    or to how exactly the corners were found.
+
+What it means for your images (3088 × 2064 px)
+  - If this file is applied, pixels move by at most 2.72 px (0.09 % of the
+    image width), and half of all pixels by no more than 0.04 px.
+  - Applying the file and not applying it are both consistent with these
+    photos.
+  - Example: if one pixel covers 10 cm on the ground, 2.72 px is 27 cm and the
+    10 px that cannot be ruled out is 100 cm, both at the top-left corner. For
+    half of all pixels the ± is 3.5 cm or less.
+  - The grade limits are in pixels. A smaller image size gives a smaller RMS
+    in pixels for the same board, so the grade can improve without a better
+    calibration. The share of the image width (0.057 %) does not change with
+    the image size; use it to compare calibrations.
+
+Limits of this interpretation
+  - The ± comes from repeating the calibration 18 times, each time without one
+    photo. An error that is the same in every photo, such as an inexact
+    printed pattern, is not part of it. In tests with such an error, the true
+    error was up to 4 times the ±.
+  - More photos make the ± smaller, but not an error of the board.
+
+Suggestions
+  - To find out whether this lens distorts, use a pattern on a flat, stiff
+    backing and check the printed cell size with a ruler.
+  - Turn the board by 90° and 180° in some of the photos and place it in all
+    parts of the frame. A board error then no longer looks like lens
+    distortion.
+  - Use "k1 only", as the model guidance suggests.
+  - If you apply the file, check that straight lines near the image edges stay
+    straight in the corrected images.

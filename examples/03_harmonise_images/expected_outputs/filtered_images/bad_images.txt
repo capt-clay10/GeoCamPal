@@ -1,0 +1,12 @@
+relative_path	filename	reason
+2023_03_21_05_00-58_852_CAM3.jpg	2023_03_21_05_00-58_852_CAM3.jpg	blurry,underexposed,low_information,obstruction
+2023_04_02_16_00-33_557_CAM3.jpg	2023_04_02_16_00-33_557_CAM3.jpg	clipped_overexposed
+2023_04_13_16_00-16_168_CAM3.jpg	2023_04_13_16_00-16_168_CAM3.jpg	clipped_overexposed
+2023_04_18_04_00-28_230_CAM3.jpg	2023_04_18_04_00-28_230_CAM3.jpg	blurry,underexposed,too_dark,low_information,obstruction
+2023_04_24_17_31-09_460_CAM3.jpg	2023_04_24_17_31-09_460_CAM3.jpg	clipped_overexposed,lens_droplets
+2023_04_27_03_31-37_375_CAM3.jpg	2023_04_27_03_31-37_375_CAM3.jpg	blurry,low_information
+2023_04_30_03_30-31_661_CAM3.jpg	2023_04_30_03_30-31_661_CAM3.jpg	blurry,underexposed,low_information
+2023_04_30_04_30-16_441_CAM3.jpg	2023_04_30_04_30-16_441_CAM3.jpg	clipped_overexposed,low_information
+2023_05_01_19_33-13_005_CAM3.jpg	2023_05_01_19_33-13_005_CAM3.jpg	blurry,underexposed,low_information,obstruction
+2023_05_09_18_01-04_872_CAM3.jpg	2023_05_09_18_01-04_872_CAM3.jpg	blurry
+2023_07_24_17_00-35_905_CAM3.jpg	2023_07_24_17_00-35_905_CAM3.jpg	failed_image (0 bytes)

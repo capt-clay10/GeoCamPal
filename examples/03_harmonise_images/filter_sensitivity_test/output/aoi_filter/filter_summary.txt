@@ -1,0 +1,39 @@
+GeoCamPal image filter summary
+==============================
+
+GeoCamPal version : 1.0.4
+Input folder      : C:/your/local/path/GeoCamPal/examples/03_harmonise_images/filter_sensitivity_test/input
+Sub-folders       : not included
+Area of interest  : rectangle, x 0-1542, y 148-1031 (1543 x 884 px), 85.6 % of a 1544 x 1032 px image
+Started           : 2026-11-17 11:49:03
+Finished          : 2026-11-17 11:49:05
+Processing time   : 2s  (22.9 images/s)
+
+Images checked    : 50
+Kept              : 35  (70.0 %)
+Rejected          : 15  (30.0 %)
+
+Rejected by reason  (count, share of the images checked)
+  blurry                7   14.0 %
+  clipped_overexposed   8   16.0 %
+  underexposed          0    0.0 %
+  too_dark              0    0.0 %
+  low_information       2    4.0 %
+  lens_droplets         2    4.0 %
+  obstruction           0    0.0 %
+  failed_image          0    0.0 %
+  An image can have more than one reason, so these counts can add up
+  to more than the number of rejected images.
+
+Filters and thresholds
+  Blur              threshold = 20.0, local blur fraction = 0.35
+  Overexposure      fraction = 0.05, pixel value = 250
+  Underexposure     dark pixel value = 20, fraction = 0.2
+  Darkness          max threshold = 25
+  Low information   entropy threshold = 6.0
+  Lens droplets     fraction = 0.08
+  Obstruction       fraction = 0.15
+  Failed images     min percent of median size = 10.0
+  The image checks looked only at the area of interest, so their
+  fractions are shares of that area and not of the whole image.
+  Failed images goes by file size and does not use the area.

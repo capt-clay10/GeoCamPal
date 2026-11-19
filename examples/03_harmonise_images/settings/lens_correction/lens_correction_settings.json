@@ -1,12 +1,13 @@
 {
+  "geocampal_version": "1.0.4",
   "module": "harmonise_images",
   "settings_version": 1,
   "paths": {
-    "input_folder": "U:/coast01/active/00_AG_share/Clayton/GeoCamPal/03_harmonise_images/input/raw_images/lens_correction",
-    "output_folder": "U:/coast01/active/00_AG_share/Clayton/GeoCamPal/03_harmonise_images/expected_outputs/with_lens_correction",
+    "input_folder": "C:/your/local/path/GeoCamPal/examples/03_harmonise_images/input/raw_images/lens_correction",
+    "output_folder": "C:/your/local/path/GeoCamPal/examples/03_harmonise_images/expected_outputs/with_lens_correction",
     "ref_colour_path": "",
     "loaded_bad_json_path": "",
-    "lens_calib_path": "U:/coast01/active/00_AG_share/Clayton/GeoCamPal/03_harmonise_images/input/raw_images/lens_correction/lens_calibration.pkl"
+    "lens_calib_path": "C:/your/local/path/GeoCamPal/examples/03_harmonise_images/input/raw_images/lens_correction/lens_calibration.pkl"
   },
   "ui_state": {
     "recursive": false,
@@ -46,6 +47,9 @@
       "Droplet fraction": "0.08",
       "Obstruction fraction": "0.35",
       "Failed min size pct": "10"
-    }
+    },
+    "filter_aoi_enabled": false,
+    "filter_aoi": null,
+    "filter_aoi_drawn_on": ""
   }
 }

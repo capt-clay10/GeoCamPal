@@ -1,19 +1,26 @@
 {
+  "geocampal_version": "1.0.4",
   "module": "harmonise_images",
   "settings_version": 1,
   "paths": {
-    "input_folder": "U:/coast01/active/00_AG_share/Anthony/Camera_filtered_images_2023",
-    "output_folder": "U:/coast01/active/00_AG_share/Anthony/test",
-    "ref_colour_path": ""
+    "input_folder": "C:/your/local/path/GeoCamPal/examples/03_harmonise_images/input/raw_images/filter_images",
+    "output_folder": "C:/your/local/path/GeoCamPal/examples/03_harmonise_images/expected_outputs/filtered_images",
+    "ref_colour_path": "",
+    "loaded_bad_json_path": "",
+    "lens_calib_path": ""
   },
   "ui_state": {
     "recursive": false,
     "run_filter": true,
+    "run_lens": false,
     "run_brightness": false,
     "run_colour": false,
     "run_average": false,
     "exclude_bad_brightness": true,
     "exclude_bad_colour": true,
+    "exclude_bad_avg": false,
+    "exclude_bad_lens": true,
+    "lens_crop_to_valid": true,
     "export_filtered_good": true,
     "tol": "5",
     "sky_pct": "0",
@@ -25,7 +32,8 @@
       "Darkness": true,
       "Low information": true,
       "Lens droplets": true,
-      "Obstruction": true
+      "Obstruction": true,
+      "Failed images": true
     },
     "filter_values": {
       "Blur threshold": "20",
@@ -37,7 +45,11 @@
       "Dark max threshold": "25",
       "Entropy threshold": "6",
       "Droplet fraction": "0.08",
-      "Obstruction fraction": "0.15"
-    }
+      "Obstruction fraction": "0.15",
+      "Failed min size pct": "10"
+    },
+    "filter_aoi_enabled": false,
+    "filter_aoi": null,
+    "filter_aoi_drawn_on": ""
   }
 }

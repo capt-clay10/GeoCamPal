@@ -1,8 +1,9 @@
 {
+  "geocampal_version": "1.0.4",
   "paths": {
-    "wl_csv": "U:/coast01/active/00_AG_share/Clayton/GeoCamPal/10_dem_generator/input/waterlevel_UTM.csv",
-    "geojson_dir": "U:/coast01/active/00_AG_share/Clayton/GeoCamPal/10_dem_generator/input/shoreline_positions",
-    "output_dir": "U:/coast01/active/00_AG_share/Clayton/GeoCamPal/10_dem_generator/expected_outputs"
+    "wl_csv": "C:/your/local/path/GeoCamPal/examples/10_dem_generator/input/waterlevel_UTM.csv",
+    "geojson_dir": "C:/your/local/path/GeoCamPal/examples/10_dem_generator/input/shoreline_positions",
+    "output_dir": "C:/your/local/path/GeoCamPal/examples/10_dem_generator/expected_outputs"
   },
   "parameters": {
     "resolution": "1",

@@ -1,7 +1,8 @@
 {
+  "geocampal_version": "1.0.4",
   "paths": {
-    "input_folder": "U:/coast01/active/00_AG_share/Clayton/GeoCamPal/09_colour_space_explorer/input/images",
-    "output_folder": "U:/coast01/active/00_AG_share/Clayton/GeoCamPal/09_colour_space_explorer/expected_outputs"
+    "input_folder": "C:/your/local/path/GeoCamPal/examples/09_colour_space_explorer/input/images",
+    "output_folder": "C:/your/local/path/GeoCamPal/examples/09_colour_space_explorer/expected_outputs"
   },
   "ui_state": {
     "recursive": false,

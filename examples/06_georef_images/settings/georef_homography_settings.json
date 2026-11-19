@@ -1,9 +1,10 @@
 {
+  "geocampal_version": "1.0.4",
   "paths": {
-    "image_path": "U:/coast01/active/00_AG_share/Clayton/GeoCamPal/06_georef_images/input/oblique_images/example_oblique.tif",
-    "input_folder": "U:/coast01/active/00_AG_share/Clayton/GeoCamPal/06_georef_images/input/oblique_images",
-    "output_folder": "U:/coast01/active/00_AG_share/Clayton/GeoCamPal/06_georef_images/expected_outputs/georeferenced_geotiffs/using_homography_matrix",
-    "homography_path": "U:/coast01/active/00_AG_share/Clayton/GeoCamPal/06_georef_images/input/example_homography_correction_matrix.txt",
+    "image_path": "C:/your/local/path/GeoCamPal/examples/06_georef_images/input/oblique_images/example_oblique.tif",
+    "input_folder": "C:/your/local/path/GeoCamPal/examples/06_georef_images/input/oblique_images",
+    "output_folder": "C:/your/local/path/GeoCamPal/examples/06_georef_images/expected_outputs/georeferenced_geotiffs/using_homography_matrix",
+    "homography_path": "C:/your/local/path/GeoCamPal/examples/06_georef_images/input/example_homography_correction_matrix.txt",
     "gcp_path": "",
     "calibration_path": ""
   },
@@ -21,5 +22,6 @@
   "elevation": "",
   "excluded_gcps": "",
   "aoi_manual": "",
-  "include_subfolders": false
+  "include_subfolders": false,
+  "skip_existing": false
 }

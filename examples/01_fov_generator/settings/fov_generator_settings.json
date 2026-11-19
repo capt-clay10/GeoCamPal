@@ -1,10 +1,11 @@
 {
+  "geocampal_version": "1.0.4",
   "module": "fov_generator",
   "settings_version": 1,
   "paths": {
-    "basemap_path": "U:/coast01/active/00_AG_share/Clayton/GeoCamPal/01_fov_generator/input/example_basemap.tif",
-    "dem_path": "U:/coast01/active/00_AG_share/Clayton/GeoCamPal/01_fov_generator/input/example_DEM.tif",
-    "output_folder": "U:/coast01/active/00_AG_share/Clayton/GeoCamPal/01_fov_generator/expected_outputs"
+    "basemap_path": "C:/your/local/path/GeoCamPal/examples/01_fov_generator/input/example_basemap.tif",
+    "dem_path": "C:/your/local/path/GeoCamPal/examples/01_fov_generator/input/example_DEM.tif",
+    "output_folder": "C:/your/local/path/GeoCamPal/examples/01_fov_generator/expected_outputs"
   },
   "ui_state": {
     "location": {

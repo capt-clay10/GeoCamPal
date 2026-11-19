@@ -1,9 +1,10 @@
 {
+  "geocampal_version": "1.0.4",
   "module": "harmonise_images",
   "settings_version": 1,
   "paths": {
-    "input_folder": "U:/coast01/active/00_AG_share/Clayton/GeoCamPal/03_harmonise_images/input/raw_images/harmonise_brightness",
-    "output_folder": "U:/coast01/active/00_AG_share/Clayton/GeoCamPal/03_harmonise_images/expected_outputs/brightness_harmonised",
+    "input_folder": "C:/your/local/path/GeoCamPal/examples/03_harmonise_images/input/raw_images/harmonise_brightness",
+    "output_folder": "C:/your/local/path/GeoCamPal/examples/03_harmonise_images/expected_outputs/brightness_harmonised",
     "ref_colour_path": "",
     "loaded_bad_json_path": "",
     "lens_calib_path": ""
@@ -46,6 +47,9 @@
       "Droplet fraction": "0.08",
       "Obstruction fraction": "0.35",
       "Failed min size pct": "10"
-    }
+    },
+    "filter_aoi_enabled": false,
+    "filter_aoi": null,
+    "filter_aoi_drawn_on": ""
   }
 }

@@ -1,0 +1,16 @@
+relative_path	filename	reason
+L031.jpg	L031.jpg	clipped_overexposed,lens_droplets
+L036.jpg	L036.jpg	clipped_overexposed
+L058.jpg	L058.jpg	blurry
+L118.jpg	L118.jpg	blurry
+L126.jpg	L126.jpg	clipped_overexposed,low_information
+L128.jpg	L128.jpg	blurry
+L170.jpg	L170.jpg	clipped_overexposed
+L172.jpg	L172.jpg	blurry
+L189.jpg	L189.jpg	blurry
+L192.jpg	L192.jpg	clipped_overexposed,low_information
+L218.jpg	L218.jpg	clipped_overexposed
+L240.jpg	L240.jpg	clipped_overexposed
+L279.jpg	L279.jpg	blurry
+L366.jpg	L366.jpg	clipped_overexposed,lens_droplets
+L396.jpg	L396.jpg	blurry

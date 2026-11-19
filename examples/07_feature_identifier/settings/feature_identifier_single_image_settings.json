@@ -1,7 +1,8 @@
 {
+  "geocampal_version": "1.0.4",
   "paths": {
     "image_path": {
-      "path": "U:/coast01/active/00_AG_share/Clayton/GeoCamPal/07_feature_identifier/input/georeferenced_images/example_image.tif",
+      "path": "C:/your/local/path/GeoCamPal/examples/07_feature_identifier/input/georeferenced_images/example_image.tif",
       "exists": true
     },
     "image_folder": {
@@ -9,7 +10,7 @@
       "exists": false
     },
     "export_path": {
-      "path": "U:/coast01/active/00_AG_share/Clayton/GeoCamPal/07_feature_identifier/expected_outputs",
+      "path": "C:/your/local/path/GeoCamPal/examples/07_feature_identifier/expected_outputs",
       "exists": true
     }
   },
@@ -33,7 +34,7 @@
   "s2_high": 255,
   "v2_high": 255,
   "edge_thickness": 2,
-  "export_path": "U:/coast01/active/00_AG_share/Clayton/GeoCamPal/07_feature_identifier/expected_outputs",
+  "export_path": "C:/your/local/path/GeoCamPal/examples/07_feature_identifier/expected_outputs",
   "do_invert_mask": false,
   "advanced_settings_enabled": false,
   "min_contour_size": "",
@@ -61,5 +62,15 @@
   "color_pick_keep_points": [],
   "color_pick_class_a_name": "water",
   "color_pick_class_b_name": "sand",
-  "bbox_text": "(460, 302, 2761, 1782)"
+  "bbox_text": "(460, 302, 2761, 1782)",
+  "feature_id": "sand bar",
+  "image_id": "1",
+  "category_id": "1",
+  "label_catalog": [
+    {
+      "feature_id": "sand bar",
+      "category_id": 1
+    }
+  ],
+  "batch_extraction_mode": "boundary"
 }

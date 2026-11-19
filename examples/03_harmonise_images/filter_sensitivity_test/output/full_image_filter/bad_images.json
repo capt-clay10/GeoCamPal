@@ -1,0 +1,412 @@
+{
+  "input_folder": "C:/your/local/path/GeoCamPal/examples/03_harmonise_images/filter_sensitivity_test/input",
+  "recursive": false,
+  "summary": {
+    "geocampal_version": "1.0.4",
+    "input_folder": "C:/your/local/path/GeoCamPal/examples/03_harmonise_images/filter_sensitivity_test/input",
+    "subfolders_included": false,
+    "area_of_interest": null,
+    "started": "2026-11-17 11:49:00",
+    "finished": "2026-11-17 11:49:03",
+    "processing_seconds": 2.5,
+    "images_per_second": 20.26,
+    "sessions": 1,
+    "images_checked": 50,
+    "images_kept": 10,
+    "images_rejected": 40,
+    "percent_rejected": 80.0,
+    "rejected_by_reason": {
+      "blurry": {
+        "count": 12,
+        "percent_of_checked": 24.0
+      },
+      "clipped_overexposed": {
+        "count": 31,
+        "percent_of_checked": 62.0
+      },
+      "underexposed": {
+        "count": 0,
+        "percent_of_checked": 0.0
+      },
+      "too_dark": {
+        "count": 0,
+        "percent_of_checked": 0.0
+      },
+      "low_information": {
+        "count": 2,
+        "percent_of_checked": 4.0
+      },
+      "lens_droplets": {
+        "count": 2,
+        "percent_of_checked": 4.0
+      },
+      "obstruction": {
+        "count": 0,
+        "percent_of_checked": 0.0
+      },
+      "failed_image": {
+        "count": 0,
+        "percent_of_checked": 0.0
+      }
+    },
+    "filters": {
+      "Blur": {
+        "threshold": 20.0,
+        "local_blur_fraction": 0.35
+      },
+      "Overexposure": {
+        "fraction": 0.05,
+        "pixel_value": 250
+      },
+      "Underexposure": {
+        "dark_pixel_value": 20,
+        "fraction": 0.2
+      },
+      "Darkness": {
+        "max_threshold": 25
+      },
+      "Low information": {
+        "entropy_threshold": 6.0
+      },
+      "Lens droplets": {
+        "fraction": 0.08
+      },
+      "Obstruction": {
+        "fraction": 0.15
+      },
+      "Failed images": {
+        "min_percent_of_median_size": 10.0
+      }
+    },
+    "filters_not_used": []
+  },
+  "bad_images": [
+    {
+      "absolute_path": "C:\\your\\local\\path\\GeoCamPal\\examples\\03_harmonise_images\\filter_sensitivity_test\\input\\L012.jpg",
+      "relative_path": "L012.jpg",
+      "filename": "L012.jpg",
+      "reasons": [
+        "blurry"
+      ]
+    },
+    {
+      "absolute_path": "C:\\your\\local\\path\\GeoCamPal\\examples\\03_harmonise_images\\filter_sensitivity_test\\input\\L031.jpg",
+      "relative_path": "L031.jpg",
+      "filename": "L031.jpg",
+      "reasons": [
+        "clipped_overexposed",
+        "lens_droplets"
+      ]
+    },
+    {
+      "absolute_path": "C:\\your\\local\\path\\GeoCamPal\\examples\\03_harmonise_images\\filter_sensitivity_test\\input\\L036.jpg",
+      "relative_path": "L036.jpg",
+      "filename": "L036.jpg",
+      "reasons": [
+        "clipped_overexposed"
+      ]
+    },
+    {
+      "absolute_path": "C:\\your\\local\\path\\GeoCamPal\\examples\\03_harmonise_images\\filter_sensitivity_test\\input\\L058.jpg",
+      "relative_path": "L058.jpg",
+      "filename": "L058.jpg",
+      "reasons": [
+        "blurry",
+        "clipped_overexposed"
+      ]
+    },
+    {
+      "absolute_path": "C:\\your\\local\\path\\GeoCamPal\\examples\\03_harmonise_images\\filter_sensitivity_test\\input\\L064.jpg",
+      "relative_path": "L064.jpg",
+      "filename": "L064.jpg",
+      "reasons": [
+        "clipped_overexposed"
+      ]
+    },
+    {
+      "absolute_path": "C:\\your\\local\\path\\GeoCamPal\\examples\\03_harmonise_images\\filter_sensitivity_test\\input\\L068.jpg",
+      "relative_path": "L068.jpg",
+      "filename": "L068.jpg",
+      "reasons": [
+        "clipped_overexposed"
+      ]
+    },
+    {
+      "absolute_path": "C:\\your\\local\\path\\GeoCamPal\\examples\\03_harmonise_images\\filter_sensitivity_test\\input\\L108.jpg",
+      "relative_path": "L108.jpg",
+      "filename": "L108.jpg",
+      "reasons": [
+        "clipped_overexposed"
+      ]
+    },
+    {
+      "absolute_path": "C:\\your\\local\\path\\GeoCamPal\\examples\\03_harmonise_images\\filter_sensitivity_test\\input\\L118.jpg",
+      "relative_path": "L118.jpg",
+      "filename": "L118.jpg",
+      "reasons": [
+        "blurry"
+      ]
+    },
+    {
+      "absolute_path": "C:\\your\\local\\path\\GeoCamPal\\examples\\03_harmonise_images\\filter_sensitivity_test\\input\\L125.jpg",
+      "relative_path": "L125.jpg",
+      "filename": "L125.jpg",
+      "reasons": [
+        "clipped_overexposed"
+      ]
+    },
+    {
+      "absolute_path": "C:\\your\\local\\path\\GeoCamPal\\examples\\03_harmonise_images\\filter_sensitivity_test\\input\\L126.jpg",
+      "relative_path": "L126.jpg",
+      "filename": "L126.jpg",
+      "reasons": [
+        "clipped_overexposed",
+        "low_information"
+      ]
+    },
+    {
+      "absolute_path": "C:\\your\\local\\path\\GeoCamPal\\examples\\03_harmonise_images\\filter_sensitivity_test\\input\\L128.jpg",
+      "relative_path": "L128.jpg",
+      "filename": "L128.jpg",
+      "reasons": [
+        "blurry"
+      ]
+    },
+    {
+      "absolute_path": "C:\\your\\local\\path\\GeoCamPal\\examples\\03_harmonise_images\\filter_sensitivity_test\\input\\L142.jpg",
+      "relative_path": "L142.jpg",
+      "filename": "L142.jpg",
+      "reasons": [
+        "clipped_overexposed"
+      ]
+    },
+    {
+      "absolute_path": "C:\\your\\local\\path\\GeoCamPal\\examples\\03_harmonise_images\\filter_sensitivity_test\\input\\L150.jpg",
+      "relative_path": "L150.jpg",
+      "filename": "L150.jpg",
+      "reasons": [
+        "clipped_overexposed"
+      ]
+    },
+    {
+      "absolute_path": "C:\\your\\local\\path\\GeoCamPal\\examples\\03_harmonise_images\\filter_sensitivity_test\\input\\L170.jpg",
+      "relative_path": "L170.jpg",
+      "filename": "L170.jpg",
+      "reasons": [
+        "clipped_overexposed"
+      ]
+    },
+    {
+      "absolute_path": "C:\\your\\local\\path\\GeoCamPal\\examples\\03_harmonise_images\\filter_sensitivity_test\\input\\L172.jpg",
+      "relative_path": "L172.jpg",
+      "filename": "L172.jpg",
+      "reasons": [
+        "blurry",
+        "clipped_overexposed"
+      ]
+    },
+    {
+      "absolute_path": "C:\\your\\local\\path\\GeoCamPal\\examples\\03_harmonise_images\\filter_sensitivity_test\\input\\L180.jpg",
+      "relative_path": "L180.jpg",
+      "filename": "L180.jpg",
+      "reasons": [
+        "blurry"
+      ]
+    },
+    {
+      "absolute_path": "C:\\your\\local\\path\\GeoCamPal\\examples\\03_harmonise_images\\filter_sensitivity_test\\input\\L184.jpg",
+      "relative_path": "L184.jpg",
+      "filename": "L184.jpg",
+      "reasons": [
+        "clipped_overexposed"
+      ]
+    },
+    {
+      "absolute_path": "C:\\your\\local\\path\\GeoCamPal\\examples\\03_harmonise_images\\filter_sensitivity_test\\input\\L189.jpg",
+      "relative_path": "L189.jpg",
+      "filename": "L189.jpg",
+      "reasons": [
+        "blurry"
+      ]
+    },
+    {
+      "absolute_path": "C:\\your\\local\\path\\GeoCamPal\\examples\\03_harmonise_images\\filter_sensitivity_test\\input\\L192.jpg",
+      "relative_path": "L192.jpg",
+      "filename": "L192.jpg",
+      "reasons": [
+        "clipped_overexposed",
+        "low_information"
+      ]
+    },
+    {
+      "absolute_path": "C:\\your\\local\\path\\GeoCamPal\\examples\\03_harmonise_images\\filter_sensitivity_test\\input\\L196.jpg",
+      "relative_path": "L196.jpg",
+      "filename": "L196.jpg",
+      "reasons": [
+        "clipped_overexposed"
+      ]
+    },
+    {
+      "absolute_path": "C:\\your\\local\\path\\GeoCamPal\\examples\\03_harmonise_images\\filter_sensitivity_test\\input\\L199.jpg",
+      "relative_path": "L199.jpg",
+      "filename": "L199.jpg",
+      "reasons": [
+        "blurry",
+        "clipped_overexposed"
+      ]
+    },
+    {
+      "absolute_path": "C:\\your\\local\\path\\GeoCamPal\\examples\\03_harmonise_images\\filter_sensitivity_test\\input\\L218.jpg",
+      "relative_path": "L218.jpg",
+      "filename": "L218.jpg",
+      "reasons": [
+        "clipped_overexposed"
+      ]
+    },
+    {
+      "absolute_path": "C:\\your\\local\\path\\GeoCamPal\\examples\\03_harmonise_images\\filter_sensitivity_test\\input\\L221.jpg",
+      "relative_path": "L221.jpg",
+      "filename": "L221.jpg",
+      "reasons": [
+        "clipped_overexposed"
+      ]
+    },
+    {
+      "absolute_path": "C:\\your\\local\\path\\GeoCamPal\\examples\\03_harmonise_images\\filter_sensitivity_test\\input\\L236.jpg",
+      "relative_path": "L236.jpg",
+      "filename": "L236.jpg",
+      "reasons": [
+        "clipped_overexposed"
+      ]
+    },
+    {
+      "absolute_path": "C:\\your\\local\\path\\GeoCamPal\\examples\\03_harmonise_images\\filter_sensitivity_test\\input\\L240.jpg",
+      "relative_path": "L240.jpg",
+      "filename": "L240.jpg",
+      "reasons": [
+        "clipped_overexposed"
+      ]
+    },
+    {
+      "absolute_path": "C:\\your\\local\\path\\GeoCamPal\\examples\\03_harmonise_images\\filter_sensitivity_test\\input\\L258.jpg",
+      "relative_path": "L258.jpg",
+      "filename": "L258.jpg",
+      "reasons": [
+        "clipped_overexposed"
+      ]
+    },
+    {
+      "absolute_path": "C:\\your\\local\\path\\GeoCamPal\\examples\\03_harmonise_images\\filter_sensitivity_test\\input\\L268.jpg",
+      "relative_path": "L268.jpg",
+      "filename": "L268.jpg",
+      "reasons": [
+        "clipped_overexposed"
+      ]
+    },
+    {
+      "absolute_path": "C:\\your\\local\\path\\GeoCamPal\\examples\\03_harmonise_images\\filter_sensitivity_test\\input\\L279.jpg",
+      "relative_path": "L279.jpg",
+      "filename": "L279.jpg",
+      "reasons": [
+        "blurry"
+      ]
+    },
+    {
+      "absolute_path": "C:\\your\\local\\path\\GeoCamPal\\examples\\03_harmonise_images\\filter_sensitivity_test\\input\\L294.jpg",
+      "relative_path": "L294.jpg",
+      "filename": "L294.jpg",
+      "reasons": [
+        "clipped_overexposed"
+      ]
+    },
+    {
+      "absolute_path": "C:\\your\\local\\path\\GeoCamPal\\examples\\03_harmonise_images\\filter_sensitivity_test\\input\\L295.jpg",
+      "relative_path": "L295.jpg",
+      "filename": "L295.jpg",
+      "reasons": [
+        "clipped_overexposed"
+      ]
+    },
+    {
+      "absolute_path": "C:\\your\\local\\path\\GeoCamPal\\examples\\03_harmonise_images\\filter_sensitivity_test\\input\\L323.jpg",
+      "relative_path": "L323.jpg",
+      "filename": "L323.jpg",
+      "reasons": [
+        "clipped_overexposed"
+      ]
+    },
+    {
+      "absolute_path": "C:\\your\\local\\path\\GeoCamPal\\examples\\03_harmonise_images\\filter_sensitivity_test\\input\\L324.jpg",
+      "relative_path": "L324.jpg",
+      "filename": "L324.jpg",
+      "reasons": [
+        "blurry"
+      ]
+    },
+    {
+      "absolute_path": "C:\\your\\local\\path\\GeoCamPal\\examples\\03_harmonise_images\\filter_sensitivity_test\\input\\L364.jpg",
+      "relative_path": "L364.jpg",
+      "filename": "L364.jpg",
+      "reasons": [
+        "clipped_overexposed"
+      ]
+    },
+    {
+      "absolute_path": "C:\\your\\local\\path\\GeoCamPal\\examples\\03_harmonise_images\\filter_sensitivity_test\\input\\L366.jpg",
+      "relative_path": "L366.jpg",
+      "filename": "L366.jpg",
+      "reasons": [
+        "clipped_overexposed",
+        "lens_droplets"
+      ]
+    },
+    {
+      "absolute_path": "C:\\your\\local\\path\\GeoCamPal\\examples\\03_harmonise_images\\filter_sensitivity_test\\input\\L369.jpg",
+      "relative_path": "L369.jpg",
+      "filename": "L369.jpg",
+      "reasons": [
+        "clipped_overexposed"
+      ]
+    },
+    {
+      "absolute_path": "C:\\your\\local\\path\\GeoCamPal\\examples\\03_harmonise_images\\filter_sensitivity_test\\input\\L377.jpg",
+      "relative_path": "L377.jpg",
+      "filename": "L377.jpg",
+      "reasons": [
+        "clipped_overexposed"
+      ]
+    },
+    {
+      "absolute_path": "C:\\your\\local\\path\\GeoCamPal\\examples\\03_harmonise_images\\filter_sensitivity_test\\input\\L384.jpg",
+      "relative_path": "L384.jpg",
+      "filename": "L384.jpg",
+      "reasons": [
+        "clipped_overexposed"
+      ]
+    },
+    {
+      "absolute_path": "C:\\your\\local\\path\\GeoCamPal\\examples\\03_harmonise_images\\filter_sensitivity_test\\input\\L386.jpg",
+      "relative_path": "L386.jpg",
+      "filename": "L386.jpg",
+      "reasons": [
+        "blurry"
+      ]
+    },
+    {
+      "absolute_path": "C:\\your\\local\\path\\GeoCamPal\\examples\\03_harmonise_images\\filter_sensitivity_test\\input\\L394.jpg",
+      "relative_path": "L394.jpg",
+      "filename": "L394.jpg",
+      "reasons": [
+        "clipped_overexposed"
+      ]
+    },
+    {
+      "absolute_path": "C:\\your\\local\\path\\GeoCamPal\\examples\\03_harmonise_images\\filter_sensitivity_test\\input\\L396.jpg",
+      "relative_path": "L396.jpg",
+      "filename": "L396.jpg",
+      "reasons": [
+        "blurry"
+      ]
+    }
+  ]
+}

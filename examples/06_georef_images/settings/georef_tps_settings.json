@@ -1,10 +1,11 @@
 {
+  "geocampal_version": "1.0.4",
   "paths": {
-    "image_path": "U:/coast01/active/00_AG_share/Clayton/GeoCamPal/06_georef_images/input/oblique_images/example_oblique.tif",
-    "input_folder": "U:/coast01/active/00_AG_share/Clayton/GeoCamPal/06_georef_images/input/oblique_images",
-    "output_folder": "U:/coast01/active/00_AG_share/Clayton/GeoCamPal/06_georef_images/expected_outputs/georeferenced_geotiffs/using_thin-plate-spline",
+    "image_path": "C:/your/local/path/GeoCamPal/examples/06_georef_images/input/oblique_images/example_oblique.tif",
+    "input_folder": "C:/your/local/path/GeoCamPal/examples/06_georef_images/input/oblique_images",
+    "output_folder": "C:/your/local/path/GeoCamPal/examples/06_georef_images/expected_outputs/georeferenced_geotiffs/using_thin-plate-spline",
     "homography_path": "",
-    "gcp_path": "U:/coast01/active/00_AG_share/Clayton/GeoCamPal/06_georef_images/input/gcp_to_pixel_coordinates.csv",
+    "gcp_path": "C:/your/local/path/GeoCamPal/examples/06_georef_images/input/gcp_to_pixel_coordinates.csv",
     "calibration_path": ""
   },
   "method": "Thin Plate Spline",
@@ -21,5 +22,6 @@
   "elevation": "0.6",
   "excluded_gcps": "",
   "aoi_manual": "208,15,1594,2860",
-  "include_subfolders": false
+  "include_subfolders": false,
+  "skip_existing": false
 }

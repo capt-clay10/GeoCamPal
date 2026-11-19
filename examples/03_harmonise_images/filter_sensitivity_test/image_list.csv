@@ -1,0 +1,51 @@
+id,example,original_file,full_image_filter,full_image_reasons,aoi_filter,aoi_reasons,human_label
+L001,good image,2024_03_23_05_30-26_303_CAM3.jpg,kept,,kept,,usable
+L012,smooth sky (blur),2024_02_19_09_30-42_439_CAM3.jpg,removed,blurry,kept,,usable
+L031,not usable,2024_04_16_17_31-02_925_CAM3.jpg,removed,clipped_overexposed;lens_droplets,removed,clipped_overexposed;lens_droplets,not_usable
+L036,not usable,2024_03_08_14_00-22_822_CAM3.jpg,removed,clipped_overexposed,removed,clipped_overexposed,not_usable
+L058,not usable,2024_01_25_12_00-59_273_CAM3.jpg,removed,blurry;clipped_overexposed,removed,blurry,not_usable
+L064,sky over-exposure,2024_04_23_11_30-23_714_CAM3.jpg,removed,clipped_overexposed,kept,,usable
+L068,sky over-exposure,2024_01_09_15_00-47_650_CAM3.jpg,removed,clipped_overexposed,kept,,usable
+L089,good image,2024_04_20_10_01-11_613_CAM3.jpg,kept,,kept,,usable
+L108,sky over-exposure,2024_01_10_11_00-20_076_CAM3.jpg,removed,clipped_overexposed,kept,,usable
+L118,not usable,2024_02_10_14_30-57_309_CAM3.jpg,removed,blurry,removed,blurry,not_usable
+L120,good image,2024_04_09_18_00-31_114_CAM3.jpg,kept,,kept,,usable
+L123,good image,2024_04_20_09_31-20_369_CAM3.jpg,kept,,kept,,usable
+L125,sky over-exposure,2024_04_17_12_30-29_694_CAM3.jpg,removed,clipped_overexposed,kept,,usable
+L126,not usable,2024_03_29_16_30-19_278_CAM3.jpg,removed,clipped_overexposed;low_information,removed,clipped_overexposed;low_information,not_usable
+L128,not usable,2024_01_24_11_30-53_276_CAM3.jpg,removed,blurry,removed,blurry,not_usable
+L142,sky over-exposure,2024_03_02_07_30-30_991_CAM3.jpg,removed,clipped_overexposed,kept,,usable
+L150,sky over-exposure,2024_01_10_13_00-28_023_CAM3.jpg,removed,clipped_overexposed,kept,,usable
+L154,good image,2024_04_18_09_00-48_560_CAM3.jpg,kept,,kept,,usable
+L170,not usable,2024_03_25_16_30-43_815_CAM3.jpg,removed,clipped_overexposed,removed,clipped_overexposed,not_usable
+L172,not usable,2024_01_25_12_31-29_593_CAM3.jpg,removed,blurry;clipped_overexposed,removed,blurry,not_usable
+L180,smooth sky (blur),2024_03_05_08_31-08_528_CAM3.jpg,removed,blurry,kept,,usable
+L184,sky over-exposure,2024_01_07_14_31-01_605_CAM3.jpg,removed,clipped_overexposed,kept,,usable
+L189,not usable,2024_02_10_14_32-16_424_CAM3.jpg,removed,blurry,removed,blurry,not_usable
+L192,not usable,2024_04_19_10_00-20_362_CAM3.jpg,removed,clipped_overexposed;low_information,removed,clipped_overexposed;low_information,not_usable
+L196,sky over-exposure,2024_04_29_10_30-45_041_CAM3.jpg,removed,clipped_overexposed,kept,,usable
+L199,smooth sky (blur),2024_03_21_15_00-52_788_CAM3.jpg,removed,blurry;clipped_overexposed,kept,,usable
+L203,good image,2024_04_28_16_30-53_874_CAM3.jpg,kept,,kept,,usable
+L218,not usable,2024_04_24_17_00-26_185_CAM3.jpg,removed,clipped_overexposed,removed,clipped_overexposed,not_usable
+L221,sky over-exposure,2024_04_16_10_30-21_625_CAM3.jpg,removed,clipped_overexposed,kept,,usable
+L236,sky over-exposure,2024_03_19_17_34-01_999_CAM3.jpg,removed,clipped_overexposed,kept,,usable
+L240,not usable,2024_04_04_16_31-01_455_CAM3.jpg,removed,clipped_overexposed,removed,clipped_overexposed,not_usable
+L249,good image,2024_03_23_15_00-43_513_CAM3.jpg,kept,,kept,,usable
+L258,sky over-exposure,2024_04_07_08_00-28_175_CAM3.jpg,removed,clipped_overexposed,kept,,usable
+L268,sky over-exposure,2024_04_22_15_00-56_382_CAM3.jpg,removed,clipped_overexposed,kept,,usable
+L279,not usable,2024_01_24_09_31-05_652_CAM3.jpg,removed,blurry,removed,blurry,not_usable
+L294,sky over-exposure,2024_01_09_13_31-17_867_CAM3.jpg,removed,clipped_overexposed,kept,,usable
+L295,sky over-exposure,2024_04_25_04_30-40_653_CAM3.jpg,removed,clipped_overexposed,kept,,usable
+L303,good image,2024_04_21_09_30-47_735_CAM3.jpg,kept,,kept,,usable
+L306,good image,2024_04_28_14_30-25_791_CAM3.jpg,kept,,kept,,usable
+L323,sky over-exposure,2024_03_02_09_00-34_336_CAM3.jpg,removed,clipped_overexposed,kept,,usable
+L324,smooth sky (blur),2024_03_18_11_30-50_956_CAM3.jpg,removed,blurry,kept,,usable
+L341,good image,2024_04_21_08_30-26_460_CAM3.jpg,kept,,kept,,usable
+L364,sky over-exposure,2024_03_07_15_31-07_802_CAM3.jpg,removed,clipped_overexposed,kept,,usable
+L366,not usable,2024_04_16_15_00-29_002_CAM3.jpg,removed,clipped_overexposed;lens_droplets,removed,clipped_overexposed;lens_droplets,not_usable
+L369,sky over-exposure,2024_02_01_10_31-17_975_CAM3.jpg,removed,clipped_overexposed,kept,,usable
+L377,sky over-exposure,2024_04_25_07_31-04_783_CAM3.jpg,removed,clipped_overexposed,kept,,usable
+L384,sky over-exposure,2024_04_08_05_30-51_106_CAM3.jpg,removed,clipped_overexposed,kept,,usable
+L386,smooth sky (blur),2024_03_18_10_01-13_126_CAM3.jpg,removed,blurry,kept,,usable
+L394,sky over-exposure,2024_04_23_09_30-51_471_CAM3.jpg,removed,clipped_overexposed,kept,,usable
+L396,not usable,2024_02_11_07_02-17_413_CAM3.jpg,removed,blurry,removed,blurry,not_usable

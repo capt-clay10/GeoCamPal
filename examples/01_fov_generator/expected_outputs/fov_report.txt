@@ -2,8 +2,8 @@
 Location: 53.781891°N, 7.710327°E
 UTM CRS: EPSG:32632
 Camera height above ground: 11.0 m
-DEM ground elevation: -3.08 m
-Camera absolute elevation: 7.92 m
+DEM ground elevation: -0.32 m
+Camera absolute elevation: 10.68 m
 
 --- Cam 1 ---
 Heading: 67.95°  |  Depression: 3.00°

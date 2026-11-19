@@ -1,9 +1,10 @@
 {
+  "geocampal_version": "1.0.4",
   "module": "raw_timestacker",
   "settings_version": 1,
   "paths": {
-    "input_folder": "U:/coast01/active/00_AG_share/Clayton/GeoCamPal/12_raw_timestack_image/input/burst_georef_images",
-    "output_folder": "U:/coast01/active/00_AG_share/Clayton/GeoCamPal/12_raw_timestack_image/expected_outputs",
+    "input_folder": "C:/your/local/path/GeoCamPal/examples/12_burst_images_time-stacker/input/burst_georef_images",
+    "output_folder": "C:/your/local/path/GeoCamPal/examples/12_burst_images_time-stacker/expected_outputs",
     "batch_folder": ""
   },
   "ui_state": {
@@ -14,6 +15,7 @@
     "identified_resolution": "0.500 m",
     "add_resolution_manual": false,
     "manual_resolution": "",
+    "batch_recursive": false,
     "fill_gaps": true,
     "freq_hz": 1.0,
     "duration_s": 600.0

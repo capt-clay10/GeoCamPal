@@ -1,0 +1,188 @@
+{
+  "input_folder": "C:/your/local/path/GeoCamPal/examples/03_harmonise_images/input/raw_images/filter_images",
+  "recursive": false,
+  "summary": {
+    "geocampal_version": "1.0.4",
+    "input_folder": "C:/your/local/path/GeoCamPal/examples/03_harmonise_images/input/raw_images/filter_images",
+    "subfolders_included": false,
+    "area_of_interest": null,
+    "started": "2026-11-17 12:22:25",
+    "finished": "2026-11-17 12:22:26",
+    "processing_seconds": 0.8,
+    "images_per_second": 18.8,
+    "sessions": 1,
+    "images_checked": 15,
+    "images_kept": 4,
+    "images_rejected": 11,
+    "percent_rejected": 73.33,
+    "rejected_by_reason": {
+      "blurry": {
+        "count": 6,
+        "percent_of_checked": 40.0
+      },
+      "clipped_overexposed": {
+        "count": 4,
+        "percent_of_checked": 26.67
+      },
+      "underexposed": {
+        "count": 4,
+        "percent_of_checked": 26.67
+      },
+      "too_dark": {
+        "count": 1,
+        "percent_of_checked": 6.67
+      },
+      "low_information": {
+        "count": 6,
+        "percent_of_checked": 40.0
+      },
+      "lens_droplets": {
+        "count": 1,
+        "percent_of_checked": 6.67
+      },
+      "obstruction": {
+        "count": 3,
+        "percent_of_checked": 20.0
+      },
+      "failed_image": {
+        "count": 1,
+        "percent_of_checked": 6.67
+      }
+    },
+    "filters": {
+      "Blur": {
+        "threshold": 20.0,
+        "local_blur_fraction": 0.4
+      },
+      "Overexposure": {
+        "fraction": 0.05,
+        "pixel_value": 250
+      },
+      "Underexposure": {
+        "dark_pixel_value": 20,
+        "fraction": 0.25
+      },
+      "Darkness": {
+        "max_threshold": 25
+      },
+      "Low information": {
+        "entropy_threshold": 6.0
+      },
+      "Lens droplets": {
+        "fraction": 0.08
+      },
+      "Obstruction": {
+        "fraction": 0.15
+      },
+      "Failed images": {
+        "min_percent_of_median_size": 10.0
+      }
+    },
+    "filters_not_used": []
+  },
+  "bad_images": [
+    {
+      "absolute_path": "C:\\your\\local\\path\\GeoCamPal\\examples\\03_harmonise_images\\input\\raw_images\\filter_images\\2023_03_21_05_00-58_852_CAM3.jpg",
+      "relative_path": "2023_03_21_05_00-58_852_CAM3.jpg",
+      "filename": "2023_03_21_05_00-58_852_CAM3.jpg",
+      "reasons": [
+        "blurry",
+        "underexposed",
+        "low_information",
+        "obstruction"
+      ]
+    },
+    {
+      "absolute_path": "C:\\your\\local\\path\\GeoCamPal\\examples\\03_harmonise_images\\input\\raw_images\\filter_images\\2023_04_02_16_00-33_557_CAM3.jpg",
+      "relative_path": "2023_04_02_16_00-33_557_CAM3.jpg",
+      "filename": "2023_04_02_16_00-33_557_CAM3.jpg",
+      "reasons": [
+        "clipped_overexposed"
+      ]
+    },
+    {
+      "absolute_path": "C:\\your\\local\\path\\GeoCamPal\\examples\\03_harmonise_images\\input\\raw_images\\filter_images\\2023_04_13_16_00-16_168_CAM3.jpg",
+      "relative_path": "2023_04_13_16_00-16_168_CAM3.jpg",
+      "filename": "2023_04_13_16_00-16_168_CAM3.jpg",
+      "reasons": [
+        "clipped_overexposed"
+      ]
+    },
+    {
+      "absolute_path": "C:\\your\\local\\path\\GeoCamPal\\examples\\03_harmonise_images\\input\\raw_images\\filter_images\\2023_04_18_04_00-28_230_CAM3.jpg",
+      "relative_path": "2023_04_18_04_00-28_230_CAM3.jpg",
+      "filename": "2023_04_18_04_00-28_230_CAM3.jpg",
+      "reasons": [
+        "blurry",
+        "underexposed",
+        "too_dark",
+        "low_information",
+        "obstruction"
+      ]
+    },
+    {
+      "absolute_path": "C:\\your\\local\\path\\GeoCamPal\\examples\\03_harmonise_images\\input\\raw_images\\filter_images\\2023_04_24_17_31-09_460_CAM3.jpg",
+      "relative_path": "2023_04_24_17_31-09_460_CAM3.jpg",
+      "filename": "2023_04_24_17_31-09_460_CAM3.jpg",
+      "reasons": [
+        "clipped_overexposed",
+        "lens_droplets"
+      ]
+    },
+    {
+      "absolute_path": "C:\\your\\local\\path\\GeoCamPal\\examples\\03_harmonise_images\\input\\raw_images\\filter_images\\2023_04_27_03_31-37_375_CAM3.jpg",
+      "relative_path": "2023_04_27_03_31-37_375_CAM3.jpg",
+      "filename": "2023_04_27_03_31-37_375_CAM3.jpg",
+      "reasons": [
+        "blurry",
+        "low_information"
+      ]
+    },
+    {
+      "absolute_path": "C:\\your\\local\\path\\GeoCamPal\\examples\\03_harmonise_images\\input\\raw_images\\filter_images\\2023_04_30_03_30-31_661_CAM3.jpg",
+      "relative_path": "2023_04_30_03_30-31_661_CAM3.jpg",
+      "filename": "2023_04_30_03_30-31_661_CAM3.jpg",
+      "reasons": [
+        "blurry",
+        "underexposed",
+        "low_information"
+      ]
+    },
+    {
+      "absolute_path": "C:\\your\\local\\path\\GeoCamPal\\examples\\03_harmonise_images\\input\\raw_images\\filter_images\\2023_04_30_04_30-16_441_CAM3.jpg",
+      "relative_path": "2023_04_30_04_30-16_441_CAM3.jpg",
+      "filename": "2023_04_30_04_30-16_441_CAM3.jpg",
+      "reasons": [
+        "clipped_overexposed",
+        "low_information"
+      ]
+    },
+    {
+      "absolute_path": "C:\\your\\local\\path\\GeoCamPal\\examples\\03_harmonise_images\\input\\raw_images\\filter_images\\2023_05_01_19_33-13_005_CAM3.jpg",
+      "relative_path": "2023_05_01_19_33-13_005_CAM3.jpg",
+      "filename": "2023_05_01_19_33-13_005_CAM3.jpg",
+      "reasons": [
+        "blurry",
+        "underexposed",
+        "low_information",
+        "obstruction"
+      ]
+    },
+    {
+      "absolute_path": "C:\\your\\local\\path\\GeoCamPal\\examples\\03_harmonise_images\\input\\raw_images\\filter_images\\2023_05_09_18_01-04_872_CAM3.jpg",
+      "relative_path": "2023_05_09_18_01-04_872_CAM3.jpg",
+      "filename": "2023_05_09_18_01-04_872_CAM3.jpg",
+      "reasons": [
+        "blurry"
+      ]
+    },
+    {
+      "absolute_path": "C:\\your\\local\\path\\GeoCamPal\\examples\\03_harmonise_images\\input\\raw_images\\filter_images\\2023_07_24_17_00-35_905_CAM3.jpg",
+      "relative_path": "2023_07_24_17_00-35_905_CAM3.jpg",
+      "filename": "2023_07_24_17_00-35_905_CAM3.jpg",
+      "reasons": [
+        "failed_image (0 bytes)"
+      ]
+    }
+  ]
+}
