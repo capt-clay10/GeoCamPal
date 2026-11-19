@@ -926,6 +926,7 @@ class HSVMaskEditingMixin:
         self.freehand_mode = False
         self.creation_mode = True
         self.is_polygon_mode = False
+        self._line_extend_end = "last"     # points follow in the order clicked
         self._bind_creation_handlers(polygon=False)
         self._record_history()
         self._update_poly_nav_label()
@@ -982,10 +983,12 @@ class HSVMaskEditingMixin:
 
     def continue_line(self):
         """
-        Continue adding points to the current polyline from its last vertex.
+        Continue adding points to the current polyline.
         Unlike Create Line, this does NOT save existing points to session or
-        clear them.  New clicks are appended to the end of the existing
-        edited_edge_points, seamlessly extending the line.
+        clear them.  The first click picks the end of the line to go on
+        from, the end it is nearer to (so a line can be extended from its
+        first vertex as well as from its last); every click after it adds
+        the next point at that same end, in the order clicked.
 
         If there are no existing points this behaves like Create Line.
         """
@@ -1001,11 +1004,20 @@ class HSVMaskEditingMixin:
         # as polygon); with nothing to continue, it is a new line.
         if not self.edited_edge_points:
             self.is_polygon_mode = False
+        n = len(self.edited_edge_points)
+        # None = not chosen yet: the first click picks the end (see
+        # on_canvas_single_click).  A polygon, or a shape of fewer than two
+        # points, has no two ends to choose from.
+        choose_end = (n >= 2) and not self.is_polygon_mode
+        self._line_extend_end = None if choose_end else "last"
         self._bind_creation_handlers(polygon=False)
         self.redraw_canvas()
 
-        n = len(self.edited_edge_points)
-        if n > 0:
+        if choose_end:
+            print(f"[Edit] Continue line ({n} points): the first click picks "
+                  "the end of the line it is nearer to; the points after it "
+                  "go on from that end.")
+        elif n > 0:
             print(f"[Edit] Continue line from point {n} (last vertex).")
         else:
             print("[Edit] Continue line — starting fresh (no existing points).")
@@ -2615,6 +2627,9 @@ class HSVMaskEditingMixin:
             "label": getattr(self, "_active_label", "") or "",
             "session": list(getattr(self, "_edit_session_features", []) or []),
             "creating": bool(getattr(self, "creation_mode", False)),
+            # end of the line the next click is added at (see
+            # on_canvas_single_click); None = picked by the next click
+            "extend": getattr(self, "_line_extend_end", "last"),
             "source": getattr(self, "_active_source", None),
             "pending": getattr(self, "_pending_label", None),
         }
@@ -2646,6 +2661,7 @@ class HSVMaskEditingMixin:
         if snap.get("creating") and hasattr(self, "edit_canvas"):
             self.freehand_mode = False
             self.creation_mode = True
+            self._line_extend_end = snap.get("extend", "last")
             self._bind_creation_handlers(polygon=self.is_polygon_mode)
         else:
             self._leave_creation_mode()
@@ -2697,15 +2713,28 @@ class HSVMaskEditingMixin:
                       "more or press Confirm.")
                 return
 
-        # For polylines, extend at whichever endpoint (first or last) is
-        # nearer to the click, so the user can grow the line in either
-        # direction (e.g. extending a shoreline both north and south).
+        # A line grows from its last point, in the order of the clicks.
+        # Only after Continue Line on an existing line does the first click
+        # pick the end to go on from (the end it is nearer to, so a line
+        # can be extended at its first vertex too); the points after it
+        # follow at that same end.
+        # Up to v1.0.3 every click was added at the nearer end.  A line
+        # that turns back towards its own start, such as a run-up line on
+        # a timestack, was then joined to its first vertex instead of
+        # continuing from its last one.
+        if not self.edited_edge_points:
+            self._line_extend_end = "last"          # a new shape starts here
         if (not self.is_polygon_mode) and len(self.edited_edge_points) >= 2:
-            first_pt = self.edited_edge_points[0]
-            last_pt  = self.edited_edge_points[-1]
-            d_first = self.distance(x_img, y_img, first_pt[0], first_pt[1])
-            d_last  = self.distance(x_img, y_img, last_pt[0],  last_pt[1])
-            if d_first < d_last:
+            end = getattr(self, "_line_extend_end", "last")
+            if end is None:
+                first_pt = self.edited_edge_points[0]
+                last_pt  = self.edited_edge_points[-1]
+                d_first = self.distance(x_img, y_img, first_pt[0], first_pt[1])
+                d_last  = self.distance(x_img, y_img, last_pt[0],  last_pt[1])
+                end = "first" if d_first < d_last else "last"
+                self._line_extend_end = end
+                print(f"[Edit] Continuing from the {end} vertex of the line.")
+            if end == "first":
                 self.edited_edge_points.insert(0, [x_img, y_img])
             else:
                 self.edited_edge_points.append([x_img, y_img])
