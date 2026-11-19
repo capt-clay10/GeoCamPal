@@ -106,6 +106,7 @@ from utils import (
     save_settings_json, load_settings_json,
     make_selector_payload, describe_saved_path,
     bring_child_to_front, apply_window_icon, geometry_px, DARK_CANVAS_BG,
+    figure_canvas,
 )
 
 # %% Standalone helper classes
@@ -1125,7 +1126,7 @@ class HSVMaskUIMixin:
 
         # Build popup with embedded figure — use Figure() directly to avoid plt ghost window
         from matplotlib.figure import Figure
-        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+        from matplotlib.backends.backend_tkagg import NavigationToolbar2Tk
 
         popup = ctk.CTkToplevel(self)
         apply_window_icon(popup)
@@ -1211,7 +1212,7 @@ class HSVMaskUIMixin:
         toolbar_frame = ctk.CTkFrame(popup, fg_color="transparent")
         toolbar_frame.pack(side="bottom", fill="x")
 
-        canvas_widget = FigureCanvasTkAgg(fig, master=popup)
+        canvas_widget = figure_canvas(fig, popup)
         canvas_widget.get_tk_widget().pack(side="top", fill="both", expand=True)
 
         # Zoom/pan toolbar
