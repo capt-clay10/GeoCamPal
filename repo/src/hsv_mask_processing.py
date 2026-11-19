@@ -23,12 +23,16 @@ Each image is kept at two resolutions simultaneously:
                    exports (masks, GeoJSON, COCO) use full_image
                    coordinates.
 
-    cv_image     — a downscaled working copy capped at 600 px on
-                   the longer side.  HSV masking, display, and the
-                   initial contour search all operate here for speed.
+    cv_image     — a downscaled working copy capped at 1200 px
+                   (WORKING_MAX_DIM) on the longer side, in every
+                   mode.  HSV masking, display, and the initial
+                   contour search all operate here for speed.
 
-Contour coordinates found in cv_image space are scaled back to
-full_image space before being stored in self.features or exported.
+A feature's vertices are positions in the full image, in which the
+pixel (c, r) reaches from c to c + 1 and from r to r + 1.  A vertex
+found on a mask is a pixel; its position is that pixel's centre (see
+pixels_to_positions).  Shapes drawn in the editor are positions
+already.  The georeference turns positions into map coordinates.
 
 HSV mask computation
 --------------------
@@ -129,6 +133,23 @@ from difflib import SequenceMatcher
 
 from utils import restore_console, imread_safe
 from feature_model import feature_label
+
+# Longest side of the working copy, in pixels, for every mode.  Up to 2026-11-18 it was 600 in
+# Single Image and Folder Processing and 1200 in Batch Processing, so a batch run did not give
+# what the same settings had shown on the single image.
+WORKING_MAX_DIM = 1200
+
+
+def pixels_to_positions(points, sx=1.0, sy=1.0):
+    """Pixels (column, row) of a mask -> positions in the full image.
+
+    A vertex found on a mask is a pixel.  Its position is the pixel's centre, (c + 0.5, r + 0.5).
+    On the working copy, which is smaller than the image by the factors sx, sy, the working pixel
+    c reaches from c * sx to (c + 1) * sx in the full image, so its centre is at (c + 0.5) * sx.
+    (Up to 2026-11-18 the vertex was stored as int(c * sx): the upper-left corner of the working
+    pixel, which put every detected shape half a working pixel too far up and to the left.)
+    """
+    return [[round((float(x) + 0.5) * sx, 3), round((float(y) + 0.5) * sy, 3)] for x, y in points]
 
 warnings.filterwarnings("ignore", category=NotGeoreferencedWarning)
 
@@ -769,7 +790,7 @@ class HSVMaskProcessingMixin:
                 (img_bgr.shape[0], img_bgr.shape[1]), dtype=np.uint8)
 
         h, w = img_bgr.shape[:2]
-        max_dim = 600
+        max_dim = WORKING_MAX_DIM
         self.scale = min(max_dim / w, max_dim / h, 1.0)
         if self.scale < 1.0:
             new_size = (int(w*self.scale), int(h*self.scale))
@@ -1066,12 +1087,7 @@ class HSVMaskProcessingMixin:
 
         scale_x = self.full_image.shape[1] / self.cv_image.shape[1]
         scale_y = self.full_image.shape[0] / self.cv_image.shape[0]
-        pts_full = []
-        for pt in approx.reshape(-1, 2):
-            rx = int(pt[0] * scale_x)
-            ry = int(pt[1] * scale_y)
-            pts_full.append([rx, ry])
-        return pts_full
+        return pixels_to_positions(approx.reshape(-1, 2), scale_x, scale_y)
 
     def _filter_points_to_inner_masks(self, points):
         valid_points = []
@@ -1094,7 +1110,7 @@ class HSVMaskProcessingMixin:
         if self.full_alpha_mask_inner is not None:
             for (x, y) in points:
                 if 0 <= x < self.full_alpha_mask_inner.shape[1] and 0 <= y < self.full_alpha_mask_inner.shape[0]:
-                    if self.full_alpha_mask_inner[y, x] > 0:
+                    if self.full_alpha_mask_inner[int(y), int(x)] > 0:
                         valid_points.append([x, y])
         else:
             valid_points = [list(pt) for pt in points]
@@ -1259,14 +1275,13 @@ class HSVMaskProcessingMixin:
                 continue
 
             if full_res:
-                # Contour is already in full-image coords
-                pts = [[int(pt[0][0]), int(pt[0][1])] for pt in approx]
+                # Contour pixels of the full image
+                pts = pixels_to_positions(approx.reshape(-1, 2))
             else:
-                # Scale from cv_image coords → full-image coords
+                # Contour pixels of the working copy → positions in the full image
                 scale_x = self.full_image.shape[1] / self.cv_image.shape[1]
                 scale_y = self.full_image.shape[0] / self.cv_image.shape[0]
-                pts = [[int(pt[0][0] * scale_x), int(pt[0][1] * scale_y)]
-                       for pt in approx]
+                pts = pixels_to_positions(approx.reshape(-1, 2), scale_x, scale_y)
 
             # NOTE: We intentionally skip _filter_points_to_inner_masks() here.
             # That filter erodes alpha boundaries by 28 px and rejects vertices
@@ -1531,7 +1546,7 @@ class HSVMaskProcessingMixin:
         # scale to full_image coords (we render/export there)
         sx = self.full_image.shape[1] / self.cv_image.shape[1]
         sy = self.full_image.shape[0] / self.cv_image.shape[0]
-        pts_full = [[int(x * sx), int(y * sy)] for x, y in pts_cv]
+        pts_full = pixels_to_positions(pts_cv, sx, sy)
 
         # Store the results
         self.edge_points = pts_full
@@ -1639,6 +1654,7 @@ class HSVMaskProcessingMixin:
             epsilon = max(0.3, 0.001 * cv2.arcLength(cnt, False))
             approx = cv2.approxPolyDP(cnt, epsilon, False)
             pts_full = [[int(pt[0][0]), int(pt[0][1])] for pt in approx]
+        pts_full = pixels_to_positions(pts_full)
 
         # Store ONE polyline feature in FULL coords
         self.edge_points = pts_full
@@ -1768,7 +1784,7 @@ class HSVMaskProcessingMixin:
             if len(approx) < 3:
                 continue
 
-            pts = [[int(pt[0][0]), int(pt[0][1])] for pt in approx]
+            pts = pixels_to_positions(approx.reshape(-1, 2))
 
             # Remove duplicate closing point if present
             if len(pts) >= 2 and pts[0] == pts[-1]:
@@ -2441,6 +2457,7 @@ class HSVMaskProcessingMixin:
                     epsilon = max(0.3, 0.001 * cv2.arcLength(cnt, False))
                     approx = cv2.approxPolyDP(cnt, epsilon, False)
                     pts_full = [[int(pt[0][0]), int(pt[0][1])] for pt in approx]
+                pts_full = pixels_to_positions(pts_full)
                 self.edge_points = pts_full
                 self.features = [("polyline", pts_full.copy())] if len(pts_full) >= 2 else []
             elif cfg["extraction_mode"] == "polygon":
@@ -2617,7 +2634,7 @@ class HSVMaskProcessingMixin:
                 (img_bgr.shape[0], img_bgr.shape[1]), dtype=np.uint8)
 
         h, w = img_bgr.shape[:2]
-        max_dim = 1200
+        max_dim = WORKING_MAX_DIM
         scale = min(max_dim / w, max_dim / h, 1.0)
         if scale < 1.0:
             new_size = (int(w*scale), int(h*scale))
