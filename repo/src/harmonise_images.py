@@ -162,7 +162,6 @@ from PIL import Image, ImageTk
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 import customtkinter as ctk
 import tkinter as tk
@@ -182,6 +181,7 @@ from utils import (
     bring_child_to_front,
     geometry_px,
     DARK_CANVAS_BG,
+    figure_canvas,
     __version__ as GEOCAMPAL_VERSION,
 )
 
@@ -1829,7 +1829,7 @@ class HarmoniseImagesWindow(ctk.CTkToplevel):
         self.axes[2].set_title("Harmonisation Results")
         self.axes[2].axis("off")
         self.fig.tight_layout()
-        self.canvas_plot = FigureCanvasTkAgg(self.fig, master=self.top_panel)
+        self.canvas_plot = figure_canvas(self.fig, self.top_panel)
         self.canvas_plot.get_tk_widget().pack(fill="both", expand=True)
 
         # ---- CONTROLS ----
