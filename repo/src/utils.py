@@ -601,6 +601,42 @@ def geometry_px(window, width, height, x=None, y=None) -> None:
         window.geometry(f"{w}x{h}+{int(x)}+{int(y)}")
 
 
+def figure_canvas(figure, master):
+    """
+    Return a matplotlib FigureCanvasTkAgg for *figure* inside *master* that
+    keeps asking for the size of the figure as it was created.
+
+    On a display scaled above 100 % matplotlib's Tk canvas, when it is first
+    shown, takes the room it has just been given, multiplies it by the
+    display scaling and asks for that.  A plot that fills its panel then
+    asks for 1.75 times the panel at 175 %, and what is placed after it
+    (console, controls, toolbar) is pushed out of the window.
+
+    Here the canvas asks for the figure's own size instead (figsize x dpi,
+    the dpi then including the display scaling), which is what it asks for
+    at 100 %.  At 100 % matplotlib never changes the canvas for the display
+    scaling, and this function changes nothing.
+    """
+    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+
+    own_w, own_h = figure.get_size_inches()
+    canvas = FigureCanvasTkAgg(figure, master=master)
+    widget = canvas.get_tk_widget()
+    seen = [getattr(canvas, "device_pixel_ratio", 1)]
+
+    def _keep_own_size(event=None):
+        ratio = getattr(canvas, "device_pixel_ratio", 1)
+        if ratio != seen[0]:
+            seen[0] = ratio
+            widget.configure(width=int(own_w * figure.dpi),
+                             height=int(own_h * figure.dpi))
+
+    # Added after matplotlib's own <Map> handler, which applies the display
+    # scaling; both run before the window is laid out again.
+    widget.bind("<Map>", _keep_own_size, add="+")
+    return canvas
+
+
 # ─────────────────────────────────────────────────────────────────────
 #  ETA helpers  —  shared progress/ETA formatting
 # ─────────────────────────────────────────────────────────────────────
