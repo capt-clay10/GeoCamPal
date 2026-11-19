@@ -80,7 +80,7 @@ import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+from matplotlib.backends.backend_tkagg import NavigationToolbar2Tk
 import matplotlib.dates as mdates
 
 import customtkinter as ctk
@@ -91,6 +91,7 @@ from utils import (
     show_path,
     fit_geometry, resource_path, setup_console, restore_console,
     save_settings_json, load_settings_json, compute_eta, format_eta,
+    figure_canvas,
 )
 
 ctk.set_appearance_mode("Dark")
@@ -986,8 +987,8 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
                 spine.set_color("#555555")
         self.fig.tight_layout()
 
-        self.canvas_plot = FigureCanvasTkAgg(
-            self.fig, master=self.plot_canvas_frame)
+        self.canvas_plot = figure_canvas(
+            self.fig, self.plot_canvas_frame)
         self.canvas_plot.get_tk_widget().pack(fill="both", expand=True)
 
         self.toolbar_frame = tk.Frame(self.top_panel, bg="black")
