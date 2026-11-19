@@ -1197,7 +1197,10 @@ class CreateDemWindow(ctk.CTkToplevel):
             except Exception:
                 pass  # degenerate hull, skip masking
 
-        transform = from_origin(x_min, y_max, res, res)
+        # The heights are those of the positions x_min + k * res, y_max - k * res, and the
+        # height of a GeoTIFF cell belongs to the cell's centre: the first cell is centred on
+        # (x_min, y_max), so the grid starts half a cell further out.
+        transform = from_origin(x_min - res / 2.0, y_max + res / 2.0, res, res)
 
         dem_masked = grid_z
 
@@ -1309,7 +1312,10 @@ class CreateDemWindow(ctk.CTkToplevel):
             except Exception:
                 pass
 
-        transform = from_origin(x_min, y_max, res, res)
+        # The heights are those of the positions x_min + k * res, y_max - k * res, and the
+        # height of a GeoTIFF cell belongs to the cell's centre: the first cell is centred on
+        # (x_min, y_max), so the grid starts half a cell further out.
+        transform = from_origin(x_min - res / 2.0, y_max + res / 2.0, res, res)
 
         date_min = min(self.daily_dates)
         date_max = max(self.daily_dates)
