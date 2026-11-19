@@ -84,7 +84,6 @@ import cv2
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import matplotlib.dates as mdates
 from matplotlib.colors import Normalize
 
@@ -92,7 +91,7 @@ import customtkinter as ctk
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
-from utils import show_path, fit_geometry, resource_path, setup_console, restore_console, save_settings_json, load_settings_json, imread_safe
+from utils import show_path, fit_geometry, resource_path, setup_console, restore_console, save_settings_json, load_settings_json, imread_safe, figure_canvas
 
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("green")
@@ -288,7 +287,7 @@ class ProfileHovmullerWindow(ctk.CTkToplevel):
         self.axes[2].set_title("Profile Overlay")
         self.axes[2].axis("off")
         self.fig.tight_layout()
-        self.canvas_plot = FigureCanvasTkAgg(self.fig, master=self.top_panel)
+        self.canvas_plot = figure_canvas(self.fig, self.top_panel)
         self.canvas_plot.get_tk_widget().pack(fill="both", expand=True)
 
         # connect click events
