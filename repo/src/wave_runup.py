@@ -123,7 +123,6 @@ if not hasattr(np, "trapezoid"):
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from scipy.signal import welch
 import customtkinter as ctk
 import os
@@ -144,6 +143,7 @@ from utils import (
     save_settings_json,
     load_settings_json,
     format_eta,
+    figure_canvas,
 )
 
 # Set appearance
@@ -505,14 +505,14 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         self.plot_panel = ctk.CTkFrame(self.top_frame)
         self.plot_panel.grid(row=0, column=1, sticky="nsew", padx=5, pady=5)
         self.fig, self.ax = plt.subplots(figsize=(5, 3))
-        self.canvas_plot = FigureCanvasTkAgg(self.fig, master=self.plot_panel)
+        self.canvas_plot = figure_canvas(self.fig, self.plot_panel)
         self.canvas_plot.get_tk_widget().pack(fill="both", expand=True)
 
         # Stats panel
         self.stats_panel = ctk.CTkFrame(self.top_frame)
         self.stats_panel.grid(row=0, column=2, sticky="nsew", padx=5, pady=5)
         self.fig_stats, (self.ax_stats_psd, self.ax_stats_swash) = plt.subplots(2, 1, figsize=(5, 3))
-        self.canvas_stats = FigureCanvasTkAgg(self.fig_stats, master=self.stats_panel)
+        self.canvas_stats = figure_canvas(self.fig_stats, self.stats_panel)
         self.canvas_stats.get_tk_widget().pack(fill="both", expand=True)
 
         # Middle console
@@ -1168,7 +1168,7 @@ class WaveRunUpCalculator(ctk.CTkToplevel):
         ax.set_title("Raw Image with Annotation Overlay")
         ax.grid(True, alpha=0.3)
 
-        self.canvas_img_fig = FigureCanvasTkAgg(fig, master=self.image_panel)
+        self.canvas_img_fig = figure_canvas(fig, self.image_panel)
         self.canvas_img_fig.get_tk_widget().pack(fill="both", expand=True)
         self.canvas_img_fig.draw()
 
