@@ -178,6 +178,31 @@ class HSVMaskProcessingMixin:
         scale = min(panel_w / img_w, panel_h / img_h, 1.0)
         return max(1, int(img_w * scale)), max(1, int(img_h * scale))
 
+    def _fit_for_label(self, img_w, img_h, panel_w, panel_h, label):
+        """Fit a picture to a panel for a CTkImage shown on *label*.
+
+        Returns (size, pixels): *size* is what CTkImage takes, *pixels* the
+        screen pixels the picture is then drawn with (resize the array to it).
+
+        The panel size comes from winfo_width() / winfo_height() and is in
+        screen pixels.  CustomTkinter multiplies the size of a CTkImage by the
+        widget scaling, which is above 1 on a display scaled above 100 %.  The
+        picture is therefore fitted in CustomTkinter's units (panel / scaling).
+        Up to 2026-11-19 it was fitted in screen pixels, so at 175 % a picture
+        that filled its panel was drawn 1.75 times too large and cut off.  At
+        100 % nothing changes.
+        """
+        try:
+            s = float(label._get_widget_scaling())
+        except Exception:
+            s = 1.0
+        if not s > 0:
+            s = 1.0
+        size = self._fit_size(img_w, img_h, int(panel_w / s), int(panel_h / s))
+        pixels = (max(1, min(img_w, int(round(size[0] * s)))),
+                  max(1, min(img_h, int(round(size[1] * s)))))
+        return size, pixels
+
     # --- path display helpers for ML rows ---
     def _shorten_path(self, path, maxlen=40):
         """Return a middle-ellipsized path for display only."""
@@ -333,11 +358,11 @@ class HSVMaskProcessingMixin:
             cv2.rectangle(disp, (x, y), (x + w, y + h), (0, 0, 255), 2)
 
         # Fit to panel preserving aspect ratio
-        fit_w, fit_h = self._fit_size(w0, h0, panel_w, panel_h)
-        resized = cv2.resize(disp, (fit_w, fit_h), interpolation=cv2.INTER_AREA)
+        size, pixels = self._fit_for_label(w0, h0, panel_w, panel_h, self.image_label)
+        resized = cv2.resize(disp, pixels, interpolation=cv2.INTER_AREA)
         rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
         pil = Image.fromarray(rgb)
-        ctk_img = ctk.CTkImage(light_image=pil, dark_image=pil, size=(fit_w, fit_h))
+        ctk_img = ctk.CTkImage(light_image=pil, dark_image=pil, size=size)
         self.image_label.configure(image=ctk_img)
         self.image_label.image = ctk_img
 
@@ -948,14 +973,13 @@ class HSVMaskProcessingMixin:
         panel_w = self.top_center_frame.winfo_width()
         panel_h = self.top_center_frame.winfo_height()
         if panel_w < 1 or panel_h < 1:
-            fit_w, fit_h = w0, h0
+            size = pixels = (w0, h0)
         else:
-            fit_w, fit_h = self._fit_size(w0, h0, panel_w, panel_h)
-        resized = cv2.resize(to_show, (fit_w, fit_h), interpolation=cv2.INTER_AREA)
+            size, pixels = self._fit_for_label(w0, h0, panel_w, panel_h, lbl)
+        resized = cv2.resize(to_show, pixels, interpolation=cv2.INTER_AREA)
         mask_rgb = cv2.cvtColor(resized, cv2.COLOR_GRAY2RGB)
         pil_img = Image.fromarray(mask_rgb)
-        ctk_img = ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=(
-            fit_w, fit_h))
+        ctk_img = ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=size)
         self.mask_label.configure(image=ctk_img)
         self.mask_label.image = ctk_img
 
