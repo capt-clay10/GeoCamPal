@@ -101,7 +101,6 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 from matplotlib.colors import LinearSegmentedColormap, TwoSlopeNorm, Normalize
@@ -118,6 +117,7 @@ from utils import (
     show_path,
     fit_geometry, resource_path, setup_console, restore_console,
     save_settings_json, load_settings_json, compute_eta, format_eta,
+    figure_canvas,
 )
 
 try:
@@ -774,7 +774,7 @@ class FOVGeneratorWindow(ctk.CTkToplevel):
         self.ax.set_xlabel("Easting (m)")
         self.ax.set_ylabel("Northing (m)")
         self.ax.grid(True, alpha=0.3)
-        self.canvas_plot = FigureCanvasTkAgg(self.fig, master=self.plot_frame)
+        self.canvas_plot = figure_canvas(self.fig, self.plot_frame)
         self.canvas_plot.get_tk_widget().pack(fill="both", expand=True)
 
         # legend panel (right)
