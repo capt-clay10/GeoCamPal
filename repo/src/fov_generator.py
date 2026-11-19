@@ -328,7 +328,7 @@ def compute_viewshed_mask(dem_path, x0, y0, cam_height_m, utm_crs,
             # camera position in DEM pixel space
             x0_dem, y0_dem = transformer_to_dem.transform(x0, y0)
             cam_col, cam_row = ~dem_transform * (x0_dem, y0_dem)
-            cam_row, cam_col = int(round(cam_row)), int(round(cam_col))
+            cam_row, cam_col = int(np.floor(cam_row)), int(np.floor(cam_col))    # the cell that holds the camera
 
             # camera ground elevation from DEM
             if (0 <= cam_row < dem_data.shape[0] and
@@ -351,8 +351,10 @@ def compute_viewshed_mask(dem_path, x0, y0, cam_height_m, utm_crs,
             gx_dem = np.array(gx_dem).reshape(grid_x.shape)
             gy_dem = np.array(gy_dem).reshape(grid_y.shape)
 
-            rows_f = (gy_dem - dem_transform.f) / dem_transform.e
-            cols_f = (gx_dem - dem_transform.c) / dem_transform.a
+            # row / column numbers in which whole numbers are cell CENTRES (a cell's height
+            # belongs to its centre, half a cell in from the corner the transform starts at)
+            rows_f = (gy_dem - dem_transform.f) / dem_transform.e - 0.5
+            cols_f = (gx_dem - dem_transform.c) / dem_transform.a - 0.5
 
             # bilinear sample from DEM
             r0 = np.clip(np.floor(rows_f).astype(int), 0, dem_data.shape[0] - 2)
@@ -583,8 +585,10 @@ def _query_dem_elevation(dem_path, x_utm, y_utm, utm_crs):
             transformer = pyproj.Transformer.from_crs(
                 utm_crs, src.crs, always_xy=True)
             x_dem, y_dem = transformer.transform(x_utm, y_utm)
-            row, col = ~src.transform * (x_dem, y_dem)
-            row, col = int(round(row)), int(round(col))
+            # ~transform * (x, y) gives (column, row), counted from the DEM's upper-left
+            # corner; the cell that holds the point is the whole part of both.
+            col, row = ~src.transform * (x_dem, y_dem)
+            row, col = int(np.floor(row)), int(np.floor(col))
             data = src.read(1)
             if 0 <= row < data.shape[0] and 0 <= col < data.shape[1]:
                 val = float(data[row, col])
@@ -1565,7 +1569,10 @@ class FOVGeneratorWindow(ctk.CTkToplevel):
             left_b, bottom_b, right_b, top_b = bounds
             mask_rgba = np.zeros((*vis_mask_fov.shape, 4), dtype=np.float32)
             mask_rgba[~vis_mask_fov & (fov_mask if fov_mask is not None else np.ones_like(vis_mask_fov, dtype=bool))] = [0, 0, 0, 0.45]
-            self.ax.imshow(mask_rgba, extent=[left_b, right_b, bottom_b, top_b], origin="upper", zorder=2, aspect="equal")
+            # the mask's points run from one bound to the other; each is the centre of its cell
+            _hx = (right_b - left_b) / max(mask_rgba.shape[1] - 1, 1) / 2.0
+            _hy = (top_b - bottom_b) / max(mask_rgba.shape[0] - 1, 1) / 2.0
+            self.ax.imshow(mask_rgba, extent=[left_b - _hx, right_b + _hx, bottom_b - _hy, top_b + _hy], origin="upper", zorder=2, aspect="equal")
 
         in_focus_geoms = []
         for cam_id in sorted(gdf["cam_id"].unique()):
@@ -1595,7 +1602,9 @@ class FOVGeneratorWindow(ctk.CTkToplevel):
             fov = fov_mask if fov_mask is not None else np.ones_like(vis_mask, dtype=bool)
             vs_rgba[vis_mask & fov] = [0.2, 0.8, 0.2, 0.35]
             vs_rgba[~vis_mask & fov] = [0.8, 0.1, 0.1, 0.40]
-            self.ax_vs.imshow(vs_rgba, extent=[left_b, right_b, bottom_b, top_b], origin="upper", zorder=2, aspect="equal")
+            _hx = (right_b - left_b) / max(vs_rgba.shape[1] - 1, 1) / 2.0
+            _hy = (top_b - bottom_b) / max(vs_rgba.shape[0] - 1, 1) / 2.0
+            self.ax_vs.imshow(vs_rgba, extent=[left_b - _hx, right_b + _hx, bottom_b - _hy, top_b + _hy], origin="upper", zorder=2, aspect="equal")
             for cam_id in sorted(gdf["cam_id"].unique()):
                 col = cam_color(cam_id)
                 sub = gdf[(gdf.cam_id == cam_id) & (gdf.layer == "wedge")]
@@ -1683,7 +1692,13 @@ class FOVGeneratorWindow(ctk.CTkToplevel):
                 out_arr = np.full((h_px, w_px), 255, dtype=np.uint8)
                 out_arr[fov_mask & vis_mask] = 1
                 out_arr[fov_mask & ~vis_mask] = 0
-                vs_transform = tf_from_bounds(left_b, bottom_b, right_b, top_b, w_px, h_px)
+                # The mask was computed at w_px x h_px points that run from one bound to the
+                # other, both included.  Each point is the centre of its cell, so the raster
+                # reaches half a point spacing beyond the bounds on every side.
+                dx_vs = (right_b - left_b) / max(w_px - 1, 1)
+                dy_vs = (top_b - bottom_b) / max(h_px - 1, 1)
+                vs_transform = tf_from_bounds(left_b - dx_vs / 2.0, bottom_b - dy_vs / 2.0,
+                                              right_b + dx_vs / 2.0, top_b + dy_vs / 2.0, w_px, h_px)
                 with rasterio.open(vs_path, "w", driver="GTiff", height=h_px, width=w_px, count=1, dtype="uint8", crs=utm, transform=vs_transform, nodata=255, compress="deflate") as dst:
                     dst.write(out_arr, 1)
                     dst.update_tags(DESCRIPTION="Viewshed mask from GeoCamPal FOV Generator", ENCODING="1=visible, 0=blocked, 255=outside_FOV")
