@@ -158,7 +158,7 @@ from osgeo import gdal, osr
 gdal.UseExceptions()
 gdal.PushErrorHandler('CPLQuietErrorHandler')   # suppress non-fatal TIFF warnings
 
-from utils import show_path, fit_geometry, resource_path, setup_console, restore_console, save_settings_json, load_settings_json, imread_safe, load_lens_calibration
+from utils import show_path, fit_geometry, geometry_px, resource_path, setup_console, restore_console, save_settings_json, load_settings_json, imread_safe, load_lens_calibration
 
 try:
     from csv_utils import read_gcp_csv, normalise_columns, exclude_gcps_by_number, gcp_numeric_suffix
@@ -630,7 +630,8 @@ class InteractiveAOISelector(ctk.CTkToplevel):
         self._sel = None; self._ds = None
         ww = min(int(iw*iz)+20, int(sw*0.9))
         wh = min(int(ih*iz)+80, int(sh*0.88))
-        self.geometry(f"{ww}x{wh}+{(sw-ww)//2}+{max(0,(sh-wh)//2)}")
+        # ww, wh are screen pixels; customtkinter's geometry() would multiply them by the display scaling
+        geometry_px(self, ww, wh, (sw-ww)//2, max(0,(sh-wh)//2))
         tk.Label(self, text="L-drag: select | Wheel: zoom | Mid-drag: pan | R-click: clear",
                  bg="#1a1a2e", fg="#aac", font=("Consolas", 9)).pack(side="top", fill="x")
         self._c = tk.Canvas(self, bg="#0a0a14", cursor="crosshair", highlightthickness=0)
