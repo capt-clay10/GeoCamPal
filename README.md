@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <strong>A modular GUI-driven toolbox for geospatial image processing, camera pre-processing, georeferencing, Feature labeling, semi-automatic feature detection, Machine learning integration, DEM generation, time-stacking, and wave run-up analysis.</strong>
+  <strong>A modular GUI-driven toolbox for geospatial image processing, camera pre-processing, georeferencing, feature labelling, semi-automatic feature detection, machine-learning integration, DEM generation, timestacking, and wave run-up analysis.</strong>
 </p>
 
 <img width="5534" height="2213" alt="Graphical_abstract_GeoCamPal" src="https://github.com/user-attachments/assets/b265395b-20b0-432b-907c-d1006dae8621" />
@@ -17,16 +17,16 @@
 
 ## Overview
 
-**GeoCamPal** is a modular, GUI-driven Python toolbox for geospatial image-processing workflows. It brings together camera pre-processing, lens correction, image harmonisation, Ground control point-to-pixel coordinate conversion, georeferencing, feature identification, exploratory image analysis, DEM generation, timestack generation, and wave run-up analysis in a single application.
+**GeoCamPal** is a modular, GUI-driven Python toolbox for geospatial image-processing workflows. It brings together camera pre-processing, lens correction, image quality filtering and harmonisation, ground-control-point (GCP) digitising, georeferencing, feature identification and labelling, exploratory image analysis, DEM generation, timestack generation, and wave run-up analysis in a single application.
 
 The software is designed for practical fixed-camera and coastal image-analysis workflows, while remaining useful for broader time-lapse, geospatial image processing, and image classification tasks.
 
 <p align="center">
-  <img width="593" height="722" alt="image" src="https://github.com/user-attachments/assets/13934128-30ac-4277-abc1-26c4acebbb6c" />
+  <img src="docs/images/figure_01_launcher.jpg" width="55%" alt="GeoCamPal launcher">
 </p>
 
 <p align="center">
-  <em>GeoCamPal launcher interface.</em>
+  <em>GeoCamPal launcher (v1.0.4).</em>
 </p>
 
 ---
@@ -34,17 +34,18 @@ The software is designed for practical fixed-camera and coastal image-analysis w
 ## Table of Contents
 
 - [Overview](#overview)
+- [What's new in v1.0.4](#whats-new-in-v104)
 - [Main Capabilities](#main-capabilities)
 - [Installation](#installation)
 - [Examples and tutorials](#examples-and-tutorials)
-- [Tools](#modules)
+- [Modules](#modules)
   - [Launcher](#launcher)
-  - [Pre-processing Tools](#pre-processing-tools)
+  - [Pre-analysis Tools](#pre-analysis-tools)
   - [Data Exploration Tools](#data-exploration-tools)
   - [Georeferencing Tools](#georeferencing-tools)
   - [Feature Identification and Labelling Tools](#feature-identification-and-labelling-tools)
   - [DEM Generator Tools](#dem-generator-tools)
-  - [Time-stacking Tools](#time-stacking-tools)
+  - [Timestacking Tools](#timestacking-tools)
 - [Typical Outputs](#typical-outputs)
 - [Dependencies](#dependencies)
 - [Citation](#citation)
@@ -55,17 +56,43 @@ The software is designed for practical fixed-camera and coastal image-analysis w
 
 ---
 
+## What's new in v1.0.4
+
+**New functions**
+
+- **Harmonise Images:** the quality filter can be limited to an area of interest (**Filter inside AOI only**, **Select AOI**), for example to leave out a bright sky or the sun; an interrupted filter run can be **continued**; every run writes a **`filter_summary.txt`** with the counts per rejection reason.
+- **Homography Generator:** **Compute Accuracy** reports, for each GCP, the distance for the matrix fitted on all GCPs and the **leave-one-out** distance, with mean, median, RMS and maximum, and saves them as `<name>_accuracy.csv`.
+- **Pixel to GCP:** GCP files with **projected Easting/Northing** coordinates are accepted, with the EPSG code from the file or a new field (0 for a local system).
+- **Lens Correction:** the report opens with a **Result** block, giving the lens distortion as the largest pixel shift with a **±** (from repeating the calibration without each photo in turn) and the checkerboard fit, and ends with an **Interpretation** section.
+- **Feature Identification and Labelling Tools:** each shape can carry its **own label and category ID**; images with several labels are also exported as a **multi-class dataset** (label-map PNG, GeoJSON with label attributes, COCO with all categories, `categories.json`). The shape editor has Delete Shape, Cancel, shape selection and full undo/redo.
+- **Wave Run-up:** the output states whether the observed R₂% is **vertical or horizontal**, and the **observed significant swash height S** (4 × the standard deviation of the detrended swash) is reported.
+- **Georef Images:** zoomable preview panels, and a progress bar and Stop button for the GCP optimisation.
+- **All tools:** windows and plots fit the screen at any display scaling; the launcher uses consistent tool names; all 13 examples were regenerated with v1.0.4.
+
+**Fixes that change results** (recompute affected outputs made with earlier versions)
+
+- **Wave Run-up:** with a PNG mask and **Land on left**, distance was counted from the wrong side, so the observed R₂% was taken on the backwash side.
+- **Create DEM:** DEM GeoTIFFs lay half a cell to the south-east; their origin is now half a cell further north-west (heights unchanged).
+- **Georef Images:** Homography and Camera Projection GeoTIFFs lay half an output pixel to the south-east; with an AOI, Thin Plate Spline and Polynomial outputs were shifted by the AOI offset.
+- **Feature Identification and Labelling Tools:** detected vertices are now placed at pixel centres (they lay up to about one pixel to the north-west), and Single Image, Folder and Batch Processing use the same 1200 px working copy.
+- **Pixel to GCP:** with the image zoomed in, a click could be stored as the neighbouring pixel.
+- **FOV Generator:** the ground height under the camera was read from the wrong DEM cell.
+
+The full list of changes is in the [release notes](https://github.com/capt-clay10/GeoCamPal/releases).
+
+---
+
 ## Main Capabilities
 
 | Tools | Modules |
 |---|---|
-| **Pre-processing** | Field-of-view generation, lens calibration, bad-image filtering, brightness harmonisation, colour harmonisation |
-| **Georeferencing** | Pixel-to-GCP conversion, homography matrix creation, image rectification using several supported methods |
-| **Feature identification** | HSV masking, AOI/profile filtering, colour-picker classification, manual polyline/polygon editing, GeoJSON and COCO-style export |
+| **Pre-analysis** | Field-of-view generation, lens calibration, bad-image filtering (optionally inside an AOI), brightness harmonisation, colour harmonisation |
+| **Georeferencing** | GCP digitising (geographic or projected coordinates), homography matrix creation with fitted and leave-one-out accuracy, image rectification using five methods |
+| **Feature identification** | HSV masking, AOI filtering, colour-picker classification, manual polyline/polygon editing with per-shape labels, GeoJSON, COCO and multi-class label-map export |
 | **Data exploration** | Multi-time-series image selection, colour-space analysis, colour statistics, outlier detection |
 | **DEM generation** | Shoreline/waterline-based DEM creation from GeoJSON features and water-level data |
-| **Time-stacking** | Profile extraction, Hovmöller diagrams, raw timestack generation |
-| **Wave run-up** | Run-up contour extraction, time-distance export, PSD analysis, optional Stockdon comparison |
+| **Timestacking** | Profile extraction, Hovmöller diagrams, raw timestack generation |
+| **Wave run-up** | Run-up extraction, time-distance export, PSD analysis, observed R₂% and swash height, optional Stockdon comparison |
 
 ---
 
@@ -75,7 +102,7 @@ The software is designed for practical fixed-camera and coastal image-analysis w
 
 The recommended option for most users is to download the latest Windows release from the [Releases](https://github.com/capt-clay10/GeoCamPal/releases) page.
 
-The release is a single-file executable for 64-bit Windows (about 293 MB for v1.0.3, built on Windows 11). It bundles Python and every dependency, including GDAL, PROJ, OpenCV and scikit-image with their data files, so no Python installation, environment variable or separate GDAL installation is required. The executable is unsigned, so Windows SmartScreen may show a warning on first launch; choose **More info → Run anyway**. The bundle is unpacked to a temporary folder at each start, so start-up takes a few seconds.
+The release is a single-file executable for 64-bit Windows (about 294 MB for v1.0.4, built on Windows 11). It bundles Python and every dependency, including GDAL, PROJ, OpenCV and scikit-image with their data files, so no Python installation, environment variable or separate GDAL installation is required. The executable is unsigned, so Windows SmartScreen may show a warning on first launch; choose **More info → Run anyway**. The bundle is unpacked to a temporary folder at each start, so start-up takes a few seconds.
 
 Settings files written by earlier releases load unchanged; see the release notes for what changed in each version.
 
@@ -99,7 +126,7 @@ GeoCamPal requires **Python 3.10 or newer**; the executable is built with Python
 
 ## Examples and tutorials
 
-The `examples/` folder contains a worked example for every module, numbered in pipeline order (`01_fov_generator` … `13_wave_runup`). Each folder has the same layout:
+The `examples/` folder contains a worked example for every module, numbered in pipeline order (`01_fov_generator` … `13_wave_runup`). All examples were produced with v1.0.4. Each folder has the same layout:
 
 | Sub-folder / file | Contents |
 |---|---|
@@ -108,7 +135,9 @@ The `examples/` folder contains a worked example for every module, numbered in p
 | `expected_outputs/` | the outputs produced with those settings |
 | `GUI_screenshot_*.png` | the module interface configured for the example |
 
-To run an example, open the module, load its settings file, update the input and output paths to your own folders, run, and compare the result with `expected_outputs/`. Step-by-step instructions are in [`examples/README_tutorial.txt`](examples/README_tutorial.txt).
+To run an example, open the module, load its settings file, replace the placeholder `C:/your/local/path/GeoCamPal/examples` in the paths with the location of your copy, run, and compare the result with `expected_outputs/`. Step-by-step instructions, with the buttons to press for each example, are in [`examples/README_tutorial.txt`](examples/README_tutorial.txt).
+
+`examples/03_harmonise_images/filter_sensitivity_test/` holds 50 images of a filter test, with the settings and outputs of the filter on the full image and inside an area of interest, and the labels of a blind human judgement, so that the comparison can be repeated.
 
 ---
 
@@ -118,22 +147,22 @@ To run an example, open the module, load its settings file, update the input and
 
 The launcher is the central hub for GeoCamPal. It groups the available tools into the following sections:
 
-- Pre-processing Tools
+- Pre-analysis Tools
 - Data Exploration Tools
 - Georeferencing Tools
 - Feature Identification and Labelling Tools
 - DEM Generator Tools
-- Time-stacking Tools
+- Timestacking Tools
 
-Only one tool window is opened at a time to keep console output and GUI state manageable. Every module can save its full configuration as a `.json` settings file and reload it later.
+Only one tool window is opened at a time to keep console output and GUI state manageable. Every module can save its full configuration as a `.json` settings file and reload it later. Windows and their pop-ups fit the screen at any display scaling.
 
 ---
 
-## Pre-processing Tools
+## Pre-analysis Tools
 
-### Field-of-View Generator
+### FOV Generator
 
-The **FOV Generator** visualises single- or multi-camera field-of-view footprints on either a user-supplied GeoTIFF basemap or a clean standalone distance-ring plot. If a DEM is supplied, the tool can compute a line-of-sight viewshed so terrain obstructions are reflected in the visible footprint.
+The **FOV Generator** visualises single- or multi-camera field-of-view footprints on either a user-supplied GeoTIFF basemap or a clean standalone distance-ring plot. If a DEM is supplied, the tool can compute a line-of-sight viewshed so terrain obstructions are reflected in the visible footprint; the ground height under the camera is read from the DEM cell that holds the camera, and the viewshed is computed at cell centres.
 
 **Typical inputs**
 
@@ -153,7 +182,7 @@ The **FOV Generator** visualises single- or multi-camera field-of-view footprint
 - `viewshed_mask.tif`, when DEM-based viewshed export is used
 
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/6039e2ce-d0bd-4494-b717-86cea6c8f156" width="90%" alt="FOV Generator">
+  <img src="examples/01_fov_generator/GUI_screenshot_FOV.png" width="90%" alt="FOV Generator">
 </p>
 
 <p align="center">
@@ -164,13 +193,21 @@ The **FOV Generator** visualises single- or multi-camera field-of-view footprint
 
 ### Lens Correction
 
-The **Lens Correction** module computes camera intrinsic parameters from checkerboard calibration images using OpenCV. It supports rectangular checkerboards where the cell width and cell height may differ. At least three images with detected corners are required; the module reports the frame coverage of the detected corners and grades the calibration from its reprojection error.
+The **Lens Correction** module computes camera intrinsic parameters from checkerboard calibration images using OpenCV. It supports rectangular checkerboards where the cell width and cell height may differ. At least three images with detected corners are required; the module reports the frame coverage of the detected corners.
+
+The console, the closing message and `calibration_report.txt` open with a **Result** block:
+
+- **Lens distortion:** how far the correction moves pixels, at the image centre, for half of all pixels, and at most, with the place of the largest movement. Each value has a **±**: the calibration is repeated once per photo without that photo, and the ± is the standard error over these runs (needs at least 4 photos).
+- **Checkerboard fit:** GOOD, MARGINAL or POOR from the RMS reprojection error (below 0.5 px, below 1.0 px, 1.0 px or more). The fit describes how well the board was detected, not how strong the lens distortion is.
+
+The report ends with an **Interpretation** section that says whether the photos show a lens distortion, what cannot be ruled out and what to improve. It is given only when the data allow it (for example at least 10 photos and 60 % corner coverage).
 
 **Typical inputs**
 
 - Folder of checkerboard calibration images
 - Number of checkerboard squares across and down
 - Cell width and height
+- Distortion model (radial k1 + k2 recommended, up to the full five-term model)
 - Output folder
 
 **Typical outputs**
@@ -181,11 +218,11 @@ The **Lens Correction** module computes camera intrinsic parameters from checker
 - Undistorted-image preview
 
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/3da452b0-461d-4286-a0af-598bda97e463" width="90%" alt="Lens Correction">
+  <img src="docs/images/figure_A1_lens_correction.jpg" width="90%" alt="Lens Correction">
 </p>
 
 <p align="center">
-  <em>Checkerboard-based intrinsic camera calibration and undistortion preview.</em>
+  <em>Checkerboard-based intrinsic camera calibration with the Result block in the console and the undistortion preview.</em>
 </p>
 
 ---
@@ -199,13 +236,19 @@ The **Harmonise Images** module provides a multi-stage image quality and correct
 The filtering stage can flag images affected by:
 
 - Blur
-- Clipped overexposure
-- Underexposure
+- Clipped over-exposure
+- Under-exposure
 - Darkness
 - Low information content
 - Rain or droplets on the lens
 - Partial obstruction
 - Failed, corrupt, truncated, or unreadable image files
+
+**Filter inside AOI only** limits the seven image checks to an area of interest, for example to leave out a bright sky or the sun. **Select AOI** opens one of the images: drag a rectangle or click the corners of a polygon. Thresholds given as a fraction are then shares of the AOI. The AOI is scaled to images of another size and saved with the settings; harmonisation and averaging still use the whole image. With the option off, the filter gives the same results as before.
+
+Every finished run writes **`filter_summary.txt`**: images checked, kept and rejected, the count and share per reason, the thresholds and AOI used, and the processing time. The same totals are stored in `bad_images.json`.
+
+**Continuing an interrupted run:** progress is saved to `filter_progress.jsonl` in the output folder at least every 30 seconds and when **Cancel** is pressed. When the filter is started again with the same folders and settings, a dialog offers to continue after the last saved image. The progress file is removed when the run finishes.
 
 #### Stage 2: Harmonise brightness
 
@@ -228,6 +271,7 @@ Batch operations never drop a file silently: images or folders that could not be
 - Image folder
 - Output folder
 - Selected filter thresholds
+- Optional area of interest for the filter
 - Optional reference image
 - Optional lens calibration file
 - Optional existing bad-image JSON file
@@ -236,42 +280,35 @@ Batch operations never drop a file silently: images or folders that could not be
 
 - `bad_images.txt`
 - `bad_images.json`
+- `filter_summary.txt`
 - `<input_folder>_filtered_good/`
 - `<input_folder>_brightness_harmonised/`
 - `<input_folder>_colour_harmonised/`
 - Additional workflow-specific folders such as averaged or lens-corrected outputs when those options are used
 
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/ec360899-d156-4d42-a740-123a0a59e80c" width="90%" alt="Image filtering">
+  <img src="docs/images/figure_03_harmonise_images.jpg" width="70%" alt="Harmonise Images">
 </p>
 
 <p align="center">
-  <em>Image quality filtering interface.</em>
+  <em>(A) Quality-filter results with the thresholds in the configuration panel; (B) brightness harmonisation preview; (C) colour harmonisation preview.</em>
 </p>
 
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/5db3b403-bece-41f9-93ed-801065ea1f41" width="90%" alt="Brightness harmonisation">
+  <img src="docs/images/figure_A2_filter_aoi_examples.jpg" width="90%" alt="Filter inside an area of interest">
 </p>
 
 <p align="center">
-  <em>Brightness harmonisation preview.</em>
-</p>
-
-<p align="center">
-  <img src="https://github.com/user-attachments/assets/eca0749d-84e1-44ca-b266-798e16d8ecf8" width="90%" alt="Colour harmonisation">
-</p>
-
-<p align="center">
-  <em>Colour harmonisation preview.</em>
+  <em>Filter on the full image and inside an AOI that leaves out the sky (dashed), with the saturated pixels in magenta (example in <code>examples/03_harmonise_images/filter_sensitivity_test/</code>).</em>
 </p>
 
 ---
 
 ## Data Exploration Tools
 
-### Time Series Explorer
+### Time Series Analysis
 
-The **Time Series Explorer** matches images to one or more hydrodynamic or environmental time series using timestamps extracted from image filenames. Up to five time series can be combined using AND logic.
+The **Time Series Analysis** module matches images to one or more hydrodynamic or environmental time series using timestamps extracted from image filenames. Up to five time series can be combined using AND logic.
 
 Supported criteria include:
 
@@ -300,6 +337,14 @@ Supported criteria include:
 - `matched_images_<mode_tag>.txt`
 - Optional copied image folder, such as `images_<mode_tag>/`
 - Spring/neap output folders when tidal classification workflows are used
+
+<p align="center">
+  <img src="docs/images/figure_02_time_series_analysis.jpg" width="90%" alt="Time Series Analysis">
+</p>
+
+<p align="center">
+  <em>Trough-based selection of images against a water-level record.</em>
+</p>
 
 ---
 
@@ -341,7 +386,7 @@ Available analyses include:
 - Additional plots exportable from the Matplotlib toolbar
 
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/19866d49-c9d1-480c-babf-233b491a0670" width="90%" alt="Colour Space Explorer">
+  <img src="examples/09_colour_space_explorer/GUI_screenshot_color_space_explorer_RGB.png" width="90%" alt="Colour Space Explorer">
 </p>
 
 <p align="center">
@@ -352,14 +397,21 @@ Available analyses include:
 
 ## Georeferencing Tools
 
-### Pixel-to-GCP Converter
+### Pixel to GCP
 
-The **Pixel-to-GCP Converter** allows users to select image pixel coordinates corresponding to known ground-control points. The tool supports flexible GCP CSV column names and optional conversion from latitude/longitude to UTM coordinates, with the EPSG code detected automatically (or entered manually for surveys that are already projected).
+The **Pixel to GCP** module lets users select the image pixel that corresponds to each surveyed ground-control point. GCP photographs are paired with their points by a GCP identifier in the file name, and the module supports flexible GCP CSV column names.
+
+The GCP file may contain either:
+
+- **Latitude and longitude**, optionally converted to UTM with the EPSG code detected automatically; or
+- **Projected Easting and Northing** (or x and y), written unchanged, with the EPSG code taken from an `EPSG` column or the field **EPSG for Easting/Northing** (enter 0 for a local coordinate system). Files without a valid projected code are refused with a message that says what to change.
+
+The pixel under the cursor is stored at every zoom level; pixel coordinates count from 0 at the top-left pixel, and whole numbers are pixel centres.
 
 **Typical inputs**
 
 - Folder containing GCP images
-- GCP coordinate CSV file
+- GCP coordinate CSV file (geographic or projected)
 - Optional bad-GCP exclusion list
 - Output folder
 - Output CSV filename
@@ -379,7 +431,7 @@ A CSV containing pixel-to-world mappings, including fields such as:
 - `EPSG`
 
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/39c81770-5f93-44e7-beac-b7ee3bc098b8" width="90%" alt="Pixel to GCP Converter">
+  <img src="docs/images/figure_A3_pixel_to_gcp.jpg" width="90%" alt="Pixel to GCP">
 </p>
 
 <p align="center">
@@ -390,12 +442,12 @@ A CSV containing pixel-to-world mappings, including fields such as:
 
 ### Homography Generator
 
-The **Homography Matrix Creator** computes 3 × 3 homography matrices from pixel-to-world GCP mappings.
+The **Homography Generator** computes 3 × 3 homography matrices from pixel-to-world GCP mappings.
 
 It supports:
 
-- RANSAC-based homography estimation
-- Accuracy computation
+- RANSAC-based homography estimation on normalised point sets
+- **Compute Accuracy**: for each GCP, the distance for the matrix fitted on all GCPs and the **leave-one-out** distance (the matrix fitted again without that GCP), with mean, median, RMS and maximum for both. Leave-one-out needs at least 5 GCPs.
 - Manual GCP exclusion
 - Advanced simulated-annealing search for GCP subset selection
 
@@ -409,21 +461,22 @@ It supports:
 **Typical outputs**
 
 - `<output_name>.txt`
+- `<output_name>_accuracy.csv`, the per-GCP accuracy table
 - `<output_name>_bestsubset.txt`, when using the advanced subset-optimisation workflow
 
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/496d569a-39f1-47ba-bf09-69bbf9f3be83" width="90%" alt="Homography Matrix Creator">
+  <img src="docs/images/figure_A4_homography_generator.jpg" width="90%" alt="Homography Generator">
 </p>
 
 <p align="center">
-  <em>Homography matrix creation and GCP subset optimisation.</em>
+  <em>Homography matrix creation with the fitted and leave-one-out distance of each GCP.</em>
 </p>
 
 ---
 
-### Georeferencing 
+### Georef Images
 
-The **Georeferencing Tool** rectifies oblique images into a spatial reference system. It supports several georeferencing methods, not only homography.
+The **Georef Images** module rectifies oblique images into a spatial reference system. It supports several georeferencing methods, not only homography.
 
 Supported methods include:
 
@@ -433,7 +486,9 @@ Supported methods include:
 - Polynomial Order 1
 - Polynomial Order 2
 
-The required inputs depend on the selected method. Homography uses a precomputed matrix, while camera projection and GCP-based methods require appropriate GCP and calibration information. All methods work in a projected coordinate reference system identified by an EPSG code; the code is read from the GCP CSV or the homography file when present.
+The required inputs depend on the selected method. Homography uses a precomputed matrix, while camera projection and GCP-based methods require appropriate GCP and calibration information. For the GCP-based methods, **Compute Accuracy** reports leave-one-out residuals and **Optimise GCPs (SA)** searches for the GCP subset with the lowest mean leave-one-out residual, with a progress bar and a Stop button; for a homography, these diagnostics are in the Homography Generator. All methods work in a projected coordinate reference system identified by an EPSG code; the code is read from the GCP CSV or the homography file when present.
+
+The three preview panels show the original, the initial and the secondary georeferencing; each can be zoomed (mouse wheel) and moved. **Process All** writes what the secondary preview shows.
 
 Batch runs validate every written GeoTIFF and retry failed files automatically. Tick **Skip existing** to resume an interrupted batch: images whose outputs are already present and valid are skipped. Files that still fail after the retries are listed in `georef_failures.txt`.
 
@@ -457,20 +512,20 @@ Batch runs validate every written GeoTIFF and retry failed files automatically. 
 - Preview outputs inside the GUI before final processing
 
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/831781be-02f3-41cd-ac7d-2aa79cd95650" width="90%" alt="Georeferencing Tool">
+  <img src="docs/images/figure_04_georef_images.jpg" width="90%" alt="Georef Images">
 </p>
 
 <p align="center">
-  <em>Georeferencing workflow with preview and batch-processing support.</em>
+  <em>Georeferencing workflow with the original image and the initial and secondary georeferenced previews.</em>
 </p>
 
 ---
 
 ## Feature Identification and Labelling Tools
 
-The **Feature Identification and Labelling Tools** combine automatic HSV colour masking with AOI/profile filtering, colour-picker classification, and manual feature editing. It is designed for extracting visible features such as shorelines, waterlines, swash fronts, masks, polygons, and polylines from imagery.
+The **Feature Identification and Labelling Tools** combine automatic HSV colour masking with area-of-interest filtering, colour-picker classification, and manual feature editing. They are designed for extracting visible features such as shorelines, waterlines, swash fronts, masks, polygons, and polylines from imagery, and for building machine-learning training data.
 
-The tool is organised into three modes:
+The tools are organised into three modes:
 
 | Mode | Purpose |
 |---|---|
@@ -482,7 +537,7 @@ Feature identification tools include:
 
 - HSV colour masking
 - Optional dual-HSV masking
-- AOI/profile-based filtering
+- Area of interest (AOI) and profile line, which limit where the colour detection looks
 - ML-predicted mask support
 - Multi-sample colour picker
 - Boundary extraction
@@ -490,6 +545,10 @@ Feature identification tools include:
 - Freehand, vertex, polyline, and polygon editing
 - Undo/redo during editing
 - Georeferenced export where spatial information is available
+
+**Shape editor and labels.** Each shape can carry its own label and category ID; a label keeps its category ID across shapes, images and sessions, and the label catalogue is saved with the settings. Shapes are selected by clicking or with **Prev shape** / **Next shape**; **Delete Shape**, **Delete All**, **Cancel** (Esc) and undo/redo cover every action. A double-click ends a line, and a click near the first vertex closes a polygon.
+
+Detected vertices are placed at pixel centres of the full image, and all three modes work on the same working copy (at most 1200 px), so a batch run gives what the same settings showed on a single image.
 
 GeoJSON exports carry the coordinate reference system of the source GeoTIFF; for inputs without one, the GeoJSON contains pixel coordinates and a warning is printed. Batch processing lists any image it could not process in `batch_skipped.txt`.
 
@@ -500,34 +559,46 @@ GeoJSON exports carry the coordinate reference system of the source GeoTIFF; for
 - HSV settings
 - AOI/profile settings
 - Colour-picker samples
+- Labels and category IDs
 - Optional georeferencing information
 - Export/output folder
 
 **Typical outputs**
 
-For single-image and folder-processing workflows, exports may include structured folders such as:
+Exports go into a `Dataset/` folder inside the export folder, with `training dataset/`, `test dataset/` and, for images with two or more labels, `training_dataset_multiclass/`. They may include:
 
 - `images/`
 - `masks/`
 - `overlays/`
 - `geojson/`
 - `coco/`
+- Multi-class sets: a label-map PNG (pixel value = category ID), GeoJSON with label attributes, COCO with all categories, and `categories.json`
 - Optional class-point CSV outputs
+
+An image with one label gives the same files as before. An export is refused, before any file is written, when two labels share a category ID.
 
 For batch workflows, outputs commonly include:
 
 - GeoJSON feature files
 - Overlay PNG files
 
-<img width="1055" height="1491" alt="GUI_screenshot_feature_identifier" src="https://github.com/user-attachments/assets/07a5d38b-6aa7-4293-96e2-6ea2f9268ba2" />
+<p align="center">
+  <img src="docs/images/figure_05_feature_identification.jpg" width="70%" alt="Feature Identification and Labelling Tools">
+</p>
+
+<p align="center">
+  <em>(A) Configuration panel with the detection settings and the export console; (B) shape editor with the detected sandbar and the editing toolbar.</em>
+</p>
 
 ---
 
 ## DEM Generator Tools
 
-The **DEM Generator** creates digital elevation models from shoreline GeoJSON files and water-level data.
+### Create DEM
 
-The module uses PCA-aligned cross-shore transect interpolation to reduce artefacts that can occur with direct triangulation at contour edges. It supports both daily and composite DEM workflows. The DEM inherits the coordinate reference system of the shoreline files and the vertical datum of the water-level record; no datum transformations are applied, so all inputs must share one projected CRS and one vertical datum.
+The **Create DEM** module creates digital elevation models from shoreline GeoJSON files and water-level data.
+
+The module uses PCA-aligned cross-shore transect interpolation to reduce artefacts that can occur with direct triangulation at contour edges. It supports both daily and composite DEM workflows. Each height is written to the GeoTIFF cell centred on its position. The DEM inherits the coordinate reference system of the shoreline files and the vertical datum of the water-level record; no datum transformations are applied, so all inputs must share one projected CRS and one vertical datum.
 
 **Typical inputs**
 
@@ -555,7 +626,7 @@ For composite DEM mode:
 - `shoreline_xyz_composite_<tag>.csv`, when XYZ export is enabled
 
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/1b92b28c-eba2-4ed5-975e-4f8a198e3e29" width="90%" alt="DEM Generator">
+  <img src="docs/images/figure_06_create_dem.jpg" width="90%" alt="Create DEM">
 </p>
 
 <p align="center">
@@ -564,13 +635,13 @@ For composite DEM mode:
 
 ---
 
-## Time-stacking Tools
+## Timestacking Tools
 
-### Profile and Hovmöller 
+### Profile & Hovmöller
 
-The **Profile and Hovmöller Tool** extracts pixel profiles along a user-defined line across a folder of images. Users can draw a profile line interactively or enter pixel coordinates manually.
+The **Profile & Hovmöller** module extracts pixel profiles along a user-defined line across a folder of images. Users can draw a profile line interactively or enter pixel coordinates manually.
 
-The tool can generate either an RGB Hovmöller diagram or an intensity Hovmöller diagram depending on the selected mode.
+The module can generate either an RGB Hovmöller diagram or an intensity Hovmöller diagram depending on the selected mode.
 
 **Typical inputs**
 
@@ -588,11 +659,19 @@ The tool can generate either an RGB Hovmöller diagram or an intensity Hovmölle
 - `profile_overlay.png`
 - `profiles.txt`
 
+<p align="center">
+  <img src="examples/11_profile_hovmoller/GUI_screenshot_profile_hovmuller_example.png" width="90%" alt="Profile and Hovmöller">
+</p>
+
+<p align="center">
+  <em>Pixel profiles along a line through an image folder, shown as a Hovmöller diagram.</em>
+</p>
+
 ---
 
-### Burst Images Time-stacker
+### Burst Images Timestacker
 
-The **Raw Timestacker** creates calibrated timestack images from image sequences. It supports timestamp parsing from filenames, EXIF/TIFF metadata, and file modification time as a fallback.
+The **Burst Images Timestacker** creates calibrated timestack images from image sequences. It supports timestamp parsing from filenames, EXIF/TIFF metadata, and file modification time as a fallback.
 
 Selection modes include:
 
@@ -615,10 +694,10 @@ Batch mode processes every burst folder under a root folder; with **Include sub-
 
 - `<first_timestamp>_raw_timestack.png`
 
-The output PNG stores timestack metadata such as selector information, pixel resolution, the time interval per row (`time_interval`) and the stack duration (`duration_s`), which the Wave Run-up Calculator reads automatically.
+The output PNG stores timestack metadata such as selector information, pixel resolution, the time interval per row (`time_interval`) and the stack duration (`duration_s`), which the Wave Run-up module reads automatically.
 
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/5a207098-7601-49df-b39b-222aadbb72cb" width="90%" alt="Raw Timestacker">
+  <img src="examples/12_burst_images_time-stacker/GUI_screenshot_burstimagetimestacker.png" width="90%" alt="Burst Images Timestacker">
 </p>
 
 <p align="center">
@@ -627,9 +706,9 @@ The output PNG stores timestack metadata such as selector information, pixel res
 
 ---
 
-### Wave Run-up Calculator
+### Wave Run-up
 
-The **Wave Run-up Calculator** extracts run-up contours from annotated timestack imagery and exports time-distance data. It supports multiple annotation formats.
+The **Wave Run-up** module extracts the run-up edge from annotated timestack imagery and exports time-distance data. It supports multiple annotation formats, all of which the Feature Identification and Labelling Tools can export.
 
 Supported annotation inputs:
 
@@ -637,7 +716,9 @@ Supported annotation inputs:
 - GeoJSON annotation
 - COCO-style JSON annotation
 
-The module uses the pixel resolution and time interval embedded in timestack PNGs when available. A **Time per row** readout states which value is in use and where it came from; a **Manual time interval** option overrides it, which is needed for timestacks made with versions before v1.0.2, which carry no time interval and are otherwise read as 1 s per row. Batch mode pairs each timestack in one folder with its annotation in another and lists unpaired or failed files in `wave_runup_skipped.txt`.
+The module uses the pixel resolution and time interval embedded in timestack PNGs when available. A **Time per row** readout states which value is in use and where it came from; a **Manual time interval** option overrides it, which is needed for timestacks made with versions before v1.0.2, which carry no time interval and are otherwise read as 1 s per row. Distance is measured along the transect from its seaward end; set **Land on left** when the land is on the left of the timestack. Batch mode pairs each timestack in one folder with its annotation in another and lists unpaired or failed files in `wave_runup_skipped.txt`.
+
+The observed R₂% is the 98th percentile of the detrended run-up series. With a **Beach Slope** (the slope along the transect) the series and R₂% are vertical, otherwise horizontal; the outputs say which. The **observed significant swash height** S (4 × the standard deviation of the detrended swash, as defined by Stockdon et al., 2006) is reported as well. For the optional Stockdon comparison, the deep-water wave height H₀, peak period T₀ and foreshore slope are entered; a difference from the Stockdon R₂% is written only for a vertical R₂%.
 
 **Typical inputs**
 
@@ -645,20 +726,21 @@ The module uses the pixel resolution and time interval embedded in timestack PNG
 - Run-up annotation file
 - Pixel resolution or embedded metadata
 - Time interval or embedded metadata
-- Optional horizontal flip setting
+- Land on left setting
+- Optional beach slope along the transect
 - Optional Stockdon parameters
 - Output folder
 
 **Typical outputs**
 
-- Run-up time-distance CSV
+- Run-up time-distance CSV, with the observed R₂% and swash height S and whether they are vertical or horizontal
 - PSD CSV
 - Clean run-up plot PNG
 - Optional Stockdon comparison text output
 - Batch-mode per-file outputs and optional Stockdon summary
 
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/dc5407f9-a180-47d9-9167-aff85f1b4238" width="90%" alt="Wave Run-up Calculator">
+  <img src="docs/images/figure_A5_wave_runup.jpg" width="90%" alt="Wave Run-up">
 </p>
 
 <p align="center">
@@ -675,10 +757,11 @@ Depending on the selected module, GeoCamPal can generate:
 |---|---|
 | **Processed images** | Filtered, brightness-harmonised, colour-harmonised, averaged, or lens-corrected image folders |
 | **Geospatial rasters** | GeoTIFF DEMs, georeferenced image outputs, optional viewshed rasters |
-| **Vector data** | GeoJSON feature exports |
-| **Tables** | CSV, TXT, XYZ, matched-image tables, profile tables, run-up tables |
-| **Calibration files** | Lens calibration `.pkl` files |
-| **Reports** | Bad-image logs, skipped-file reports, calibration summaries, FOV reports, processing summaries |
+| **Vector data** | GeoJSON feature exports, with label attributes for multi-class data |
+| **Training data** | Images, masks, overlays, COCO files, multi-class label maps and `categories.json` |
+| **Tables** | CSV, TXT, XYZ, matched-image tables, profile tables, run-up tables, homography accuracy tables |
+| **Calibration files** | Lens calibration `.pkl` files with JSON sidecar |
+| **Reports** | Bad-image logs, filter summaries, skipped-file reports, calibration reports, FOV reports, processing summaries |
 | **Plots** | FOV maps, colour-space plots, DEM previews, Hovmöller plots, run-up plots, PSD plots |
 
 ---
@@ -705,7 +788,7 @@ pyproj
 scikit-image
 ```
 
-The v1.0.3 Windows executable bundles Python 3.12.9, OpenCV 4.11.0, GDAL 3.10.3, Rasterio 1.4.3, NumPy 2.2.4, SciPy 1.15.2, scikit-image 0.25.2, GeoPandas 1.0.1, Shapely 2.1.0 and PyProj 3.7.1.
+The v1.0.4 Windows executable bundles Python 3.12.9, OpenCV 4.11.0, GDAL 3.10.3, Rasterio 1.4.3, NumPy 2.2.4, SciPy 1.15.2, scikit-image 0.25.2, GeoPandas 1.0.1, Shapely 2.1.0 and PyProj 3.7.1.
 
 > **Note:** GDAL can require special installation steps on some platforms. Using `conda install -c conda-forge gdal` or pre-built wheels is often the easiest approach if `pip install GDAL` fails. Install `scikit-image` with the other requirements; without it, histogram-based brightness and colour harmonisation and mask skeletonisation fall back to simpler methods.
 
@@ -715,9 +798,9 @@ The v1.0.3 Windows executable bundles Python 3.12.9, OpenCV 4.11.0, GDAL 3.10.3,
 
 If you use GeoCamPal, please cite the archived release:
 
-> Soares, C. C., Noronha, A., & Winter, C. (2026). GeoCamPal (Version v1.0.2) [Computer software]. Zenodo. https://doi.org/10.5281/zenodo.23185492
+> Soares, C. C., Noronha, A., & Winter, C. (2026). GeoCamPal (Version v1.0.4) [Computer software]. Zenodo. https://doi.org/10.5281/zenodo.23082278
 
-The DOI [10.5281/zenodo.23082278](https://doi.org/10.5281/zenodo.23082278) represents all versions and always resolves to the latest release. Citation metadata is also provided in [`CITATION.cff`](CITATION.cff).
+The DOI [10.5281/zenodo.23082278](https://doi.org/10.5281/zenodo.23082278) represents all versions and always resolves to the latest release; the DOI of each version is listed on that Zenodo page. Citation metadata is also provided in [`CITATION.cff`](CITATION.cff).
 
 ---
 
