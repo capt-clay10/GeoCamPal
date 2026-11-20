@@ -297,7 +297,11 @@ class ColorSpaceExplorerWindow(ctk.CTkToplevel):
         self.canvas_plot.get_tk_widget().pack(fill="both", expand=True)
 
         toolbar_frame = ctk.CTkFrame(self.top_panel, fg_color="transparent")
-        toolbar_frame.pack(fill="x")
+        # Packed at the bottom and before the plot: the panel gives room in
+        # the order of packing, so the toolbar gets its row first and the
+        # plot takes what is left.  Packed after the plot, the toolbar was
+        # not shown on a screen with too little height for the window.
+        toolbar_frame.pack(side="bottom", fill="x", before=self.canvas_plot.get_tk_widget())
         self.toolbar = NavigationToolbar2Tk(self.canvas_plot, toolbar_frame)
         self.toolbar.update()
 
