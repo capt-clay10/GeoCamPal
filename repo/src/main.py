@@ -108,7 +108,7 @@ from harmonise_images import HarmoniseImagesWindow
 from exploration import TimeSeriesExplorerWindow
 from profile_tool import ProfileHovmullerWindow
 from colour_explorer import ColorSpaceExplorerWindow
-from utils import fit_geometry, resource_path, __version__
+from utils import fit_geometry, resource_path, widget_scaling, __version__
 
 
 def set_window_icon(window):
@@ -150,7 +150,12 @@ def show_splash(duration_ms=1000):
     try:
         img_path = resource_path("splash_image.png")
         pil_img = Image.open(img_path).resize((sw, sh), Image.Resampling.LANCZOS)
-        ctk_img = ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=(sw, sh))
+        # sw and sh are screen pixels.  CTkImage takes its size in
+        # customtkinter's units and enlarges it by the display scaling, so
+        # the size is divided by that factor: the picture then fills the
+        # window at any scaling instead of being cut off above 100 %.
+        f = widget_scaling(splash)
+        ctk_img = ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=(sw / f, sh / f))
         ctk.CTkLabel(splash, image=ctk_img, text="").pack()
     except Exception:
         ctk.CTkLabel(splash, text="Loading...", font=("Serif", 18, "bold")).pack(expand=True)
