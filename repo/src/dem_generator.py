@@ -133,6 +133,11 @@ class CreateDemWindow(ctk.CTkToplevel):
         super().__init__(master=master, *args, **kwargs)
         self.title("Create DEM")
         #self.geometry("1200x700")
+        # The widgets of this window are drawn at 90 %.  customtkinter has
+        # one widget scaling for the whole program, so the value it had is
+        # kept and set again when the window closes (_on_close).  Left at
+        # 0.9, it made every tool opened afterwards 10 % smaller as well.
+        self._widget_scaling_before = ctk.ScalingTracker.widget_scaling
         ctk.set_widget_scaling(0.9)
         #self.resizable(True, True)
         fit_geometry(self,1200,700,resizable=True)
@@ -1580,6 +1585,11 @@ class CreateDemWindow(ctk.CTkToplevel):
         self._cancel_flag = True
         restore_console(getattr(self, "_console_redir", None))
         self.destroy()
+        # the widget scaling of the program as it was before this window
+        try:
+            ctk.set_widget_scaling(getattr(self, "_widget_scaling_before", 1.0))
+        except Exception:
+            pass
 
 
 # —————————————————————————————— entry point ———————————————————————————
