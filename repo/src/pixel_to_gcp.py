@@ -542,7 +542,13 @@ class PixelToGCPWindow(ctk.CTkToplevel):
         # BOTTOM SECTION: CONFIG PANEL
         # =============================
         config_panel = ctk.CTkFrame(self)
-        config_panel.pack(side="bottom", fill="x", padx=5, pady=5)
+        # Packed before the image, the instructions and the console: the
+        # window gives room in the order of packing, so the rows of buttons
+        # get theirs first and the console is what becomes lower when the
+        # window is not high enough.  Packed last, the rows "Start Process"
+        # and "Save Settings" were the ones cut off at the size the window
+        # opens with.
+        config_panel.pack(side="bottom", fill="x", padx=5, pady=5, before=top_section)
 
         pnl_img_folder = ctk.CTkFrame(config_panel)
         pnl_img_folder.pack(side="top", fill="x", padx=5, pady=2)
