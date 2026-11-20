@@ -147,7 +147,8 @@ import rasterio
 import warnings
 from rasterio.errors import NotGeoreferencedWarning
 from feature_model import Feature, feature_label, with_label, slug, LabelCatalog
-from utils import imwrite_safe, resource_path, __version__ as GEOCAMPAL_VERSION
+from utils import (imwrite_safe, resource_path, geometry_px, window_scaling,
+                   __version__ as GEOCAMPAL_VERSION)
 
 warnings.filterwarnings("ignore", category=NotGeoreferencedWarning)
 
@@ -425,6 +426,37 @@ class HSVMaskEditingMixin:
 
     # ---------- editor toolbar layout (right panel) ----------
 
+    def _ui_scale(self):
+        """Factor by which CustomTkinter enlarges the widgets of the image
+        window: 1.0 on a display at 100 %, 1.75 at 175 %.  A width read from
+        Tk (winfo_width) is in screen pixels; a size given to CustomTkinter
+        (width of a button, wrap width of a text) is multiplied by this
+        factor."""
+        try:
+            return float(self.top_right_frame._get_widget_scaling()) or 1.0
+        except Exception:
+            return 1.0
+
+    def _set_right_panel_min(self, editing):
+        """While the shape editor is open the right panel is at least as wide,
+        in CustomTkinter's units, as its minimum is in screen pixels (400), so
+        the toolbar has the room it has at 100 %, where the two are the same.
+        Never more than the screen leaves beside the two other panels.  When
+        the editor closes the minimum is what it was."""
+        try:
+            frame = self.top_frame
+            if editing:
+                if getattr(self, "_right_panel_min_px", None) is None:
+                    self._right_panel_min_px = int(frame.grid_columnconfigure(2)["minsize"])
+                base = self._right_panel_min_px
+                room = int(self.image_display_window.winfo_screenwidth() * 0.95) - 2 * base
+                frame.grid_columnconfigure(
+                    2, minsize=max(base, min(int(base * self._ui_scale()), room)))
+            elif getattr(self, "_right_panel_min_px", None) is not None:
+                frame.grid_columnconfigure(2, minsize=self._right_panel_min_px)
+        except Exception:
+            pass
+
     def _layout_toolbar(self, width=None):
         """Grid the toolbar buttons in 2-5 columns depending on the width
         of the right panel, and wrap the text to that width.  Every row of
@@ -438,7 +470,10 @@ class HSVMaskEditingMixin:
                 width = self.control_frame.winfo_width()
             except Exception:
                 return
-        width = int(width)
+        # The width is in screen pixels.  CustomTkinter multiplies the width
+        # of the buttons and the wrap width of the text by the display
+        # scaling, so both are worked out in its units (the same at 100 %).
+        width = int(int(width) / self._ui_scale())
         for lbl, margin in ((getattr(self, "_toolbar_info_label", None), 24),
                             (getattr(self, "_poly_nav_label", None), 24)):
             try:
@@ -754,14 +789,19 @@ class HSVMaskEditingMixin:
             disp_win = self.image_display_window
             screen_w = disp_win.winfo_screenwidth()
             screen_h = disp_win.winfo_screenheight()
-            # use up to 95% of screen when editing
-            new_w = min(int(screen_w * 0.95), max(1400, disp_win.winfo_width()))
-            new_h = min(int(screen_h * 0.92), max(900, disp_win.winfo_height()))
+            # use up to 95% of screen when editing.  Screen size and window
+            # size are in screen pixels; the smallest size (1400 x 900) is in
+            # CustomTkinter's units, and geometry() of the window multiplies
+            # by the display scaling, hence geometry_px.
+            f = window_scaling(disp_win)
+            new_w = min(int(screen_w * 0.95), max(int(1400 * f), disp_win.winfo_width()))
+            new_h = min(int(screen_h * 0.92), max(int(900 * f), disp_win.winfo_height()))
             x = max(0, (screen_w - new_w) // 2)
             y = max(0, (screen_h - new_h) // 2)
-            disp_win.geometry(f"{new_w}x{new_h}+{x}+{y}")
+            geometry_px(disp_win, new_w, new_h, x, y)
         except Exception:
             pass
+        self._set_right_panel_min(editing=True)
 
         # ── Control panel: in the RIGHT panel, below the overlay preview, so
         #    the middle panel is the editing canvas only.  Scrollable for
@@ -1154,6 +1194,7 @@ class HSVMaskEditingMixin:
         """
         self._edit_session_open = False
         self._update_default_entries_state()
+        self._set_right_panel_min(editing=False)
 
         # Pending redraw / scroll / drag / preview callbacks
         canvas = getattr(self, "edit_canvas", None)
