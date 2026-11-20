@@ -72,44 +72,128 @@ def resource_path(relative_path: str) -> str:
 
 def fit_geometry(window, design_w, design_h, resizable=True, margin=0.90):
     """
-    Scale *window* so that it fits the current screen while preserving
-    the aspect ratio of the original (design_w × design_h) layout.
+    Give *window* its design size (design_w × design_h), or what the
+    screen has room for if that is less, and centre it.
 
-    • Centres the window on screen.
-    • Never upscales beyond the design size.
-    • The *margin* parameter (default 90 %) leaves a gutter so the
-      window doesn't touch the taskbar / dock.
+    The design size is the size on a display at 100 %.  On a display
+    scaled above 100 % a customtkinter window is larger by the display
+    scaling, as its widgets are: 1200 × 800 is 2100 × 1400 screen pixels
+    at 175 %.
+
+    On Windows the whole window, title bar and border included, is kept
+    inside the work area (the screen without the taskbar) and centred in
+    it.  Width and height are each limited on their own: a window that is
+    too high for the screen keeps its width.  The layouts stretch, so a
+    window reduced in one direction only shows more of its controls than
+    one reduced in both.
+
+    Where the work area cannot be read (Linux, macOS) the window is
+    reduced with its aspect ratio kept to at most *margin* of the screen
+    and centred on the screen.
+
+    Size and place are worked out in screen pixels, which is what Tk and
+    Windows report, and handed over with geometry_px().  customtkinter's
+    own geometry() multiplies a size by the display scaling: a window
+    fitted to the screen in pixels and then enlarged by that factor is
+    placed for a size it does not have, and reaches beyond the screen.
 
     Parameters
     ----------
     window     : Tk / CTk / CTkToplevel instance
-    design_w   : intended width in pixels  (the "old hardcoded value")
-    design_h   : intended height in pixels
+    design_w   : intended width at 100 %  (the "old hardcoded value")
+    design_h   : intended height at 100 %
     resizable  : allow the user to drag-resize afterwards
-    margin     : fraction of screen to occupy at most (0.90 = 90 %)
-
-    Cross-platform
-    --------------
-    On macOS with Retina displays, winfo_screenwidth/height may return
-    logical (1×) pixels.  The 0.90 margin absorbs any mismatch so the
-    window never spills off-screen.
+    margin     : fraction of the screen to occupy at most where the work
+                 area is not known (0.90 = 90 %)
     """
     screen_w = window.winfo_screenwidth()
     screen_h = window.winfo_screenheight()
 
-    max_w = int(screen_w * margin)
-    max_h = int(screen_h * margin)
+    # Design size in screen pixels (factor 1.0 at 100 % and for plain Tk).
+    f = window_scaling(window)
+    want_w = design_w * f
+    want_h = design_h * f
 
-    scale = min(max_w / design_w, max_h / design_h, 1.0)
+    area = work_area(window)
+    frame = window_frame(window)
 
-    final_w = int(design_w * scale)
-    final_h = int(design_h * scale)
+    if area is not None and frame is not None:
+        left, top, right, bottom = area
+        side, title, border = frame
 
-    x = (screen_w - final_w) // 2
-    y = max(0, (screen_h - final_h) // 2)
+        final_w = int(min(want_w, (right - left) - 2 * border))
+        final_h = int(min(want_h, (bottom - top) - title - border))
 
-    window.geometry(f"{final_w}x{final_h}+{x}+{y}")
+        # geometry() places the window by its outer corner, which lies
+        # `side` left of the inside; `border` of that is seen.
+        x = left + ((right - left) - final_w - 2 * border) // 2 - side + border
+        y = top + ((bottom - top) - final_h - title - border) // 2
+    else:
+        max_w = int(screen_w * margin)
+        max_h = int(screen_h * margin)
+
+        scale = min(max_w / want_w, max_h / want_h, 1.0)
+
+        final_w = int(want_w * scale)
+        final_h = int(want_h * scale)
+
+        x = (screen_w - final_w) // 2
+        y = max(0, (screen_h - final_h) // 2)
+
+    geometry_px(window, final_w, final_h, x, y)
     window.resizable(resizable, resizable)
+
+
+def work_area(window=None):
+    """
+    The part of the primary screen that the taskbar leaves free, as
+    (left, top, right, bottom) in screen pixels.
+
+    Returns None where it cannot be read (not Windows).
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        rect = wintypes.RECT()
+        # SPI_GETWORKAREA
+        if not ctypes.windll.user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(rect), 0):
+            return None
+        if rect.right - rect.left < 200 or rect.bottom - rect.top < 200:
+            return None
+        return rect.left, rect.top, rect.right, rect.bottom
+    except Exception:
+        return None
+
+
+def window_frame(window=None):
+    """
+    What Windows adds around the inside of a window that has a title bar,
+    as (side, title, border) in screen pixels:
+
+    side   : border at the left, the right and the bottom.  Most of it is
+             not seen; it is where the mouse grips the window to resize it.
+    title  : title bar, from the top of the window to its inside.
+    border : the part of `side` that is seen.
+
+    Returns None where it cannot be read (not Windows).
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+
+        user32 = ctypes.windll.user32
+        padded = user32.GetSystemMetrics(92)             # SM_CXPADDEDBORDER
+        side = user32.GetSystemMetrics(32) + padded      # SM_CXSIZEFRAME
+        title = (user32.GetSystemMetrics(4)              # SM_CYCAPTION
+                 + user32.GetSystemMetrics(33) + padded)  # SM_CYSIZEFRAME
+        border = max(1, round(user32.GetDpiForSystem() / 96))
+        return side, title, border
+    except Exception:
+        return None
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -579,6 +663,24 @@ def window_scaling(window) -> float:
     try:
         from customtkinter import ScalingTracker
         return float(ScalingTracker.get_window_scaling(window)) or 1.0
+    except Exception:
+        return 1.0
+
+
+def widget_scaling(widget) -> float:
+    """
+    Factor by which customtkinter enlarges the widgets of *widget*'s window:
+    their sizes, their fonts and the pictures given as CTkImage (DPI scaling
+    x user widget scaling).  1.0 on a display at 100 %, 1.75 at 175 %.
+
+    A size measured in screen pixels (winfo_width() and the like) is divided
+    by this factor before it is given to a customtkinter widget or CTkImage.
+
+    Returns 1.0 for a widget whose factor cannot be read.
+    """
+    try:
+        from customtkinter import ScalingTracker
+        return float(ScalingTracker.get_widget_scaling(widget)) or 1.0
     except Exception:
         return 1.0
 
