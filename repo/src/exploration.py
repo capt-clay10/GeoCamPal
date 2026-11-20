@@ -992,7 +992,11 @@ class TimeSeriesExplorerWindow(ctk.CTkToplevel):
         self.canvas_plot.get_tk_widget().pack(fill="both", expand=True)
 
         self.toolbar_frame = tk.Frame(self.top_panel, bg="black")
-        self.toolbar_frame.pack(fill="x")
+        # Packed at the bottom and before the plot: the panel gives room in
+        # the order of packing, so the toolbar gets its row first and the
+        # plot takes what is left.  Packed after the plot, the toolbar was
+        # not shown on a screen with too little height for the window.
+        self.toolbar_frame.pack(side="bottom", fill="x", before=self.plot_canvas_frame)
         self.toolbar = NavigationToolbar2Tk(
             self.canvas_plot, self.toolbar_frame)
         self.toolbar.update()
