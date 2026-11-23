@@ -3,8 +3,8 @@
   "module": "wave_runup",
   "settings_version": 1,
   "paths": {
-    "raw_image": "C:/your/local/path/GeoCamPal/examples/13_wave_runup/input/2025_10_04_08_19_raw_timestack_runup.png",
-    "annotation": "C:/your/local/path/GeoCamPal/examples/13_wave_runup/input/2025_10_04_08_19_raw_timestack_runup_mask.png",
+    "raw_image": "C:/your/local/path/GeoCamPal/examples/13_wave_runup/input/2026_03_22_14_25_raw_timestack.png",
+    "annotation": "C:/your/local/path/GeoCamPal/examples/13_wave_runup/input/2026_03_22_14_25_raw_timestack_runup_mask.png",
     "output_folder": "C:/your/local/path/GeoCamPal/examples/13_wave_runup/expected_outputs",
     "batch_raw_folder": "",
     "batch_mask_folder": ""
@@ -16,10 +16,10 @@
     "manual_time_interval": false,
     "manual_time_interval_value": "",
     "ig_threshold_hz": "0.05",
-    "beach_slope_deg": "10",
+    "beach_slope_deg": "3",
     "stockdon_enabled": true,
-    "stockdon_slope_deg": "10",
-    "stockdon_H0": "2",
-    "stockdon_T0": "5"
+    "stockdon_slope_deg": "4",
+    "stockdon_H0": "0.5",
+    "stockdon_T0": "15"
   }
 }

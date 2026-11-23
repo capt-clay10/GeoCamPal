@@ -108,7 +108,16 @@ Load the example's settings file first; then:
 10 DEM Generator          Generate next DEM (one day in this example).
 11 Profile & Hovmöller    Generate Hovmöller (Load Sample Image shows the profile line on an image).
 12 Burst Images Timestacker  Create Raw Timestack.
+                          To keep the download small, the 590 frames are cut to the area around the
+                          timestack line: 711 x 1028 px (about 118 m x 171 m) of the 2784 x 4530 px
+                          frames. The georeferencing is kept, so the line is the same on the ground; the
+                          timestack is identical to the one made from the full frames and is the input
+                          of example 13.
 13 Wave Run-up            The settings load the timestack and the mask; Calculate Run-up, then Export Run-up.
+                          The record is of 22 March 2026. Beach Slope (3°) is the slope along the timestack
+                          line, Slope (4°) the shore-normal foreshore slope; they differ because the line
+                          runs about 50° off shore-normal. The two slopes, H₀ (0.5 m, from a wave hindcast)
+                          and T₀ (15 s, the period of the swash) are rough estimates for that record.
 
 ---
 
