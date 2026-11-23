@@ -1,5 +1,5 @@
-customtkinter>=5.0
-Pillow>=9.0
+customtkinter>=5.1
+Pillow>=9.1
 opencv-python>=4.5
 numpy>=1.21
 pandas>=1.3
