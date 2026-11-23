@@ -33,9 +33,9 @@ authors:
     given-names: "Christian"
     affiliation: "Institute of Geosciences, Christian-Albrechts-Universität zu Kiel, Kiel, Germany"
 license: MIT
-version: 1.0.3
-date-released: 2026-10-07
-doi: 10.5281/zenodo.23185492
+version: 1.0.4
+date-released: 2026-11-23
+doi: 10.5281/zenodo.23082278
 identifiers:
   - type: doi
     value: 10.5281/zenodo.23082278
