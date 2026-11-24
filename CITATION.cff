@@ -17,7 +17,8 @@ abstract: >-
   interface. The software also provides specialised coastal-monitoring
   workflows, including support for shoreline extraction, timestack generation,
   wave run-up analysis, and waterline-based digital elevation model
-  construction. GeoCamPal reduces workflow fragmentation and lowers technical
+  construction. GeoCamPal reduces workflow fragmentation, promotes
+  standardisation, and lowers technical
   barriers to reproducible camera-derived environmental analysis. The workflow
   is developed and shown for coastal beach camera analyses, but may be used
   for other applications.
