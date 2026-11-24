@@ -48,7 +48,7 @@ repository-code: "https://github.com/capt-clay10/GeoCamPal"
 url: "https://github.com/capt-clay10/GeoCamPal"
 keywords:
   - geospatial image analysis
-  - feature labelling
+  - feature extraction
   - camera-based monitoring
   - machine-learning training data
   - graphical user interface

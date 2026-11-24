@@ -794,7 +794,7 @@ scikit-image
 
 The v1.0.4 Windows executable bundles Python 3.12.9, CustomTkinter 5.2.2, Pillow 11.2.1, OpenCV 4.11.0, NumPy 2.2.4, pandas 2.2.3, SciPy 1.15.2, Matplotlib 3.10.1, GDAL 3.10.3, Rasterio 1.4.3, GeoPandas 1.0.1, Shapely 2.1.0, PyProj 3.7.1, scikit-image 0.25.2, tifffile 2025.3.30 and utm 0.8.1.
 
-> **Note:** GDAL can require special installation steps on some platforms. Using `conda install -c conda-forge gdal` or pre-built wheels is often the easiest approach if `pip install GDAL` fails. Install `scikit-image` with the other requirements; without it, histogram-based brightness and colour harmonisation, mask skeletonisation and the automatic threshold suggestion in the profile preview of the Feature Identifier fall back to simpler methods without a message.
+> **Note:** GDAL can require special installation steps on some platforms. Using `conda install -c conda-forge gdal` or pre-built wheels is often the easiest approach if `pip install GDAL` fails. Install `scikit-image` with the other requirements; without it, histogram-based brightness and colour harmonisation, mask skeletonisation and the automatic threshold suggestion in the profile preview of the **Feature Identification and Labelling Tools** fall back to simpler methods without a message.
 
 ---
 
