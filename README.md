@@ -60,25 +60,25 @@ The software is designed for practical fixed-camera and coastal image-analysis w
 
 **New functions**
 
-- **Harmonise Images:** the quality filter can be limited to an area of interest (**Filter inside AOI only**, **Select AOI**), for example to leave out a bright sky or the sun; an interrupted filter run can be **continued**; every finished run writes a **`filter_summary.txt`** with the counts per rejection reason.
-- **Homography Generator:** **Compute Accuracy** reports, for each GCP, the distance for the matrix fitted on all GCPs and the **leave-one-out** distance, with mean, median, RMS and maximum, and saves them as `<name>_accuracy.csv`.
+- **Harmonise Images:** the quality filter can be limited to an area of interest (*Filter inside AOI only*, *Select AOI*), for example to leave out a bright sky or the sun; an interrupted filter run can be **continued**; every finished run writes a **`filter_summary.txt`** with the counts per rejection reason.
+- **Homography Generator:** *Compute Accuracy* reports, for each GCP, the distance for the matrix fitted on all GCPs and the **leave-one-out** distance, with mean, median, RMS and maximum, and saves them as `<name>_accuracy.csv`.
 - **Pixel to GCP:** GCP files with **projected Easting/Northing** coordinates are accepted, with the EPSG code from the file or a new field (0 for a local system).
 - **Lens Correction:** the report opens with a **Result** block, giving the lens distortion as the largest pixel shift with a **±** (from repeating the calibration without each photo in turn) and the checkerboard fit, and ends with an **Interpretation** section.
-- **Feature Identification and Labelling Tools:** each shape can carry its **own label and category ID**; images with several labels are also exported as a **multi-class dataset** (label-map PNG, GeoJSON with label attributes, COCO with all categories, `categories.json`). The shape editor has Delete Shape, Cancel, shape selection and full undo/redo.
+- **Feature Identification and Labelling Tools:** each shape can carry its **own label and category ID**; images with several labels are also exported as a **multi-class dataset** (label-map PNG, GeoJSON with label attributes, COCO with all categories, `categories.json`). The shape editor has *Delete Shape*, *Cancel*, shape selection and full undo/redo.
 - **Wave Run-up:** the Stockdon comparison states whether the observed R₂% is **vertical or horizontal** and reports the **observed significant swash height S** (4 × the standard deviation of the detrended swash).
-- **Georef Images:** zoomable preview panels, and a progress bar, the remaining time and **Stop optimisation** for the GCP optimisation.
+- **Georef Images:** zoomable preview panels, and a progress bar, the remaining time and *Stop optimisation* for the GCP optimisation.
 - **All tools:** windows and plots fit the screen at any display scaling; the launcher uses consistent tool names; all 13 examples were regenerated with v1.0.4.
 
 **Fixes that change results** (recompute affected outputs made with earlier versions)
 
-- **Wave Run-up:** with a PNG mask and **Land on left**, distance was counted from the wrong side, so the observed R₂% was taken on the backwash side.
+- **Wave Run-up:** with a PNG mask and *Land on left*, distance was counted from the wrong side, so the observed R₂% was taken on the backwash side.
 - **Create DEM:** DEM GeoTIFFs lay half a cell to the south-east; their origin is now half a cell further north-west (heights unchanged).
-- **Georef Images:** Homography and Camera Projection GeoTIFFs lay half an output pixel to the south-east; with an AOI, Thin Plate Spline and Polynomial outputs were shifted by the AOI offset. Thin Plate Spline and Polynomial now read GCP pixel coordinates as pixel centres, so their pixel values change slightly.
+- **Georef Images:** *Homography* and *Camera Projection* GeoTIFFs lay half an output pixel to the south-east; with an AOI, *Thin Plate Spline* and *Polynomial* outputs were shifted by the AOI offset. *Thin Plate Spline* and *Polynomial* now read GCP pixel coordinates as pixel centres, so their pixel values change slightly.
 - **Feature Identification and Labelling Tools:** detected vertices are now placed at pixel centres. They lay to the north-west by half a pixel of the reduced working copy plus half an image pixel: for an image of 4700 px with 0.25 m pixels, 0.6 m in Batch Processing and 1.1 m in Single Image. Single Image, Folder and Batch Processing now use the same 1200 px working copy, so masks and shape counts in Single Image and Folder Processing change.
-- **Feature Identification and Labelling Tools:** with **Create Line** and **Continue Line**, each new point was added at the nearer end of the line, so a line that turns back towards its start (such as a run-up line on a timestack) was stored and exported with its points in the wrong order (v1.0.1 to v1.0.3).
+- **Feature Identification and Labelling Tools:** with *Create Line* and *Continue Line*, each new point was added at the nearer end of the line, so a line that turns back towards its start (such as a run-up line on a timestack) was stored and exported with its points in the wrong order (v1.0.1 to v1.0.3).
 - **Pixel to GCP:** with the image zoomed in, a click could be stored as the neighbouring pixel; with the image zoomed out, the first of the image pixels under the cursor was stored instead of the middle one.
 - **FOV Generator:** the ground height under the camera was read from the wrong DEM cell, and the viewshed terrain lay half a DEM cell to the north-west.
-- **Wave Run-up:** with GeoJSON or COCO annotations and **Land on left**, distance is now counted from the image edge instead of the annotation's own most seaward point; the distance columns shift by a constant, while the detrended columns, the spectrum and the observed R₂% do not change.
+- **Wave Run-up:** with GeoJSON or COCO annotations and *Land on left*, distance is now counted from the image edge instead of the annotation's own most seaward point; the distance columns shift by a constant, while the detrended columns, the spectrum and the observed R₂% do not change.
 
 The full list of changes is in the [release notes](https://github.com/capt-clay10/GeoCamPal/releases).
 
@@ -104,7 +104,7 @@ The full list of changes is in the [release notes](https://github.com/capt-clay1
 
 The recommended option for most users is to download the latest Windows release from the [Releases](https://github.com/capt-clay10/GeoCamPal/releases) page.
 
-The release is a single-file executable for 64-bit Windows (about 294 MB for v1.0.4, built on Windows 11). It bundles Python and every dependency, including GDAL, PROJ, OpenCV and scikit-image with their data files, so no Python installation, environment variable or separate GDAL installation is required. The executable is unsigned, so Windows SmartScreen may show a warning on first launch; choose **More info → Run anyway**. The bundle is unpacked to a temporary folder at each start, so start-up takes a few seconds.
+The release is a single-file executable for 64-bit Windows (about 294 MB for v1.0.4, built on Windows 11). It bundles Python and every dependency, including GDAL, PROJ, OpenCV and scikit-image with their data files, so no Python installation, environment variable or separate GDAL installation is required. The executable is unsigned, so Windows SmartScreen may show a warning on first launch; choose *More info → Run anyway*. The bundle is unpacked to a temporary folder at each start, so start-up takes a few seconds.
 
 Settings files written by earlier releases load unchanged; see the release notes for what changed in each version.
 
@@ -244,11 +244,11 @@ The filtering stage can flag images affected by:
 - Partial obstruction
 - Failed, corrupt, truncated, or unreadable image files
 
-**Filter inside AOI only** limits the seven image checks to an area of interest, for example to leave out a bright sky or the sun. **Select AOI** opens one of the images: drag a rectangle or click the corners of a polygon. Thresholds given as a fraction are then shares of the AOI. The AOI is scaled to images of another size and saved with the settings; harmonisation and averaging still use the whole image. With the option off, the filter gives the same results as before.
+*Filter inside AOI only* limits the seven image checks to an area of interest, for example to leave out a bright sky or the sun. *Select AOI* opens one of the images: drag a rectangle or click the corners of a polygon. Thresholds given as a fraction are then shares of the AOI. The AOI is scaled to images of another size and saved with the settings; harmonisation and averaging still use the whole image. With the option off, the filter gives the same results as before.
 
 Every finished run writes **`filter_summary.txt`**: images checked, kept and rejected, the count and share per reason, the thresholds and AOI used, and the processing time. The same totals are stored in `bad_images.json`.
 
-**Continuing an interrupted run:** progress is saved to `filter_progress.jsonl` in the output folder at least every 30 seconds and when the run is stopped with **Reset** or by closing the window. When the filter is started again with the same folders and settings, a dialog offers to continue after the last saved image. The progress file is removed when the run finishes.
+**Continuing an interrupted run:** progress is saved to `filter_progress.jsonl` in the output folder at least every 30 seconds and when the run is stopped with *Reset* or by closing the window. When the filter is started again with the same folders and settings, a dialog offers to continue after the last saved image. The progress file is removed when the run finishes.
 
 #### Stage 2: Harmonise brightness
 
@@ -262,7 +262,7 @@ Colour harmonisation supports:
 - Per-channel LAB histogram matching
 - Iterative distribution transfer
 
-Both brightness and colour harmonisation have a **Preview**: it processes a random sample of the images, so the settings can be checked before the full run.
+Both brightness and colour harmonisation have a *Preview*: it processes a random sample of the images, so the settings can be checked before the full run.
 
 Averaging and lens correction list the images or folders they could not process, with the reason, in `averaging_skipped.txt` and `lens_correction_skipped.txt` next to the outputs. Brightness and colour harmonisation leave out images they cannot read; colour harmonisation names them in the console.
 
@@ -281,7 +281,7 @@ Averaging and lens correction list the images or folders they could not process,
 - `bad_images.txt`
 - `bad_images.json`
 - `filter_summary.txt`
-- `<input_folder>_filtered_good/`, with **Export good filtered images** ticked
+- `<input_folder>_filtered_good/`, with *Export good filtered images* ticked
 - `<input_folder>_brightness_harmonised/`
 - `<input_folder>_colour_harmonised/`
 - Additional workflow-specific folders such as averaged or lens-corrected outputs when those options are used
@@ -314,14 +314,14 @@ Supported criteria include:
 
 | Criterion | Description |
 |---|---|
-| **Peaks (Maxima)** | Select images within the search buffer of local maxima. |
-| **Troughs (Minima)** | Select images within the search buffer of local minima. |
-| **Above Threshold** | Select images where the time-series value is at or above a threshold. |
-| **Below Threshold** | Select images where the time-series value is at or below a threshold. |
-| **Near Target Value** | Select images near a user-defined value. |
-| **Spring Tide Peaks** | Select images near spring high-water events. |
-| **Neap Tide Peaks** | Select images near neap high-water events. |
-| **No Filter** | Record values without filtering by that series. |
+| *Peaks (Maxima)* | Select images within the search buffer of local maxima. |
+| *Troughs (Minima)* | Select images within the search buffer of local minima. |
+| *Above Threshold* | Select images where the time-series value is at or above a threshold. |
+| *Below Threshold* | Select images where the time-series value is at or below a threshold. |
+| *Near Target Value* | Select images near a user-defined value. |
+| *Spring Tide Peaks* | Select images near spring high-water events. |
+| *Neap Tide Peaks* | Select images near neap high-water events. |
+| *No Filter* | Record values without filtering by that series. |
 
 **Typical inputs**
 
@@ -360,7 +360,7 @@ Supported colour spaces:
 - LAB
 - Normalised RGB
 
-One **Run Analysis** produces all of these:
+One *Run Analysis* produces all of these:
 
 | Analysis | Description |
 |---|---|
@@ -405,7 +405,7 @@ The **Pixel to GCP** module lets users select the image pixel that corresponds t
 The GCP file may contain either:
 
 - **Latitude and longitude**, optionally converted to UTM with the EPSG code detected automatically; or
-- **Projected Easting and Northing** (or x and y), written unchanged, with the EPSG code taken from an `EPSG` column or the field **EPSG for Easting/Northing** (enter 0 for a local coordinate system). Files without a valid projected code are refused with a message that says what to change.
+- **Projected Easting and Northing** (or x and y), written unchanged, with the EPSG code taken from an `EPSG` column or the field *EPSG for Easting/Northing* (enter 0 for a local coordinate system). Files without a valid projected code are refused with a message that says what to change.
 
 The pixel under the cursor is stored at every zoom level; pixel coordinates count from 0 at the top-left pixel, and whole numbers are pixel centres.
 
@@ -448,7 +448,7 @@ The **Homography Generator** computes 3 × 3 homography matrices from pixel-to-w
 It supports:
 
 - RANSAC-based homography estimation on normalised point sets
-- **Compute Accuracy**: for each GCP, the distance for the matrix fitted on all GCPs and the **leave-one-out** distance (the matrix fitted again without that GCP), with mean, median, RMS and maximum for both. Leave-one-out needs at least 5 GCPs.
+- *Compute Accuracy*: for each GCP, the distance for the matrix fitted on all GCPs and the **leave-one-out** distance (the matrix fitted again without that GCP), with mean, median, RMS and maximum for both. Leave-one-out needs at least 5 GCPs.
 - Manual GCP exclusion
 - Advanced simulated-annealing search for GCP subset selection
 
@@ -481,17 +481,17 @@ The **Georef Images** module rectifies oblique images into a spatial reference s
 
 Supported methods include:
 
-- Homography
-- Camera Projection
-- Thin Plate Spline
-- Polynomial Ord-1 (first order)
-- Polynomial Ord-2 (second order)
+- *Homography*
+- *Camera Projection*
+- *Thin Plate Spline*
+- *Polynomial Ord-1* (first order)
+- *Polynomial Ord-2* (second order)
 
-The required inputs depend on the selected method. Homography uses a precomputed matrix, while camera projection and GCP-based methods require appropriate GCP and calibration information. For the GCP-based methods (Camera Projection, Thin Plate Spline, Polynomial), **Compute Accuracy** reports leave-one-out residuals, and **Optimise GCPs (SA)** looks for the two GCPs (one, when only five are in use) whose exclusion gives the lowest mean leave-one-out residual of the others (100,000 simulated-annealing steps, with a progress bar and the remaining time; the button turns into **Stop optimisation**) and adds them to **Exclude GCPs**. For a homography, these diagnostics are in the Homography Generator. All methods work in a projected coordinate reference system identified by an EPSG code; the code is read from the GCP CSV or the homography file when present.
+The required inputs depend on the selected method. *Homography* uses a precomputed matrix, while camera projection and GCP-based methods require appropriate GCP and calibration information. For the GCP-based methods (*Camera Projection*, *Thin Plate Spline*, *Polynomial*), *Compute Accuracy* reports leave-one-out residuals, and *Optimise GCPs (SA)* looks for the two GCPs (one, when only five are in use) whose exclusion gives the lowest mean leave-one-out residual of the others (100,000 simulated-annealing steps, with a progress bar and the remaining time; the button turns into *Stop optimisation*) and adds them to *Exclude GCPs*. For a homography, these diagnostics are in the Homography Generator. All methods work in a projected coordinate reference system identified by an EPSG code; the code is read from the GCP CSV or the homography file when present.
 
-The three preview panels show the original, the initial and the secondary georeferencing; each can be zoomed (mouse wheel) and moved. **Process All** writes what the secondary preview shows.
+The three preview panels show the original, the initial and the secondary georeferencing; each can be zoomed (mouse wheel) and moved. *Process All* writes what the secondary preview shows.
 
-Batch runs validate every written GeoTIFF and write files that fail the check again, up to 10 times. Tick **Skip existing** to resume an interrupted batch: images whose outputs are already present and valid are skipped. Files that still fail, or whose writing ended with an error, are listed in `georef_failures.txt`. An input image that cannot be read is skipped with an `[imread]` line in the console and is not in that list.
+Batch runs validate every written GeoTIFF and write files that fail the check again, up to 10 times. Tick *Skip existing* to resume an interrupted batch: images whose outputs are already present and valid are skipped. Files that still fail, or whose writing ended with an error, are listed in `georef_failures.txt`. An input image that cannot be read is skipped with an `[imread]` line in the console and is not in that list.
 
 **Typical inputs**
 
@@ -547,7 +547,7 @@ Feature identification tools include:
 - Undo/redo during editing
 - Georeferenced export where spatial information is available
 
-**Shape editor and labels.** Each shape can carry its own label and category ID; a label keeps its category ID across shapes and images, and the label catalogue is saved with the settings, so **Load Settings** carries it into a later session. Shapes are selected by clicking or with **Prev shape** / **Next shape**; **Delete Shape**, **Delete All**, **Cancel** (Esc) and undo/redo cover every action. A double-click ends a line, and a click near the first vertex closes a polygon.
+**Shape editor and labels.** Each shape can carry its own label and category ID; a label keeps its category ID across shapes and images, and the label catalogue is saved with the settings, so *Load Settings* carries it into a later session. Shapes are selected by clicking or with *Prev shape* / *Next shape*; *Delete Shape*, *Delete All*, *Cancel* (Esc) and undo/redo cover every action. A double-click ends a line, and a click near the first vertex closes a polygon.
 
 Detected vertices are placed at the centres of the mask pixels, in full-image coordinates, and all three modes work on the same working copy (at most 1200 px), so a batch run gives what the same settings showed on a single image.
 
@@ -578,7 +578,7 @@ The export buttons for training and test data write into a `Dataset/` folder ins
 
 An image with one label gives the same set of files, with the same names, as before. An export is refused, before any file is written, when two labels share a category ID.
 
-**Export as Overlay** writes `<image>_overlay.png` into the export folder itself. Batch Processing also writes straight into the export folder, without the `Dataset/` level:
+*Export as Overlay* writes `<image>_overlay.png` into the export folder itself. Batch Processing also writes straight into the export folder, without the `Dataset/` level:
 
 - `geojson/`
 - `shoreline overlay/`
@@ -683,7 +683,7 @@ Selection modes include:
 - Straight-line selector
 - Freehand-line selector
 
-Batch mode processes every burst folder under a root folder; with **Include sub-folders** on, folders at any depth are found and the input folder structure is mirrored in the output.
+Batch mode processes every burst folder under a root folder; with *Include sub-folders* on, folders at any depth are found and the input folder structure is mirrored in the output.
 
 **Typical inputs**
 
@@ -720,9 +720,9 @@ Supported annotation inputs:
 - GeoJSON annotation
 - COCO-style JSON annotation
 
-The module uses the pixel resolution and time interval embedded in timestack PNGs when available; a timestack without an embedded pixel resolution is read at 0.25 m per pixel. A **Time per row** readout states which value is in use and where it came from; a **Manual time interval** option overrides it, which is needed for timestacks made with versions before v1.0.2, which carry no time interval and are otherwise read as 1 s per row. Distance is measured along the transect from its seaward end; set **Land on left** when the land is on the left of the timestack. Batch mode pairs each timestack in one folder with its annotation in another and lists unpaired or failed files in `wave_runup_skipped.txt`.
+The module uses the pixel resolution and time interval embedded in timestack PNGs when available; a timestack without an embedded pixel resolution is read at 0.25 m per pixel. A *Time per row* readout states which value is in use and where it came from; a *Manual time interval* option overrides it, which is needed for timestacks made with versions before v1.0.2, which carry no time interval and are otherwise read as 1 s per row. Distance is measured along the transect from its seaward end; set *Land on left* when the land is on the left of the timestack. Batch mode pairs each timestack in one folder with its annotation in another and lists unpaired or failed files in `wave_runup_skipped.txt`.
 
-For the optional Stockdon comparison, tick **Compare to Stockdon Run-up** and enter the foreshore slope, the deep-water wave height H₀ and the peak period T₀. The comparison then reports the observed R₂%, the 98th percentile of the run-up series with its mean removed, and the **observed significant swash height** S, 4 × the standard deviation of that series (as defined by Stockdon et al., 2006), in the console, the run-up CSV and the comparison file. With a **Beach Slope** (the slope along the transect) the series, R₂% and S are vertical, otherwise horizontal; the outputs say which. A difference from the Stockdon R₂% is written only for a vertical R₂%.
+For the optional Stockdon comparison, tick *Compare to Stockdon Run-up* and enter the foreshore slope, the deep-water wave height H₀ and the peak period T₀. The comparison then reports the observed R₂%, the 98th percentile of the run-up series with its mean removed, and the **observed significant swash height** S, 4 × the standard deviation of that series (as defined by Stockdon et al., 2006), in the console, the run-up CSV and the comparison file. With a *Beach Slope* (the slope along the transect) the series, R₂% and S are vertical, otherwise horizontal; the outputs say which. A difference from the Stockdon R₂% is written only for a vertical R₂%.
 
 **Typical inputs**
 
@@ -802,9 +802,9 @@ The v1.0.4 Windows executable bundles Python 3.12.9, CustomTkinter 5.2.2, Pillow
 
 If you use GeoCamPal, please cite the archived release:
 
-> Soares, C. C., Noronha, A., & Winter, C. (2026). GeoCamPal (Version v1.0.4) [Computer software]. Zenodo. https://doi.org/10.5281/zenodo.23082278
+> Soares, C. C., Noronha, A., & Winter, C. (2026). GeoCamPal (Version v1.0.4) [Computer software]. Zenodo. https://doi.org/10.5281/zenodo.24460371
 
-The DOI [10.5281/zenodo.23082278](https://doi.org/10.5281/zenodo.23082278) represents all versions and always resolves to the latest release; the DOI of each version is listed on that Zenodo page. Citation metadata is also provided in [`CITATION.cff`](CITATION.cff).
+[10.5281/zenodo.24460371](https://doi.org/10.5281/zenodo.24460371) is the DOI of version 1.0.4. The DOI [10.5281/zenodo.23082278](https://doi.org/10.5281/zenodo.23082278) represents all versions and always resolves to the latest release; the DOI of each version is listed on that Zenodo page. Citation metadata is also provided in [`CITATION.cff`](CITATION.cff).
 
 ---
 

@@ -35,8 +35,11 @@ authors:
 license: MIT
 version: 1.0.4
 date-released: 2026-11-23
-doi: 10.5281/zenodo.23082278
+doi: 10.5281/zenodo.24460371
 identifiers:
+  - type: doi
+    value: 10.5281/zenodo.24460371
+    description: "DOI of version 1.0.4"
   - type: doi
     value: 10.5281/zenodo.23082278
     description: "Concept DOI for all versions"
