@@ -74,7 +74,7 @@ The software is designed for practical fixed-camera and coastal image-analysis w
 - **Wave Run-up:** with a PNG mask and *Land on left*, distance was counted from the wrong side, so the observed R₂% was taken on the backwash side.
 - **Create DEM:** DEM GeoTIFFs lay half a cell to the south-east; their origin is now half a cell further north-west (heights unchanged).
 - **Georef Images:** *Homography* and *Camera Projection* GeoTIFFs lay half an output pixel to the south-east; with an AOI, *Thin Plate Spline* and polynomial outputs were shifted by the AOI offset. *Thin Plate Spline* and the polynomial methods now read GCP pixel coordinates as pixel centres, so their pixel values change slightly.
-- **Feature Identification and Labelling Tools:** detected vertices are now placed at pixel centres. They lay to the north-west by half a pixel of the reduced working copy plus half an image pixel: for an image of 4700 px with 0.25 m pixels, 0.6 m in Batch Processing and 1.1 m in Single Image. Single Image, Folder and Batch Processing now use the same 1200 px working copy, so masks and shape counts in Single Image and Folder Processing change.
+- **Feature Identification and Labelling Tools:** detected vertices are now placed at pixel centres. They lay to the north-west by half a pixel of the reduced working copy plus half an image pixel: for an image of 4700 px with 0.25 m pixels, 0.6 m in **Batch Processing** and 1.1 m in **Single Image**. **Single Image**, **Folder Processing** and **Batch Processing** now use the same 1200 px working copy, so masks and shape counts in **Single Image** and **Folder Processing** change.
 - **Feature Identification and Labelling Tools:** with *Create Line* and *Continue Line*, each new point was added at the nearer end of the line, so a line that turns back towards its start (such as a run-up line on a timestack) was stored and exported with its points in the wrong order (v1.0.1 to v1.0.3).
 - **Pixel to GCP:** with the image zoomed in, a click could be stored as the neighbouring pixel; with the image zoomed out, the first of the image pixels under the cursor was stored instead of the middle one.
 - **FOV Generator:** the ground height under the camera was read from the wrong DEM cell, and the viewshed terrain lay half a DEM cell to the north-west.
@@ -149,12 +149,12 @@ To run an example, open the module, load its settings file, replace the placehol
 
 The launcher is the central hub for GeoCamPal. It groups the available tools into the following sections:
 
-- Pre-analysis Tools
-- Data Exploration Tools
-- Georeferencing Tools
-- Feature Identification and Labelling Tools
-- DEM Generator Tools
-- Timestacking Tools
+- **Pre-analysis Tools**
+- **Data Exploration Tools**
+- **Georeferencing Tools**
+- **Feature Identification and Labelling Tools**
+- **DEM Generator Tools**
+- **Timestacking Tools**
 
 Only one tool window is opened at a time to keep console output and GUI state manageable. Every module can save its full configuration as a `.json` settings file and reload it later. Tool windows open within the screen at any display scaling.
 
@@ -195,7 +195,7 @@ The **FOV Generator** visualises single- or multi-camera field-of-view footprint
 
 ### Lens Correction
 
-The **Lens Correction** module computes camera intrinsic parameters from checkerboard calibration images using OpenCV. It supports rectangular checkerboards where the cell width and cell height may differ. At least three images with detected corners are required; the module reports the frame coverage of the detected corners.
+The **Lens Correction Module** computes camera intrinsic parameters from checkerboard calibration images using OpenCV. It supports rectangular checkerboards where the cell width and cell height may differ. At least three images with detected corners are required; the module reports the frame coverage of the detected corners.
 
 The console and `calibration_report.txt` contain a **Result** block, and the closing message repeats its two headline statements:
 
@@ -229,7 +229,7 @@ The report ends with an **Interpretation** section that says whether the photos 
 
 ### Harmonise Images
 
-The **Harmonise Images** module provides a multi-stage image quality and correction workflow. Original images are not overwritten.
+The **Harmonise Images Module** provides a multi-stage image quality and correction workflow. Original images are not overwritten.
 
 #### Stage 1: Filter bad images
 
@@ -308,7 +308,7 @@ Averaging and lens correction list the images or folders they could not process,
 
 ### Time Series Analysis
 
-The **Time Series Analysis** module matches images to one or more hydrodynamic or environmental time series using timestamps extracted from image filenames. Up to five time series can be combined using AND logic.
+The **Time Series Analysis Module** matches images to one or more hydrodynamic or environmental time series using timestamps extracted from image filenames. Up to five time series can be combined using AND logic.
 
 Supported criteria include:
 
@@ -400,7 +400,7 @@ One *Run Analysis* produces all of these:
 
 ### Pixel to GCP
 
-The **Pixel to GCP** module lets users select the image pixel that corresponds to each surveyed ground-control point. GCP photographs are paired with their points by a GCP identifier such as `GCP_12` in the file name and in the `GCP_ID` column, and the module supports flexible GCP CSV column names.
+The **Pixel to GCP Module** lets users select the image pixel that corresponds to each surveyed ground-control point. GCP photographs are paired with their points by a GCP identifier such as `GCP_12` in the file name and in the `GCP_ID` column, and the module supports flexible GCP CSV column names.
 
 The GCP file may contain either:
 
@@ -477,7 +477,7 @@ It supports:
 
 ### Georef Images
 
-The **Georef Images** module rectifies oblique images into a spatial reference system. It supports several georeferencing methods, not only homography.
+The **Georef Images Module** rectifies oblique images into a spatial reference system. It supports several georeferencing methods, not only homography.
 
 Supported methods include:
 
@@ -487,7 +487,7 @@ Supported methods include:
 - *Polynomial Ord-1* (first order)
 - *Polynomial Ord-2* (second order)
 
-The required inputs depend on the selected method. *Homography* uses a precomputed matrix, while camera projection and GCP-based methods require appropriate GCP and calibration information. For the GCP-based methods (*Camera Projection*, *Thin Plate Spline*, *Polynomial Ord-1*, *Polynomial Ord-2*), *Compute Accuracy* reports leave-one-out residuals, and *Optimise GCPs (SA)* looks for the two GCPs (one, when only five are in use) whose exclusion gives the lowest mean leave-one-out residual of the others (100,000 simulated-annealing steps, with a progress bar and the remaining time; the button turns into *Stop optimisation*) and adds them to *Exclude GCPs*. For a homography, these diagnostics are in the Homography Generator. All methods work in a projected coordinate reference system identified by an EPSG code; the code is read from the GCP CSV or the homography file when present.
+The required inputs depend on the selected method. *Homography* uses a precomputed matrix, while camera projection and GCP-based methods require appropriate GCP and calibration information. For the GCP-based methods (*Camera Projection*, *Thin Plate Spline*, *Polynomial Ord-1*, *Polynomial Ord-2*), *Compute Accuracy* reports leave-one-out residuals, and *Optimise GCPs (SA)* looks for the two GCPs (one, when only five are in use) whose exclusion gives the lowest mean leave-one-out residual of the others (100,000 simulated-annealing steps, with a progress bar and the remaining time; the button turns into *Stop optimisation*) and adds them to *Exclude GCPs*. For a homography, these diagnostics are in the **Homography Generator**. All methods work in a projected coordinate reference system identified by an EPSG code; the code is read from the GCP CSV or the homography file when present.
 
 The three preview panels show the original, the initial and the secondary georeferencing; each can be zoomed (mouse wheel) and moved. *Process All* writes what the secondary preview shows.
 
@@ -578,7 +578,7 @@ The export buttons for training and test data write into a `Dataset/` folder ins
 
 An image with one label gives the same set of files, with the same names, as before. An export is refused, before any file is written, when two labels share a category ID.
 
-*Export as Overlay* writes `<image>_overlay.png` into the export folder itself. Batch Processing also writes straight into the export folder, without the `Dataset/` level:
+*Export as Overlay* writes `<image>_overlay.png` into the export folder itself. **Batch Processing** also writes straight into the export folder, without the `Dataset/` level:
 
 - `geojson/`
 - `shoreline overlay/`
@@ -598,7 +598,7 @@ An image with one label gives the same set of files, with the same names, as bef
 
 ### Create DEM
 
-The **Create DEM** module creates digital elevation models from shoreline GeoJSON files and water-level data.
+The **Create DEM Module** creates digital elevation models from shoreline GeoJSON files and water-level data.
 
 The module uses PCA-aligned cross-shore transect interpolation to reduce artefacts that can occur with direct triangulation at contour edges. It supports both daily and composite DEM workflows. Each height is written to the GeoTIFF cell centred on its position. The DEM inherits the coordinate reference system of the shoreline files and the vertical datum of the water-level record; no datum transformations are applied, so all inputs must share one projected CRS and one vertical datum.
 
@@ -641,7 +641,7 @@ For composite DEM mode:
 
 ### Profile & Hovmöller
 
-The **Profile & Hovmöller** module extracts pixel profiles along a user-defined line across a folder of images. Users can draw a profile line interactively or enter pixel coordinates manually.
+The **Profile & Hovmöller Module** extracts pixel profiles along a user-defined line across a folder of images. Users can draw a profile line interactively or enter pixel coordinates manually.
 
 The module can generate either an RGB Hovmöller diagram or an intensity Hovmöller diagram depending on the selected mode.
 
@@ -698,7 +698,7 @@ Batch mode processes every burst folder under a root folder; with *Include sub-f
 
 - `<first_timestamp>_raw_timestack.png`
 
-The output PNG stores timestack metadata: selector information, the pixel resolution (`pixel_resolution`), the time interval per row (`time_interval`) and the stack duration (`duration_s`). The Wave Run-up module reads the pixel resolution and the time interval automatically.
+The output PNG stores timestack metadata: selector information, the pixel resolution (`pixel_resolution`), the time interval per row (`time_interval`) and the stack duration (`duration_s`). The **Wave Run-up Module** reads the pixel resolution and the time interval automatically.
 
 <p align="center">
   <img src="examples/12_burst_images_time-stacker/GUI_screenshot_burstimagetimestacker.png" width="90%" alt="Burst Images Timestacker">
@@ -712,7 +712,7 @@ The output PNG stores timestack metadata: selector information, the pixel resolu
 
 ### Wave Run-up
 
-The **Wave Run-up** module extracts the run-up edge from annotated timestack imagery and exports time-distance data. It supports multiple annotation formats, all of which the Feature Identification and Labelling Tools can export.
+The **Wave Run-up Module** extracts the run-up edge from annotated timestack imagery and exports time-distance data. It supports multiple annotation formats, all of which the **Feature Identification and Labelling Tools** can export.
 
 Supported annotation inputs:
 
