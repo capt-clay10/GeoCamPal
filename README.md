@@ -10,7 +10,7 @@
   <strong>A modular GUI-driven toolbox for geospatial image processing, camera pre-processing, georeferencing, feature labelling, semi-automatic feature detection, machine-learning integration, DEM generation, timestacking, and wave run-up analysis.</strong>
 </p>
 
-<img width="5534" height="2213" alt="Graphical_abstract_GeoCamPal" src="https://github.com/user-attachments/assets/b265395b-20b0-432b-907c-d1006dae8621" />
+<img src="docs/images/graphical_abstract.jpg" width="100%" alt="Graphical_abstract_GeoCamPal" />
 
 
 ---
